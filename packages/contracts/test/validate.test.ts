@@ -80,6 +80,14 @@ describe('checkPlans', () => {
     if (!result.ok) expect(result.errors.join('\n')).toContain('does not list "salon"');
   });
 
+  it('allows a proposed price only when it is declared as a lever, never as a fact', () => {
+    const withPrice = (levers: unknown[]) => ({ ...good, plans: [plan(1, { actions: ['Charge $10 for a styling add-on'], levers }), plan(2), plan(3)] });
+    expect(checkPlans(withPrice([{ label: 'Add-on price', value: 10, unit: 'usd' }]), metrics).ok).toBe(true);
+    const undeclared = checkPlans(withPrice([]), metrics);
+    expect(undeclared.ok).toBe(false);
+    if (!undeclared.ok) expect(undeclared.errors.join('\n')).toContain('$10');
+  });
+
   it('rejects duplicate ranks and malformed output', () => {
     expect(checkPlans({ ...good, plans: [plan(1), plan(1), plan(3)] }, metrics).ok).toBe(false);
     expect(checkPlans({ plans: [] }, metrics).ok).toBe(false);

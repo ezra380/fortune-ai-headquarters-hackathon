@@ -80,11 +80,20 @@ export const Evidence = z.object({
 export const Projection = z.object({
   label: z.string().min(1).max(160),
   baseMetricId: MetricId,
-  factor: z.number().finite().min(-10).max(10),
+  // A factor may be a rate (1.2 = +20%) or a count ("50 more bookings × average ticket").
+  factor: z.number().finite().min(-1000).max(1000),
   result: z.number().finite(),
   assumption: z.string().min(1).max(300),
 });
 export type Projection = z.infer<typeof Projection>;
+
+/** A choice the plan proposes (a price, a discount, a budget, a number of slots): never a fact. */
+export const Lever = z.object({
+  label: z.string().min(1).max(120),
+  value: z.number().finite(),
+  unit: z.enum(['usd', 'percent', 'count', 'ratio', 'days', 'hours']),
+});
+export type Lever = z.infer<typeof Lever>;
 
 export const Plan = z.object({
   rank: z.number().int().min(1).max(3),
@@ -93,6 +102,7 @@ export const Plan = z.object({
   actions: z.array(z.string().min(1).max(200)).min(1).max(6),
   evidence: z.array(Evidence).min(1).max(12),
   projections: z.array(Projection).max(6),
+  levers: z.array(Lever).max(6).default([]),
   test: z.string().min(1).max(300),
   stopLoss: z.string().min(1).max(300),
   businesses: z.array(BusinessUnit).min(1).max(3),

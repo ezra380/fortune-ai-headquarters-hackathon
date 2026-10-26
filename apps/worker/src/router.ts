@@ -28,9 +28,11 @@ export async function routeText(
     model: routerModel,
     system: SYSTEM,
     user: JSON.stringify({ message: text.slice(0, 1600) }),
-    maxTokens: 400,
+    maxTokens: Number(process.env.ROUTER_MAX_TOKENS ?? 600),
     temperature: 0,
     json: true,
+    // Routing is classification: thinking off is ~25x faster and cheaper with an equal answer.
+    thinking: false,
   });
   const tokens = r.inputTokens + r.outputTokens;
   try {

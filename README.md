@@ -1,34 +1,77 @@
-# Fortune AI HQ — Unified AI Workforce
+# Fortune AI Headquarters
 
-Private, isolated hackathon extension of Ezra’s existing agentic platform. The goal is a supervised customer-service analysis workflow with shared evidence and persistent findings. Existing business applications remain separate.
+**A company brain and AI assistants for a family-run wig business: a salon and an online store, kept
+separate.** Every AI tool reads the same brain through one MCP door. Assistants propose; people decide
+with one-time codes. Built for the Open Agent Hackathon 2026, Track 02: "The Agent That Can Explain
+Why".
 
-## Current status
+> All data here is synthetic. No customer, staff or family records and no production credentials.
 
-This repository is a starter scaffold, not a completed sponsor integration. User-reported local verification: Cursor, Claude Code, and Codex each queried the same Docker-hosted Zetaris instance over REST; SELECT 1 and database discovery passed. Available databases: NY_TAXI, POKEAPI_REST, TPCDS_DB. Those credentials and local services are not installed in this repository. Meterless, Nemotron, Supabase orchestration, and the demo interface remain to be implemented.
+## The flagship workflow
 
-## Smallest complete demo
+The owner texts his assistant: *"Ask the finance assistant for three aggressive plans to double profit this
+month."*
+1. The SMS webhook stores the task once and answers "working on it" in about a second.
+2. A front door on **NVIDIA Nemotron Lightning** routes the text and flags the risks.
+3. The finance assistant pulls numbers through **Zetaris**, a federated view over separately owned salon,
+   online and marketing sources.
+4. It recalls past decisions from **Meterless H-MEM** and asks **Nemotron 3 Ultra** for three plans.
+5. A validator rejects any plan whose numbers don't trace to a Zetaris metric, a computed projection, or
+   a declared proposed setting.
+6. The owner forwards one plan with `SEND <n> <code>`, and the finance owner answers `CONFIRM <code>` or
+   `DECLINE <code>`.
+7. Everything is recorded in the **Meterless World Model**, and the decision becomes long-term memory.
+8. Every AI tool can read the same brain through **Cloudflare Code Mode**: one typed `code` tool, run in a
+   sandbox.
 
-1. Query synthetic repair tickets, orders, and service conversations through Zetaris.
-2. Retrieve previous findings through a verified Meterless integration.
-3. Ask NVIDIA Nemotron to identify missed follow-ups and recurring service problems, citing record IDs.
-4. Save findings and evidence; propose a draft response and coaching recommendation.
-5. Record a human approval decision. No messages or business changes execute automatically.
+Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what: [`docs/LANES.md`](docs/LANES.md)
 
-## Intended structure
+## Status (live vs mock, updated as lanes land)
 
-- src/integrations/: separate adapters for Zetaris, Meterless, and Nemotron.
-- src/workflows/: orchestration and approval boundaries.
-- data/synthetic/: invented records only.
-- docs/: architecture, integration verification, and demo instructions.
-- AGENTS.md: shared instructions for coding assistants.
-- .env.example: placeholders; real configuration stays local.
+| Piece | State | Proof |
+|---|---|---|
+| Queue, mailbox, approval codes, outbox, receipts, spending cap (Supabase) | **Working** on local Supabase | 10 real-Postgres tests: duplicates, concurrent claims, leases, code refusals and lockout, cap under concurrency, anon sees nothing |
+| SMS webhook (Supabase Edge Function) | **Built**; not yet deployed to a cloud project | Twilio's documented signature vector passes; tamper tests |
+| Shared record (Meterless World Model) | **Working** | Persists, replays, idempotent re-ingest |
+| Assistant memory (Meterless H-MEM) | **Working** | Unapproved ideas never recalled as decisions; declined ideas flagged |
+| Front door (Nemotron 3.5 Lightning, thinking off) | **Live-tested** | Routed correctly in 0.5–1.5 s |
+| Plan writer (Nemotron 3 Ultra, thinking on) + number validator | **Live-tested on sample metrics** | Passed validation on the first attempt in 82 s; every run recorded in [`docs/research/live-runs-2026-10-26.md`](docs/research/live-runs-2026-10-26.md). The validator proves numbers are traceable, not that assumptions are wise; people approve. |
+| Cloudflare Code Mode over the brain MCP server | **Working** | QuickJS sandbox: no network, files or timers; deadline, memory and tool-call caps; one `code` call answers a multi-tool script |
+| Full chain request → plans → forward → decision | **Working** with models and data **mocked** | End-to-end test on the real local database and the real Meterless engines |
+| Zetaris adapter (lane B) | In progress | — |
+| PDF, printing, live SMS sending (lane C) | In progress; SMS runs as a labeled dry run until connected | — |
 
-## Development handoff
+## Quickstart (WSL / Linux, Node 24, Docker)
 
-Clone this repository in Ubuntu alongside, not inside, ~/zetaris-platform and ~/getting-started. Read AGENTS.md first. Inspect the existing headquarters only when access and its location are supplied. Reuse narrowly reviewed components rather than copying a private repository or its Git history. Do not rebuild the headquarters.
+```bash
+npm install
+bash scripts/setup-meterless.sh        # pinned Meterless engines → .local/meterless
+cp .env.example .env.local && chmod 600 .env.local   # fill in NEMOTRON_API_KEY etc.
+npm run db:start                        # local Supabase (applies migrations + synthetic seed)
+npm test                                # unit, real-database and end-to-end tests
+npx tsx scripts/try-live-plans.ts       # LIVE Nemotron routing + plans on sample metrics
+npm run worker -- --once                # drain the queue once (dry-run SMS without Twilio)
+npx tsx packages/codemode/src/serve.ts  # the brain MCP server behind Code Mode (stdio)
+```
 
-First implementation milestone: document reusable interfaces, verify current official sponsor APIs, then implement one end-to-end workflow with synthetic data and tests for approval and evidence provenance. Treat mocked runs as mocked and live runs as live.
+Connect the brain to Claude Code: `claude mcp add fortune-brain -- npx tsx packages/codemode/src/serve.ts`.
+Cursor, Codex and Gemini CLI use the same command as a stdio MCP server.
 
-## Submission preparation
+## Safety rules (each has a test)
 
-Confirm current event rules, eligibility, deadline, required sponsor products, repository access, and licensing before submission. Prepare a reproducible quickstart, actual integration evidence, a short demo video, and slides. No event requirements or sponsor compatibility are independently verified by this scaffold. Keep this repository private until Ezra explicitly approves a visibility change.
+- **Synthetic data only.**
+- **The webhook never calls a model.**
+- **Each task runs once.**
+- **Approvals only by code:** codes are single-use, hashed, tied to one person and one proposal, and expire
+  in 15 minutes; five wrong tries lock them; a plain "yes" never counts.
+- **No numbers without a source.**
+- **Memory holds only what a person decided.**
+- **Model-written code runs only in the sandbox.**
+- **Spending caps.**
+- **Honest receipts for every step.**
+
+## Pre-existing components (declared)
+
+- **Meterless open engines** (Apache-2.0), fetched at a pinned commit, not copied.
+- **The idea** of the owner's existing internal platform. **No code, schema or data** from it is in this
+  repository.

@@ -4,7 +4,8 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 // "No invented numbers": every number a plan states must trace to a Zetaris metric.
 //  - Evidence must equal the metric it cites (within 0.5%).
 //  - A projection must equal its base metric × its factor (within 1%).
-//  - Money and percentages in the prose must be one of the plan's cited or projected numbers;
+//  - Money and percentages in the prose must be one of the plan's cited or projected numbers, or a
+//    declared lever (a proposed price, discount, budget or count, which is a choice, not a fact);
 //    bare numbers of 100 or more are checked too. Durations ("90 days") and years are not claims.
 //  - A plan declares which businesses it touches, and it must cite numbers from exactly those.
 //    Salon and online are never summed in prose unless a labeled `m:combined.*` metric exists.
@@ -73,6 +74,12 @@ function checkPlan(
     }
     values.push(m.value, p.result);
     percents.push(p.factor * 100, (p.factor - 1) * 100, (1 - p.factor) * 100);
+  }
+
+  // Levers are the plan's own proposed settings: allowed in the text, shown as choices, never as facts.
+  for (const l of plan.levers) {
+    if (l.unit === 'percent') percents.push(l.value);
+    else values.push(l.value);
   }
 
   const declared = new Set(plan.businesses);

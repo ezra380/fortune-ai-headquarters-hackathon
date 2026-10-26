@@ -60,6 +60,11 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
               { role: 'system', content: input.system },
               { role: 'user', content: input.user },
             ],
+            // NVIDIA-hosted Nemotron honors this switch; measured: routing 0.6 s / 41 tokens with
+            // thinking off vs 14 s / 1,436 tokens with it on.
+            ...(input.thinking === false && opts.provider === 'nvidia'
+              ? { chat_template_kwargs: { enable_thinking: false } }
+              : {}),
           }),
         });
       } catch (error) {
@@ -129,6 +134,8 @@ export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fet
     baseUrl: 'https://integrate.api.nvidia.com/v1',
     apiKey: env.NEMOTRON_API_KEY ?? '',
     budget,
+    // Ultra writing three plans with reasoning can take minutes; routing calls finish in about a second.
+    timeoutMs: Number(env.MODEL_TIMEOUT_MS ?? 300_000),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
   });
   const xai = env.XAI_API_KEY

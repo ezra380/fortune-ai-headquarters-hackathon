@@ -67,7 +67,15 @@ async function inbound(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
     return done;
   }
   const started = deps.now();
-  const routed = await routeText(deps.models.nvidia, deps.models.routerModel, payload.body, person.assistant_id);
+  let routed;
+  try {
+    routed = await routeText(deps.models.nvidia, deps.models.routerModel, payload.body, person.assistant_id);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'router failed';
+    await receipt(deps, { runId, taskId: task.id, step: 'front-door', assistant: person.assistant_id, started, outcome: 'failed', model: deps.models.routerModel, detail });
+    await text(deps, person, person.assistant_id, "I couldn't reach the routing model just now, so nothing was started. Please try again in a minute.", `reply:${task.id}`);
+    return fail(`front door failed: ${detail}`);
+  }
   await receipt(deps, {
     runId, taskId: task.id, step: 'front-door', assistant: person.assistant_id, started, model: routed.model,
     outcome: routed.valid ? 'ok' : 'refused',
