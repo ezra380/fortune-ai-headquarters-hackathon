@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Assistant runtime: claim loop, front door, assistant handlers, approvals. Owner: lane A (Claude).",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@fahq/contracts": "*" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fahq/contracts": "*",
+    "@supabase/supabase-js": "^2.118.0",
+    "@fahq/brain": "*",
+    "@fahq/models": "*"
+  }
 }
