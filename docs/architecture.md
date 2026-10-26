@@ -74,7 +74,8 @@ credentials, are ever used here.
 2. **The webhook is fast and dumb.** Valid Twilio signature or 403. Unknown sender gets a refusal and no
    task. A duplicate `MessageSid` makes one task. It never calls a model.
 3. **Each task runs once.** Claimed with a lease and `SKIP LOCKED`, at most 3 attempts, then `failed` with
-   a reason. `CANCEL` works.
+   a reason. Twilio's own keywords (STOP, CANCEL, START, HELP and the rest) are left to Twilio and never
+   become a task; an unused approval code simply expires.
 4. **Proposals, never orders.** Only a person's code turns a proposal into a decision. A code is 4+
    digits, hashed, single-use, bound to that person and that proposal, and expires after 15 minutes. A
    plain "yes" never confirms.

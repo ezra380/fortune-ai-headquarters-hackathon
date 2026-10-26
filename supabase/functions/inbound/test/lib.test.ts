@@ -34,6 +34,14 @@ describe('parseInbound', () => {
     expect(parseInbound(ok)).toEqual({ messageSid: ok.MessageSid, from: ok.From, to: ok.To, body: 'Plans please' });
   });
 
+  it("leaves Twilio's own keywords to Twilio (CANCEL would opt the owner out)", () => {
+    for (const word of ['STOP', 'cancel', 'Cancel.', ' unsubscribe ', 'START', 'yes', 'HELP', 'quit']) {
+      expect(parseInbound({ ...ok, Body: word })).toBeNull();
+    }
+    expect(parseInbound({ ...ok, Body: 'Plans please', OptOutType: 'STOP' })).toBeNull();
+    expect(parseInbound({ ...ok, Body: 'Cancel the Mazali promotion idea' })).not.toBeNull();
+  });
+
   it('refuses malformed ids, numbers, empty and oversized bodies', () => {
     expect(parseInbound({ ...ok, MessageSid: 'SM123' })).toBeNull();
     expect(parseInbound({ ...ok, From: '15550111001' })).toBeNull();

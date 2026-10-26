@@ -45,8 +45,26 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 export type InboundSms = { messageSid: string; from: string; to: string; body: string };
 
-/** The fields we keep from Twilio's form post, or null when anything is malformed. */
+// Twilio's default opt-out, opt-in and help keywords. Twilio itself acts on them (STOP or CANCEL
+// opts the sender out of the number) and answers them, so the assistants never treat them as a
+// request or a command, and never reply on top of Twilio's own answer.
+export const TWILIO_KEYWORDS = new Set([
+  'STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'OPTOUT', 'REVOKE',
+  'START', 'YES', 'UNSTOP', 'HELP', 'INFO',
+]);
+
+/** True when Twilio handles this text itself (flagged with OptOutType, or one of its keywords). */
+export function isTwilioKeyword(params: Readonly<Record<string, string>>): boolean {
+  if ((params.OptOutType ?? '') !== '') return true;
+  return TWILIO_KEYWORDS.has((params.Body ?? '').trim().replace(/[.!]+$/, '').toUpperCase());
+}
+
+/**
+ * The fields we keep from Twilio's form post, or null when anything is malformed or the text is one
+ * of Twilio's own keywords.
+ */
 export function parseInbound(params: Readonly<Record<string, string>>): InboundSms | null {
+  if (isTwilioKeyword(params)) return null;
   const messageSid = params.MessageSid ?? params.SmsSid ?? '';
   const from = params.From ?? '';
   const to = params.To ?? '';

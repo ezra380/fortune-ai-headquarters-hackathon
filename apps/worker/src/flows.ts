@@ -165,9 +165,6 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
       await reply(`Open items for your assistant: ${await deps.store.openTaskCount(person.assistant_id)}.`);
       return done;
     }
-    case 'cancel':
-      await reply('Cancelling by text arrives in the next build; nothing has been changed.');
-      return done;
     case 'send':
       return forwardPlan(command, person, task, deps, runId, started, reply);
     case 'confirm':
