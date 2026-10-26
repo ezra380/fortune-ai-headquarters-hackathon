@@ -31,7 +31,8 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what:
 | Piece | State | Proof |
 |---|---|---|
 | Queue, mailbox, approval codes, outbox, receipts, spending cap (Supabase) | **Working** on local Supabase | 10 real-Postgres tests: duplicates, concurrent claims, leases, code refusals and lockout, cap under concurrency, anon sees nothing |
-| SMS webhook (Supabase Edge Function) | **Built**; not yet deployed to a cloud project | Twilio's documented signature vector passes; tamper tests |
+| SMS webhook (Supabase Edge Function) | **Live** on the `fortune-ai-hq` cloud project; three assistant numbers point at it | Signed probe 2026-10-26: unsigned or forged 403; unknown sender and STOP silent; registered sender "Got it" in 0.3 s; a Twilio retry is not answered twice |
+| Adversarial review (172 agents) | **Done**; all 7 medium findings fixed | [`docs/research/review-2026-10-26.md`](docs/research/review-2026-10-26.md) |
 | Shared record (Meterless World Model) | **Working** | Persists, replays, idempotent re-ingest |
 | Assistant memory (Meterless H-MEM) | **Working** | Unapproved ideas never recalled as decisions; declined ideas flagged |
 | Front door (Nemotron 3.5 Lightning, thinking off) | **Live-tested** | Routed correctly in 0.5–1.5 s |
@@ -70,7 +71,8 @@ Cursor, Codex and Gemini CLI use the same command as a stdio MCP server.
 - **No numbers without a source.**
 - **Memory holds only what a person decided.**
 - **Model-written code runs only in the sandbox.**
-- **Spending caps.**
+- **Spending caps:** a daily model-token cap per worker process that fails closed (not yet shared across
+  restarts).
 - **Honest receipts for every step.**
 
 ## Pre-existing components (declared)

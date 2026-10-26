@@ -18,6 +18,13 @@ describe('parseCommand', () => {
     }
     expect(parseCommand('Give me three plans to double profit')).toBeNull();
   });
+
+  it('keeps a code next to an approval word away from the model, and lets requests through', () => {
+    expect(parseCommand('ok send 2 482913 thanks')?.kind).toBe('malformed'); // used to reach the router with the code
+    expect(parseCommand('Yes CONFIRM 654321 please')?.kind).toBe('malformed');
+    expect(parseCommand('Send me three plans to double profit')).toBeNull(); // used to be swallowed as malformed
+    expect(parseCommand('Confirm what the salon made last month')).toBeNull();
+  });
 });
 
 // MOCK memory: no past decisions.
