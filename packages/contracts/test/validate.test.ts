@@ -170,6 +170,12 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
     rejects(both, 'sum or difference');
   });
 
+  it('reads "combined" about levers as fine, and a projection naming both businesses as a blend', () => {
+    const p = { label: 'Projected online gross profit', baseMetricId: 'm:online.ads.spend', factor: 1.2, result: 2160, assumption: 'The combined effect of more ads and email' };
+    expect(checkPlans(withPlan1({ projections: [p] }), metrics).ok).toBe(true); // live Nemotron wording
+    rejects(withPlan1({ projections: [{ ...p, label: 'Salon and online revenue together' }] }), 'reads as a salon + online figure');
+  });
+
   it('refuses one sentence that mixes salon and online numbers', () => {
     rejects(withPlan1({
       evidence: [{ metricId: 'm:online.revenue.mazali', value: 12400 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }],

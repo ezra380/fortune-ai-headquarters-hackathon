@@ -39,10 +39,15 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
       const day = today();
       if (opts.budget.day !== day) Object.assign(opts.budget, { day, used: 0 });
       const worstCase = estimateTokens(input.system) + estimateTokens(input.user) + input.maxTokens;
-      if (opts.budget.used + worstCase > opts.budget.dailyTokens) {
+      // Written so that NaN anywhere refuses the call instead of allowing it.
+      if (!(opts.budget.used + worstCase <= opts.budget.dailyTokens)) {
         throw new ModelError(`daily token budget reached (${opts.budget.used} of ${opts.budget.dailyTokens})`, 'budget');
       }
       opts.budget.used += worstCase;
+      // A call the provider refused before doing any work gives its reservation back; a timeout keeps it.
+      const release = () => {
+        opts.budget.used -= worstCase;
+      };
 
       let response: Response;
       try {
@@ -69,9 +74,11 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
         });
       } catch (error) {
         const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+        if (!timedOut) release();
         throw new ModelError(`${opts.provider} request ${timedOut ? 'timed out' : 'failed'}; no fallback model was used`, timedOut ? 'timeout' : 'http');
       }
       if (response.status !== 200) {
+        release();
         throw new ModelError(`${opts.provider} returned HTTP ${response.status}; response body withheld`, 'http');
       }
       let body: {
@@ -88,9 +95,13 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
       if (choice?.finish_reason !== 'stop' || typeof choice.message?.content !== 'string') {
         throw new ModelError(`${opts.provider} answer was incomplete (${choice?.finish_reason ?? 'no choice'})`, 'incomplete');
       }
-      const inputTokens = body.usage?.prompt_tokens ?? 0;
-      const outputTokens = body.usage?.completion_tokens ?? 0;
-      opts.budget.used += inputTokens + outputTokens - worstCase;
+      const count = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null);
+      const reportedIn = count(body.usage?.prompt_tokens);
+      const reportedOut = count(body.usage?.completion_tokens);
+      const inputTokens = reportedIn ?? 0;
+      const outputTokens = reportedOut ?? 0;
+      // Missing or malformed usage keeps the worst-case reservation instead of counting the call as free.
+      if (reportedIn !== null && reportedOut !== null) opts.budget.used += inputTokens + outputTokens - worstCase;
       const price = opts.pricePerMillion?.[input.model];
       const costUsd = price ? (inputTokens * price[0] + outputTokens * price[1]) / 1_000_000 : 0;
       return {
@@ -127,15 +138,24 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
+/** A positive whole number from a setting, or its default; anything else stops startup (never a silent NaN). */
+export function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw.replaceAll('_', ''));
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${name} must be a positive whole number`);
+  return n;
+}
+
 export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fetch } = {}) {
-  const budget: TokenBudget = { dailyTokens: Number(env.MODEL_DAILY_TOKENS ?? 2_000_000), used: 0, day: '' };
+  const budget: TokenBudget = { dailyTokens: positiveInt(env, 'MODEL_DAILY_TOKENS', 2_000_000), used: 0, day: '' };
   const nvidia = createModelClient({
     provider: 'nvidia',
     baseUrl: 'https://integrate.api.nvidia.com/v1',
     apiKey: env.NEMOTRON_API_KEY ?? '',
     budget,
     // Ultra writing three plans with reasoning can take minutes; routing calls finish in about a second.
-    timeoutMs: Number(env.MODEL_TIMEOUT_MS ?? 300_000),
+    timeoutMs: positiveInt(env, 'MODEL_TIMEOUT_MS', 300_000),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
   });
   const xai = env.XAI_API_KEY

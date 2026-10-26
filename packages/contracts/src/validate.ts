@@ -27,7 +27,9 @@ type Allowed = { value: number; kind: Kind; business: BusinessUnit | null };
 // Outcome words: a lever named like this is a result dressed as a choice. A target ROAS or a minimum
 // margin is a real setting (Nemotron proposed "Target Google ROAS" live), so those stay allowed.
 const RESULT_WORDS = /\b(profit|revenue|sales|income|gain|uplift|expected|projected|forecast|estimated|total|combined|savings?)\b/i;
-const COMBINING_WORDS = /\b(combined|together|both businesses|salon and online|online and salon|salon \+ online|online \+ salon)\b/i;
+// Phrases that name both businesses. Not "combined" or "together" alone: live plans use them for
+// levers ("the combined effect of ads and email"), which is not a salon + online figure.
+const COMBINING_WORDS = /\b(both businesses|salon and online|online and salon|salon \+ online|online \+ salon|salon plus online|online plus salon|across both|whole company|company-wide)\b/i;
 
 export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck {
   const parsed = ProfitPlansSchema.safeParse(raw);

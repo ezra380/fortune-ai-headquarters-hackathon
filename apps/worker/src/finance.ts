@@ -1,6 +1,6 @@
 import { checkPlans, type DataPort, type Metric, type ModelPort, type ProfitPlans } from '@fahq/contracts';
 import type { AssistantMemory } from '@fahq/brain';
-import { parseJsonObject } from '@fahq/models';
+import { parseJsonObject, positiveInt } from '@fahq/models';
 
 // The finance assistant's thinking step. Numbers come only from Zetaris; past decisions come only
 // from the assistant's approved memory; the model writes plans; the validator decides whether
@@ -70,7 +70,7 @@ export async function writePlans(deps: {
         pastDecisions,
         ...(objections.length ? { previousAttemptRejectedBecause: objections.slice(0, 12) } : {}),
       }),
-      maxTokens: Number(process.env.PLAN_MAX_TOKENS ?? 16000),
+      maxTokens: positiveInt(process.env, 'PLAN_MAX_TOKENS', 16000),
       temperature: 0.4,
       json: true,
       ...(process.env.PLAN_THINKING === 'off' ? { thinking: false } : {}),

@@ -1,5 +1,5 @@
 import { FrontDoorDecision, type AssistantId } from '@fahq/contracts';
-import { parseJsonObject } from '@fahq/models';
+import { parseJsonObject, positiveInt } from '@fahq/models';
 import type { ModelPort } from '@fahq/contracts';
 
 // The front door, shaped like Meterless Scout: sense intent, check risk, pick the assistant.
@@ -28,7 +28,7 @@ export async function routeText(
     model: routerModel,
     system: SYSTEM,
     user: JSON.stringify({ message: text.slice(0, 1600) }),
-    maxTokens: Number(process.env.ROUTER_MAX_TOKENS ?? 600),
+    maxTokens: positiveInt(process.env, 'ROUTER_MAX_TOKENS', 600),
     temperature: 0,
     json: true,
     // Routing is classification: thinking off is ~25x faster and cheaper with an equal answer.
