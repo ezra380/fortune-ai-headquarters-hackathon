@@ -82,8 +82,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     retrievedMemoryIds: prior.memories.map(m => m.memory.id), memoryIds,
     findings, actionStatus: 'draft', externalActionsExecuted: false };
   fs.mkdirSync('.local/runs', { recursive: true });
-  fs.writeFileSync('.local/runs/' + runId + '.json', JSON.stringify(receipt, null, 2) + '
-');
+  fs.writeFileSync('.local/runs/' + runId + '.json', JSON.stringify(receipt, null, 2) + String.fromCharCode(10));
   console.log(JSON.stringify(receipt, null, 2));
 }
 
