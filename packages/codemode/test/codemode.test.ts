@@ -40,8 +40,34 @@ describe('QuickJS sandbox executor', () => {
     expect(many.error).toMatch(/tool call limit/);
   });
 
-  it('reports a thrown error as a plain message', async () => {
+  it('reports a thrown error as a plain message, never an empty one', async () => {
     expect((await exec.execute('async () => { throw new Error("nope"); }', tools)).error).toBe('nope');
+    expect((await exec.execute('async () => { throw ""; }', tools)).error).toBeTruthy();
+  });
+
+  it('enforces the memory limit on typed arrays and arrays, and gives the memory back', async () => {
+    const small = new QuickJsExecutor({ timeoutMs: 10_000, memoryBytes: 16 * 1024 * 1024 });
+    const rssBefore = process.memoryUsage().rss;
+    for (const grow of ['a.push(new Uint8Array(100000))', 'a.push(new Array(1000).fill(1))']) {
+      const t = Date.now();
+      const r = await small.execute(`async () => { const a = []; while (true) ${grow}; }`, tools);
+      expect(r.error).toMatch(/out of memory/);
+      expect(Date.now() - t).toBeLessThan(5000); // stopped by the cap, not by the 10 s deadline
+    }
+    // Before the fix the first loop alone grew the process by more than 1 GB.
+    expect(process.memoryUsage().rss - rssBefore).toBeLessThan(400 * 1024 * 1024);
+    expect((await small.execute('async () => 1 + 1', tools)).result).toBe(2);
+  });
+
+  it('turns deep recursion into an error, before or after a tool call, and stays usable', async () => {
+    for (let i = 0; i < 12; i++) {
+      const r = await exec.execute('async () => { const f = (n) => f(n + 1) + 1; return f(0); }', tools);
+      expect(r.error).toMatch(/stack overflow/i);
+    }
+    // After an awaited tool call this used to escape as an unhandled rejection and kill the process.
+    const after = await exec.execute('async () => { await codemode.add({ a: 1, b: 1 }); const f = (n) => f(n + 1) + 1; return f(0); }', tools);
+    expect(after.error).toMatch(/stack overflow/i);
+    expect((await exec.execute('async () => 1 + 1', tools)).result).toBe(2);
   });
 });
 

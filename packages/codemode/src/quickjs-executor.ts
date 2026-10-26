@@ -1,10 +1,25 @@
-import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
+import { RELEASE_SYNC, newQuickJSWASMModuleFromVariant, newVariant, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
 import type { QuickJSContext, QuickJSDeferredPromise, QuickJSHandle } from 'quickjs-emscripten';
 
 // A Code Mode Executor (the interface @cloudflare/codemode calls) that runs model-written code in a
 // QuickJS WebAssembly sandbox: no network, no files, no timers, no host objects. The only way out
 // is a call to a tool the host passed in, and every call is counted. On Cloudflare the same
 // interface is served by DynamicWorkerExecutor (Worker Loader); nothing else changes.
+//
+// Each run gets its own WebAssembly module and memory (about 5 ms to start), with a hard maximum:
+// QuickJS's own memory limit did not stop typed arrays or Array.fill (a probe grew the host to
+// about 2 GB), and a shared module stayed broken after a stack overflow. A run's memory is dropped
+// with its module. The QuickJS stack limit stays below what V8 allows: at 512 KB, deep recursion
+// overflowed V8's stack first and aborted the module instead of raising "stack overflow".
+
+const MB = 1024 * 1024;
+const WASM_PAGE = 64 * 1024;
+const STACK_BYTES = 256 * 1024;
+// The constructor exists at runtime in Node; this repo's TypeScript libs declare only the types.
+type WasmMemoryT = NonNullable<Parameters<typeof newVariant>[1]['wasmMemory']>;
+const WasmMemory = (globalThis as unknown as {
+  WebAssembly: { Memory: new (d: { initial: number; maximum: number }) => WasmMemoryT };
+}).WebAssembly.Memory;
 
 type ToolFn = (...args: unknown[]) => Promise<unknown>;
 export type ResolvedProvider = { name: string; fns: Record<string, ToolFn> };
@@ -37,10 +52,15 @@ export class QuickJsExecutor {
     const maxLogLines = this.opts.maxLogLines ?? 100;
     const deadline = Date.now() + timeoutMs;
 
-    const QuickJS = await getQuickJS();
+    const memoryBytes = this.opts.memoryBytes ?? 32 * MB;
+    // The module's heap: the script's limit plus room for QuickJS itself, never above 256 MB.
+    const maxPages = Math.min(4096, Math.ceil((memoryBytes + 32 * MB) / WASM_PAGE));
+    const QuickJS = await newQuickJSWASMModuleFromVariant(
+      newVariant(RELEASE_SYNC, { wasmMemory: new WasmMemory({ initial: 256, maximum: Math.max(256, maxPages) }) }),
+    );
     const runtime = QuickJS.newRuntime();
-    runtime.setMemoryLimit(this.opts.memoryBytes ?? 32 * 1024 * 1024);
-    runtime.setMaxStackSize(512 * 1024);
+    runtime.setMemoryLimit(memoryBytes);
+    runtime.setMaxStackSize(STACK_BYTES);
     runtime.setInterruptHandler(shouldInterruptAfterDeadline(deadline));
     const vm = runtime.newContext();
 
@@ -48,6 +68,10 @@ export class QuickJsExecutor {
     const pending = new Set<QuickJSDeferredPromise>();
     let disposed = false;
     let toolCalls = 0;
+    // A failure while running the script's continuation after a tool call (outside execute's own
+    // try): it ends the run instead of escaping as an unhandled rejection that kills the process.
+    let fatal: string | null = null;
+    let onFatal: () => void = () => {};
     const byName = new Map(providers.map((p) => [p.name, p.fns]));
 
     try {
@@ -83,7 +107,18 @@ export class QuickJsExecutor {
         );
         void deferred.settled.then(() => {
           pending.delete(deferred);
-          if (!disposed) runtime.executePendingJobs();
+          if (disposed || fatal) return;
+          try {
+            const jobs = runtime.executePendingJobs();
+            if (jobs.error) {
+              fatal = describe(vm, jobs.error);
+              jobs.error.dispose();
+              onFatal();
+            }
+          } catch (error) {
+            fatal = error instanceof Error ? error.message : String(error);
+            onFatal();
+          }
         });
         return deferred.handle;
       });
@@ -106,28 +141,49 @@ export class QuickJsExecutor {
       }
       const settled = vm.resolvePromise(started.value);
       started.value.dispose();
-      runtime.executePendingJobs();
+      const failed = new Promise<'fatal'>((resolve) => {
+        onFatal = () => resolve('fatal');
+      });
+      const first = runtime.executePendingJobs();
+      if (first.error) {
+        fatal = describe(vm, first.error);
+        first.error.dispose();
+      }
+      if (fatal) return { result: undefined, error: failure(fatal, timeoutMs), logs };
 
-      const outcome = await raceDeadline(settled, deadline);
+      const outcome = await raceDeadline(Promise.race([settled, failed]), deadline);
       if (outcome === 'timeout') return { result: undefined, error: `timed out after ${timeoutMs} ms`, logs };
+      if (outcome === 'fatal') return { result: undefined, error: failure(fatal ?? '', timeoutMs), logs };
       if (outcome.error) {
         const message = describe(vm, outcome.error);
         outcome.error.dispose();
-        return { result: undefined, error: message, logs };
+        return { result: undefined, error: failure(message, timeoutMs), logs };
       }
       const value = vm.dump(outcome.value) as unknown;
       outcome.value.dispose();
       return { result: value, logs };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { result: undefined, error: /interrupted/i.test(message) ? `timed out after ${timeoutMs} ms` : message.slice(0, 500), logs };
+      return { result: undefined, error: failure(error instanceof Error ? error.message : String(error), timeoutMs), logs };
     } finally {
       disposed = true;
-      for (const d of pending) d.dispose();
-      vm.dispose();
-      runtime.dispose();
+      // A runtime broken by a host-side overflow can abort on dispose; the module is thrown away anyway.
+      try {
+        for (const d of pending) d.dispose();
+        vm.dispose();
+        runtime.dispose();
+      } catch {
+        // nothing to release that the dropped module does not take with it
+      }
     }
   }
+}
+
+/** A run's error text: never empty (an empty error reads as success to Code Mode). */
+function failure(message: string, timeoutMs: number): string {
+  if (/interrupted/i.test(message)) return `timed out after ${timeoutMs} ms`;
+  if (/Maximum call stack size exceeded/i.test(message)) return 'stack overflow';
+  const text = message.trim().slice(0, 500);
+  return text === '' ? 'the script failed without a message' : text;
 }
 
 function installConsole(vm: QuickJSContext, logs: string[], max: number): void {
