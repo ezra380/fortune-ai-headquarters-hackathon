@@ -11,10 +11,11 @@ review (the builder never approves its own work).
 | Lane | Agent | Branch | Runs where | Owns (may edit) |
 |---|---|---|---|---|
 | **A: Foundation** | Claude Code | `hq/foundation` | WSL, main checkout `~/fortune-ai-headquarters-hackathon` | `packages/contracts`, `packages/brain`, `packages/models`, `packages/codemode`, `packages/delivery`, `apps/worker`, `supabase/`, `scripts/`, `docs/` (except `docs/research` written for A by D), root config |
-| **B: Data and admin console** | Cursor | `hq/cursor-data` | WSL worktree `~/fahq-cursor` (needs local Zetaris) | `packages/data`, `apps/console`, `data/synthetic/v2/` |
+| **B: Admin console** | Cursor (optional) | `hq/cursor-console` | WSL worktree `~/fahq-cursor` | `apps/console` only |
 | **D: Reader** | Gemini CLI | none | WSL, read-only | writes only `docs/research/*.md` when asked by lane A |
 
-*Oct 26: the Codex lane (C) was dropped; lane A took over `packages/delivery` and `docs/submission`.*
+*Oct 26: the Codex lane (C) was dropped; lane A took over `packages/delivery` and `docs/submission`.
+Later the same evening lane A also took `packages/data` (Zetaris); Cursor keeps only the console.*
 
 **Coordination:** Claude and Cursor talk through `~/fahq-shared/coordination.md`, an append-only log
 outside both checkouts. Cursor posts READY-FOR-REVIEW with a commit hash after each green step; Claude

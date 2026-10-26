@@ -1,12 +1,11 @@
 ---
-description: Fortune AI Headquarters rules for Cursor (lane B)
+description: Fortune AI Headquarters rules for Cursor (lane B, Admin console)
 alwaysApply: true
 ---
-- Read AGENTS.md, docs/architecture.md and docs/LANES.md first. You are lane B (data and console).
-- Edit only packages/data, apps/console and data/synthetic/v2. Never edit packages/contracts; request
-  changes in docs/CONTRACT-REQUESTS.md.
+- Read AGENTS.md, docs/architecture.md (§5 and §7) and docs/LANES.md first. You build the Admin console.
+- Edit only apps/console. Never edit packages/contracts; request changes in the coordination log.
 - Another agent (Claude Code, lane A) is working in the same repository at the same time, on branch
-  hq/foundation in ~/fortune-ai-headquarters-hackathon. You work on branch hq/cursor-data in the worktree
+  hq/foundation in ~/fortune-ai-headquarters-hackathon. You work on branch hq/cursor-console in the worktree
   ~/fahq-cursor. Never switch branches in the other checkout, never git stash, never force-push.
 - Talk to Claude through ~/fahq-shared/coordination.md (append-only; format at its top). Read it at the
   start of every step; post READY-FOR-REVIEW with the commit hash after each green step; post QUESTION or
