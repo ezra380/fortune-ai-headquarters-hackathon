@@ -32,6 +32,7 @@ export type OutboxRow = {
   body: string;
   attachment_ref: string | null;
   status: string;
+  attempts: number;
 };
 
 type Result<T> = { data: T | null; error: { message: string; code?: string } | null };
@@ -140,9 +141,18 @@ export function createStore(url: string, serviceKey: string) {
       return must(await db.from('outbox').select('*').eq('status', 'pending').order('created_at').limit(limit), 'outbox list') as OutboxRow[];
     },
     /** pending → sending, only if still pending: exactly one sender owns each item. */
-    async claimOutbox(id: string): Promise<boolean> {
-      const rows = must(await db.from('outbox').update({ status: 'sending' }).eq('id', id).eq('status', 'pending').select('id'), 'claim outbox') as { id: string }[];
+    async claimOutbox(id: string, now: Date): Promise<boolean> {
+      const rows = must(await db.from('outbox').update({ status: 'sending', claimed_at: now.toISOString() }).eq('id', id).eq('status', 'pending').select('id'), 'claim outbox') as { id: string }[];
       return rows.length === 1;
+    },
+    /** Items a crashed sender left in 'sending' (claimed before the cutoff, or before claims were timed). */
+    async strandedOutbox(cutoff: Date): Promise<OutboxRow[]> {
+      return must(await db.from('outbox').select('*').eq('status', 'sending').or(`claimed_at.is.null,claimed_at.lt.${cutoff.toISOString()}`).limit(20), 'stranded outbox') as OutboxRow[];
+    },
+    /** sending → pending for another try, after an error that happened before the provider accepted it. */
+    async retryOutbox(row: OutboxRow, error: string) {
+      must(await db.from('outbox').update({ status: 'pending', attempts: row.attempts + 1, last_error: error.slice(0, 500), claimed_at: null })
+        .eq('id', row.id).eq('status', 'sending'), 'retry outbox');
     },
     async settleOutbox(row: OutboxRow, s: { status: 'sent' | 'failed' | 'skipped'; providerRef?: string; error?: string; now: Date }) {
       must(await db.from('outbox').update({
