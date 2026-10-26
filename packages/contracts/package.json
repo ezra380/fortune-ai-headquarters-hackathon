@@ -1,0 +1,13 @@
+{
+  "name": "@fahq/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared schemas, ports and the plan-number validator. Lane A owns this package.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

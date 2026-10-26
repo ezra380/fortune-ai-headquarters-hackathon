@@ -1,0 +1,9 @@
+{
+  "name": "@fahq/delivery",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Proposal PDF, PrintNode printing and the Twilio SMS sender (DeliveryPort). Owner: lane C (Codex).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@fahq/contracts": "*" }
+}

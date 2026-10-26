@@ -1,0 +1,30 @@
+{
+  "name": "fortune-ai-headquarters",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:start": "supabase start -x studio,imgproxy,logflare,vector,realtime,storage-api",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:status": "supabase status",
+    "worker": "tsx apps/worker/src/main.ts",
+    "mcp": "tsx packages/codemode/src/serve.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "supabase": "^2.122.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

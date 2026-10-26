@@ -1,0 +1,9 @@
+{
+  "name": "@fahq/codemode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Code Mode: QuickJS sandbox executor and the brain MCP server. Owner: lane A (Claude).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@fahq/contracts": "*" }
+}

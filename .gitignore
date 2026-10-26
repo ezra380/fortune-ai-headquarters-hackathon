@@ -11,6 +11,9 @@ exports/
 logs/
 *.log
 .local/
+supabase/.temp/
+supabase/.branches/
+.env.local*
 # Generated dependencies and build output
 node_modules/
 dist/

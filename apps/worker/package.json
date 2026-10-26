@@ -1,0 +1,9 @@
+{
+  "name": "@fahq/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Assistant runtime: claim loop, front door, assistant handlers, approvals. Owner: lane A (Claude).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@fahq/contracts": "*" }
+}

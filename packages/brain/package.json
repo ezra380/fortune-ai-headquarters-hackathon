@@ -1,0 +1,9 @@
+{
+  "name": "@fahq/brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Meterless World Model (shared record) and H-MEM (per-assistant memory). Owner: lane A (Claude).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@fahq/contracts": "*" }
+}

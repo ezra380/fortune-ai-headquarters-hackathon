@@ -1,0 +1,9 @@
+{
+  "name": "@fahq/models",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "NVIDIA Nemotron and optional xAI clients with caps and receipts (ModelPort). Owner: lane A (Claude).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@fahq/contracts": "*" }
+}
