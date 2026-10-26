@@ -24,7 +24,9 @@ type Kind = 'usd' | 'percent' | 'ratio' | 'count';
 /** An allowed value; `business` null means a lever (a proposed setting, not tied to either business). */
 type Allowed = { value: number; kind: Kind; business: BusinessUnit | null };
 
-const RESULT_WORDS = /\b(profit|revenue|sales|income|return|roas|margin|gain|uplift|expected|projected|forecast|estimated|total|combined|savings?)\b/i;
+// Outcome words: a lever named like this is a result dressed as a choice. A target ROAS or a minimum
+// margin is a real setting (Nemotron proposed "Target Google ROAS" live), so those stay allowed.
+const RESULT_WORDS = /\b(profit|revenue|sales|income|gain|uplift|expected|projected|forecast|estimated|total|combined|savings?)\b/i;
 const COMBINING_WORDS = /\b(combined|together|both businesses|salon and online|online and salon|salon \+ online|online \+ salon)\b/i;
 
 export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck {

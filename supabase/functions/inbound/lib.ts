@@ -2,6 +2,7 @@
 // file runs in the Edge Function and in Vitest.
 
 export const ACK_TEXT = "Got it. I'm working on it and will text you when it's ready.";
+export const RETRY_TEXT = "Sorry, I couldn't take that just now. Please send it again in a minute.";
 
 const encoder = new TextEncoder();
 

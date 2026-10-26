@@ -159,6 +159,8 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
 
   it('refuses a lever that is a result, or a salon + online sum dressed as a lever', () => {
     rejects(withPlan1({ levers: [{ label: 'Expected extra profit', value: 45000, unit: 'usd' }], summary: 'This adds $45,000 in profit.' }), 'reads as a result');
+    // A bidding target is a setting (Nemotron proposed exactly this live).
+    expect(checkPlans(withPlan1({ levers: [{ label: 'Target Google ROAS', value: 3, unit: 'ratio' }], test: 'Bid to a 3x target for 14 days.' }), metrics).ok).toBe(true);
     const both = withPlan1({
       evidence: [{ metricId: 'm:online.revenue.mazali', value: 12400 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }],
       businesses: ['online', 'salon'],
