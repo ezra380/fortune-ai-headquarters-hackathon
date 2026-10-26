@@ -76,7 +76,11 @@ echo "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and TWILIO_WEBHOOK_URL written to 
 PW="$(getvar SUPABASE_DB_PASSWORD)"
 $SB link --project-ref "$REF" --password "$PW" >/dev/null
 echo "linked"
-SUPABASE_DB_PASSWORD="$PW" $SB db push --include-seed --yes
+SUPABASE_DB_PASSWORD="$PW" $SB db push --linked --include-seed --yes
+if [ "${SKIP_FUNCTIONS:-0}" = "1" ]; then
+  echo "schema and seed pushed; webhook deploy skipped (SKIP_FUNCTIONS=1)"
+  exit 0
+fi
 $SB functions deploy inbound --project-ref "$REF" --no-verify-jwt
 $SB secrets set --project-ref "$REF" "TWILIO_WEBHOOK_URL=https://$REF.supabase.co/functions/v1/inbound" >/dev/null
 echo

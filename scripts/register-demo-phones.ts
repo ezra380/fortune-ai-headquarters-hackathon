@@ -22,11 +22,15 @@ const assistants = [
 ];
 
 if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local');
-for (const p of people) if (!p.phone || !phone.test(p.phone)) throw new Error(`Set a +1XXXXXXXXXX phone for ${p.id} in .env.local`);
+for (const p of people) if (p.phone && !phone.test(p.phone)) throw new Error(`The phone for ${p.id} must look like +1XXXXXXXXXX`);
 for (const a of assistants) if (a.sms_from && !phone.test(a.sms_from)) throw new Error(`Assistant number for ${a.id} must look like +1XXXXXXXXXX`);
 
 const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 for (const p of people) {
+  if (!p.phone) {
+    console.log(`skipped ${p.id}: no phone in .env.local yet (keeps the synthetic number)`);
+    continue;
+  }
   const { error } = await db.from('people').update({ phone: p.phone, ...(p.name ? { name: p.name } : {}) }).eq('id', p.id);
   if (error) throw new Error(`Could not register ${p.id} (${error.code ?? 'db'})`);
   console.log(`registered ${p.id} → ${mask(p.phone!)}`);
