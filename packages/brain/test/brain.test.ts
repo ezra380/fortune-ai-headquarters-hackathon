@@ -63,4 +63,13 @@ describe.skipIf(!haveMeterless)('assistant memory (Meterless H-MEM)', () => {
     expect(finance.declinedSimilarTo('Add a premium Fortune appointment slot on Sundays')).toHaveLength(0);
     expect(brain.memory('salon').declinedSimilarTo('Discount Mazali wigs twenty percent this weekend')).toHaveLength(0);
   });
+
+  it('flags a realistic new plan title that repeats a declined one', async () => {
+    const brain = await openBrain({ meterlessDir, dataDir: tmp(), actor: 'test-worker', clock: fixedClock });
+    const finance = brain.memory('finance');
+    finance.rememberDecision({ proposalId: 'p7', personId: 'demo-p-finance-owner', verdict: 'declined', planRank: 1, planTitle: 'Aggressive ad scale and email push to double profit', runId: 'r7' });
+    expect(finance.declinedSimilarTo('Double profit through aggressive ad scaling and an email push')).toHaveLength(1);
+    expect(finance.declinedSimilarTo('Evening wash and set slots')).toHaveLength(0);
+    expect(finance.declinedSimilarTo('Balanced growth via price optimization')).toHaveLength(0);
+  });
 });

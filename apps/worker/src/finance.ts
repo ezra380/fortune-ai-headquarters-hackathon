@@ -90,7 +90,7 @@ export async function writePlans(deps: {
       continue;
     }
     const declinedEchoes = check.plans.plans.flatMap((p) =>
-      deps.memory.declinedSimilarTo(`${p.title} ${p.summary}`).map((m) => ({ rank: p.rank, memoryId: m.id })),
+      deps.memory.declinedSimilarTo(p.title).map((m) => ({ rank: p.rank, memoryId: m.id })),
     );
     return { plans: check.plans, metrics, citedMetricIds: check.citedMetricIds, queryHash, view, model, attempts: attempt, tokens, declinedEchoes };
   }

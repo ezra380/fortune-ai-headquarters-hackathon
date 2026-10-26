@@ -65,12 +65,29 @@ export class AssistantMemory {
       .slice(0, topN);
   }
 
-  /** Declined decisions whose wording overlaps this plan: the plan may repeat a rejected idea. */
-  declinedSimilarTo(planText: string, minOverlap = 0.25): MemoryRecordLike[] {
-    const planTokens = this.engines.tokenize(planText);
+  /**
+   * Declined decisions whose plan title overlaps this plan's title: the plan may repeat a rejected
+   * idea. Titles only, with the boilerplate words removed, scored by overlap (shared words over the
+   * shorter title): comparing a whole summary with a short decision line never reached the old
+   * Jaccard threshold on real plans.
+   */
+  declinedSimilarTo(planTitle: string, minOverlap = 0.6): MemoryRecordLike[] {
+    const words = (t: string) => new Set(this.engines.tokenize(t).filter((w) => !BOILERPLATE.has(w)));
+    const plan = words(planTitle);
     return this.hmem
       .store.all()
       .filter((m) => m.tags.includes('decision') && m.tags.includes('declined') && !m.supersededBy)
-      .filter((m) => this.engines.jaccard(planTokens, this.engines.tokenize(m.content)) >= minOverlap);
+      .filter((m) => {
+        const title = words(/"([^"]+)"/.exec(m.content)?.[1] ?? m.content);
+        const shared = [...plan].filter((w) => title.has(w)).length;
+        const shorter = Math.min(plan.size, title.size);
+        return shorter >= 2 && shared / shorter >= minOverlap;
+      });
   }
 }
+
+const BOILERPLATE = new Set([
+  'the', 'and', 'for', 'with', 'to', 'of', 'on', 'in', 'by', 'at', 'our', 'your', 'a', 'an', 'plan', 'plans',
+  'via', 'through', 'from', 'more', 'push', 'grow', 'growth', 'boost', 'drive', 'increase', 'aggressive', 'safe',
+  'balanced', 'conservative', 'profit', 'double', 'doubling',
+]);
