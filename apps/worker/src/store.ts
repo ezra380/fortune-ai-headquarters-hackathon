@@ -127,8 +127,8 @@ export function createStore(url: string, serviceKey: string) {
       const rows = must(await db.rpc('use_approval_code', {
         p_phone: a.phone, p_code: a.code, p_verdict: a.verdict, p_action: a.action, p_task_id: a.taskId, p_detail: a.detail, p_now: a.now.toISOString(),
       }), 'use approval code') as
-        { approval_id: string | null; message_id: string | null; action: 'forward_plan' | 'decide_plan' | null; outcome: string; replay: boolean }[];
-      return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused', replay: false };
+        { approval_id: string | null; message_id: string | null; action: 'forward_plan' | 'decide_plan' | null; outcome: string; replay: boolean; approver_person_id: string | null }[];
+      return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused', replay: false, approver_person_id: null };
     },
     async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
       must(await db.from('outbox').upsert(

@@ -190,6 +190,45 @@ describe('approval codes', () => {
   });
 });
 
+describe('one phone for two people (demo)', () => {
+  it('routes a text to the person whose assistant was texted, and a code to the person it was issued to', async ({ skip }) => {
+    if (!reachable) skip();
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query(`update public.people set phone = $1 where id = 'demo-p-finance-owner'`, [OWNER]);
+      const enqueueTo = async (to: string) => {
+        const { rows } = await client.query('select * from public.enqueue_inbound_text($1, $2, $3, $4, $5)', [sid(), OWNER, to, 'Plans please', T0]);
+        const task = await client.query('select assistant_id, payload->>$2 as person from public.tasks where id = $1', [rows[0].task_id, 'personId']);
+        return task.rows[0] as { assistant_id: string; person: string };
+      };
+      expect(await enqueueTo('+15550100001')).toEqual({ assistant_id: 'owner', person: 'demo-p-owner' });
+      expect(await enqueueTo('+15550100002')).toEqual({ assistant_id: 'finance', person: 'demo-p-finance-owner' });
+      expect((await enqueueTo('+15550100004')).person).toBe('demo-p-owner'); // another number: the owner
+
+      await client.query(`update public.approvals set status = 'expired' where status = 'pending'`);
+      const message = async () => (await client.query(
+        `insert into public.assistant_messages (from_assistant, to_assistant, kind, body, dedupe_key) values ('finance', 'owner', 'proposal', '{}'::jsonb, $1) returning id`,
+        ['test:' + randomUUID()],
+      )).rows[0].id as string;
+      const issue = (messageId: string, person: string, action: string, code: string) => client.query(
+        'select * from public.issue_approval($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [messageId, person, action, code, 'finance', `code ${code}`, 'test-sms:' + randomUUID(), 15, T0],
+      );
+      await issue(await message(), 'demo-p-owner', 'forward_plan', '135791');
+      await issue(await message(), 'demo-p-finance-owner', 'decide_plan', '246802');
+      const use = async (code: string, action: string) => (await client.query(
+        'select * from public.use_approval_code($1, $2, $3, $4, $5, $6, $7)', [OWNER, code, 'signed', action, null, '{}', '2026-10-26T12:05:00Z'],
+      )).rows[0];
+      expect(await use('135791', 'forward_plan')).toMatchObject({ outcome: 'signed', approver_person_id: 'demo-p-owner' });
+      expect(await use('246802', 'decide_plan')).toMatchObject({ outcome: 'signed', approver_person_id: 'demo-p-finance-owner' });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+});
+
 describe('spending cap', () => {
   it('never lets concurrent reservations pass the daily cap', async ({ skip }) => {
     if (!reachable) skip();

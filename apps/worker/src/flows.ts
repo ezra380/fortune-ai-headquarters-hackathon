@@ -56,9 +56,11 @@ export async function handleTask(task: TaskRow, deps: WorkerDeps): Promise<Outco
 }
 
 async function inbound(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
-  const payload = task.payload as { from?: string; body?: string };
-  const person = payload.from ? await deps.store.personByPhone(payload.from) : null;
-  if (!person || !payload.body) return fail('the sender is not registered or the text is empty');
+  const payload = task.payload as { from?: string; body?: string; personId?: string };
+  // The database resolved the sender when it queued the text (a shared phone resolves to the person
+  // whose assistant number was texted); the phone must still match.
+  const person = payload.personId ? await deps.store.person(payload.personId) : null;
+  if (!person || person.phone !== payload.from || !payload.body) return fail('the sender is not registered or the text is empty');
   const command = parseCommand(payload.body);
   if (command) return handleCommand(command, person, task, deps, runId);
 
@@ -188,23 +190,25 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
 }
 
 async function forwardPlan(
-  command: Extract<Command, { kind: 'send' }>, person: PersonRow, task: TaskRow, deps: WorkerDeps,
+  command: Extract<Command, { kind: 'send' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
   runId: string, started: Date, reply: (b: string) => Promise<void>,
 ): Promise<Outcome> {
   const used = await deps.store.useApprovalCode({
-    phone: person.phone, code: command.code, verdict: 'signed', action: 'forward_plan', taskId: task.id,
+    phone: sender.phone, code: command.code, verdict: 'signed', action: 'forward_plan', taskId: task.id,
     detail: { planRank: command.planRank }, now: started,
   });
   if (used.outcome === 'wrong_action') {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code is for a decision' });
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: sender.assistant_id, started, outcome: 'refused', detail: 'code is for a decision' });
     await reply(`That code is for a decision: reply CONFIRM <code> or DECLINE <code>. Nothing was sent.`);
     return done;
   }
   if (used.outcome !== 'signed' || used.action !== 'forward_plan' || !used.message_id) {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code refused' });
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: sender.assistant_id, started, outcome: 'refused', detail: 'code refused' });
     await reply("That code didn't work or has expired. Nothing was sent.");
     return done;
   }
+  // The code acts as the person it was issued to (on a shared phone, not necessarily the texted assistant's).
+  const { person, answer } = await approverOf(used.approver_person_id, sender, task, deps);
   const proposal = await deps.store.message(used.message_id);
   const plan = (proposal.body.plans as ProfitPlans).plans.find((p) => p.rank === command.planRank);
   if (!plan) return fail('plan rank not found on the proposal');
@@ -226,28 +230,35 @@ async function forwardPlan(
   await deps.store.addOutbox({ channel: 'print', toPersonId: financeOwner.id, from: 'finance', body: `Plan ${plan.rank} for decision`, attachmentRef: `proposal:${proposal.id}`, dedupeKey: `forward-print:${forward.id}` });
   await deps.brain.record.decision({ proposalId: proposal.id, personId: person.id, personName: person.name, verdict: 'signed', planRank: plan.rank, action: 'forward_plan', at: deps.now().toISOString(), runId });
   await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: person.assistant_id, started, outcome: 'ok', detail: `plan ${plan.rank} forwarded to ${financeOwner.id}` });
-  await reply(`Sent plan ${plan.rank} to ${financeOwner.name}.`);
+  await answer(`Sent plan ${plan.rank} to ${financeOwner.name}.`);
   return done;
 }
 
+async function approverOf(approverId: string | null, sender: PersonRow, task: TaskRow, deps: WorkerDeps) {
+  const person = approverId && approverId !== sender.id ? await deps.store.person(approverId) : sender;
+  const answer = (body: string) => text(deps, person, person.assistant_id, body, `reply:${task.id}`);
+  return { person, answer };
+}
+
 async function decidePlan(
-  command: Extract<Command, { kind: 'confirm' | 'decline' }>, person: PersonRow, task: TaskRow, deps: WorkerDeps,
+  command: Extract<Command, { kind: 'confirm' | 'decline' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
   runId: string, started: Date, reply: (b: string) => Promise<void>,
 ): Promise<Outcome> {
   const verdict = command.kind === 'confirm' ? 'signed' : 'declined';
   const used = await deps.store.useApprovalCode({
-    phone: person.phone, code: command.code, verdict, action: 'decide_plan', taskId: task.id, detail: {}, now: started,
+    phone: sender.phone, code: command.code, verdict, action: 'decide_plan', taskId: task.id, detail: {}, now: started,
   });
   if (used.outcome === 'wrong_action') {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code is for sending a plan' });
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: sender.assistant_id, started, outcome: 'refused', detail: 'code is for sending a plan' });
     await reply(`That code is for sending a plan: reply SEND <1-3> <code>. Nothing was recorded.`);
     return done;
   }
   if (used.outcome !== verdict || used.action !== 'decide_plan' || !used.message_id) {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code refused' });
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: sender.assistant_id, started, outcome: 'refused', detail: 'code refused' });
     await reply("That code didn't work or has expired. Nothing was recorded.");
     return done;
   }
+  const { person, answer } = await approverOf(used.approver_person_id, sender, task, deps);
   const forward: MessageRow = await deps.store.message(used.message_id);
   const proposalId = String(forward.body.proposalId ?? '');
   const planRank = Number(forward.body.planRank ?? 0);
@@ -262,7 +273,7 @@ async function decidePlan(
   await deps.store.postMessage({ from: 'finance', to: owner.assistant_id, kind: 'decision', replyTo: forward.id, dedupeKey: `decision:${forward.id}`, body: { proposalId, planRank, verdict, by: person.id } });
   await text(deps, owner, 'finance', `${person.name} ${word} plan ${planRank}: ${plan?.title ?? ''}`.trim(), `decision-sms:${forward.id}`);
   await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: 'finance', started, outcome: 'ok', detail: `plan ${planRank} ${word} by ${person.id}` });
-  await reply(`Recorded: you ${word} plan ${planRank}. Thank you.`);
+  await answer(`Recorded: you ${word} plan ${planRank}. Thank you.`);
   return done;
 }
 
