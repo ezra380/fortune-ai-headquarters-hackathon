@@ -38,8 +38,9 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what:
 | Plan writer (Nemotron 3 Ultra, thinking on) + number validator | **Live-tested on sample metrics** | Passed validation on the first attempt in 82 s; every run recorded in [`docs/research/live-runs-2026-10-26.md`](docs/research/live-runs-2026-10-26.md). The validator proves numbers are traceable, not that assumptions are wise; people approve. |
 | Cloudflare Code Mode over the brain MCP server | **Working** | QuickJS sandbox: no network, files or timers; deadline, memory and tool-call caps; one `code` call answers a multi-tool script |
 | Full chain request → plans → forward → decision | **Working** with models and data **mocked** | End-to-end test on the real local database and the real Meterless engines |
-| Zetaris adapter (lane B) | In progress | — |
-| PDF, printing, live SMS sending (lane C) | In progress; SMS runs as a labeled dry run until connected | — |
+| Business numbers through Zetaris | **Working** on local Zetaris | Three source databases federated into one governed view with data-quality rules; `npm run zetaris:setup` proves the live answer equals an independent computation (33 of 33 metrics, both periods) |
+| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Owner HQ, Finance, Online Customer Service and a Salon (Cindy) placeholder; loopback only, numbers masked, codes redacted; 24 tests |
+| Proposal PDF, printing, SMS sender | **Built** | 9 tests; printing is skipped unless a PrintNode printer is configured |
 
 ## Quickstart (WSL / Linux, Node 24, Docker)
 
@@ -49,7 +50,9 @@ bash scripts/setup-meterless.sh        # pinned Meterless engines → .local/met
 cp .env.example .env.local && chmod 600 .env.local   # fill in NEMOTRON_API_KEY etc.
 npm run db:start                        # local Supabase (applies migrations + synthetic seed)
 npm test                                # unit, real-database and end-to-end tests
-npx tsx scripts/try-live-plans.ts       # LIVE Nemotron routing + plans on sample metrics
+npm run zetaris:setup                   # Zetaris sources, views and the proof (needs local Zetaris)
+npx tsx scripts/try-live-plans.ts       # LIVE Nemotron routing + plans on LIVE Zetaris metrics
+npm run console                         # the owner's read-only Admin console (127.0.0.1:5180)
 npm run worker -- --once                # drain the queue once (dry-run SMS without Twilio)
 npx tsx packages/codemode/src/serve.ts  # the brain MCP server behind Code Mode (stdio)
 ```

@@ -66,7 +66,7 @@ export const Metric = z.object({
     queryHash: z.string().regex(/^[0-9a-f]{64}$/),
     asOf: Timestamp,
   }),
-});
+}).refine((m) => m.id.startsWith(`m:${m.business}.`), { message: 'a metric id must start with its business (m:salon., m:online. or m:combined.)' });
 export type Metric = z.infer<typeof Metric>;
 
 // ---- Plans (model output, validated before anyone sees it) ---------------------------------

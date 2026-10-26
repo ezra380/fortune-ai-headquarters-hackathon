@@ -159,7 +159,7 @@ async function mailbox(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
     messageId: proposal.id, personId: requester.id, action: 'forward_plan', code, from: 'finance', now: deps.now(),
     smsDedupeKey: `proposal-sms:${proposal.id}`,
     smsBody: fitSms(
-      `Your finance assistant's 3 plans (every number checked against ${view}):\n${planDigest(plans)}${echoes}`,
+      `Your finance assistant's 3 plans (every number checked against ${view}):\n${planDigest(plans, citedMetricsOf(proposal))}${echoes}`,
       `Reply SEND <1-3> ${code} to send one to ${financeOwner.name}. The code expires in 15 minutes.`,
     ),
   });

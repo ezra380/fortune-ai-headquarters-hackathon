@@ -55,6 +55,8 @@ export async function ensureSourceServer(
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => resolve());
   });
+  // It serves while the process has other work, and never keeps a finished script alive on its own.
+  server.unref();
   if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));
   return { started: true, close: () => new Promise((resolve) => server.close(() => resolve())) };
 }
