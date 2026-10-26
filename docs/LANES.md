@@ -10,10 +10,15 @@ review (the builder never approves its own work).
 
 | Lane | Agent | Branch | Runs where | Owns (may edit) |
 |---|---|---|---|---|
-| **A: Foundation** | Claude Code | `hq/foundation` | WSL, main checkout `~/fortune-ai-headquarters-hackathon` | `packages/contracts`, `packages/brain`, `packages/models`, `packages/codemode`, `apps/worker`, `supabase/`, root config (`package.json`, `tsconfig.base.json`, `vitest.config.ts`), `AGENTS.md`, `docs/architecture.md`, `docs/LANES.md` |
-| **B: Data and console** | Cursor | `hq/cursor-data` | WSL worktree `~/fahq-cursor` (needs local Zetaris) | `packages/data`, `apps/console`, `data/synthetic/v2/` |
-| **C: Delivery and write-up** | Codex (ChatGPT) | `hq/codex-delivery` | Codex cloud, from GitHub | `packages/delivery`, `docs/submission/` |
+| **A: Foundation** | Claude Code | `hq/foundation` | WSL, main checkout `~/fortune-ai-headquarters-hackathon` | `packages/contracts`, `packages/brain`, `packages/models`, `packages/codemode`, `packages/delivery`, `apps/worker`, `supabase/`, `scripts/`, `docs/` (except `docs/research` written for A by D), root config |
+| **B: Data and admin console** | Cursor | `hq/cursor-data` | WSL worktree `~/fahq-cursor` (needs local Zetaris) | `packages/data`, `apps/console`, `data/synthetic/v2/` |
 | **D: Reader** | Gemini CLI | none | WSL, read-only | writes only `docs/research/*.md` when asked by lane A |
+
+*Oct 26: the Codex lane (C) was dropped; lane A took over `packages/delivery` and `docs/submission`.*
+
+**Coordination:** Claude and Cursor talk through `~/fahq-shared/coordination.md`, an append-only log
+outside both checkouts. Cursor posts READY-FOR-REVIEW with a commit hash after each green step; Claude
+answers with REVIEW (GREEN / GREEN-WITH-NOTES / RED) and answers QUESTION and CONTRACT entries.
 
 ## Rules for every lane
 
@@ -46,10 +51,10 @@ review (the builder never approves its own work).
     Data Mart `finance_mart`, one data-quality rule);
   - an adapter that returns `Metric[]` with stable IDs and a query hash;
   - tests;
-  - then `apps/console`.
-- **C:**
+  - then `apps/console`: the owner-only **Admin console**, with one sub-tab per assistant department
+    (see `docs/architecture.md` §7).
+- **A (also):**
   - `packages/delivery` implements `DeliveryPort`: proposal PDF (pdf-lib), PrintNode printing (dry-run
     unless configured), and a Twilio SMS sender that refuses unregistered recipients and is idempotent per
     outbox item;
-  - tests with mocks;
   - `docs/submission/`: write-up and deck outline following the event's rules 6.1–6.4.

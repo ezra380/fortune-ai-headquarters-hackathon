@@ -8,6 +8,9 @@ alwaysApply: true
 - Another agent (Claude Code, lane A) is working in the same repository at the same time, on branch
   hq/foundation in ~/fortune-ai-headquarters-hackathon. You work on branch hq/cursor-data in the worktree
   ~/fahq-cursor. Never switch branches in the other checkout, never git stash, never force-push.
+- Talk to Claude through ~/fahq-shared/coordination.md (append-only; format at its top). Read it at the
+  start of every step; post READY-FOR-REVIEW with the commit hash after each green step; post QUESTION or
+  CONTRACT when blocked on lane A. Pick up foundation updates with `git merge hq/foundation`.
 - Synthetic data only. Secrets stay in .env.local; never print them.
 - Zetaris: read-only queries, except idempotent setup scripts that create objects only under fortune_demo
   names. Never touch the sample databases.

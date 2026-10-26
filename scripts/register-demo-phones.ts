@@ -18,6 +18,7 @@ const people = [
 const assistants = [
   { id: 'owner', sms_from: env.TWILIO_FROM_OWNER_ASSISTANT },
   { id: 'finance', sms_from: env.TWILIO_FROM_FINANCE_ASSISTANT },
+  { id: 'online', sms_from: env.TWILIO_FROM_ONLINE_ASSISTANT },
 ];
 
 if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local');

@@ -54,9 +54,9 @@ credentials, are ever used here.
 | Code Mode: sandbox executor + brain MCP server | `packages/codemode` | **Cloudflare `@cloudflare/codemode`**, MCP SDK, QuickJS (WASM) | A |
 | Assistant runtime: claim loop, front door, handlers | `apps/worker` | — | A |
 | Synthetic business data, local source APIs, Zetaris setup, Zetaris adapter | `packages/data` | **Zetaris** (REST tables, views, Virtual Data Mart, data-quality rule) | B (Cursor) |
-| Assistants console (read-only admin view) | `apps/console` | World Model control plane or a small page | B (Cursor), after data |
-| PDF, printing, SMS sender | `packages/delivery` | pdf-lib, PrintNode (optional), Twilio REST | C (Codex) |
-| Submission write-up and deck outline | `docs/submission` | — | C (Codex) |
+| Admin console (owner-only, one sub-tab per department) | `apps/console` | Reads the brain over MCP; queue tables server-side | B (Cursor), after data |
+| PDF, printing, SMS sender | `packages/delivery` | pdf-lib, PrintNode (optional), Twilio REST | A (Claude) |
+| Submission write-up and deck outline | `docs/submission` | — | A (Claude) |
 
 ## 4. Where state lives
 
@@ -104,7 +104,39 @@ credentials, are ever used here.
   `code` tool. Code runs in a QuickJS WebAssembly sandbox implementing Code Mode's `Executor`
   interface. On Cloudflare, `DynamicWorkerExecutor` (Worker Loader) replaces it with no other change.
 
-## 7. Production path (planned, not built here)
+## 7. Departments and the Admin console
+
+Each assistant is its own department, with its own text number, memory, mailbox and app view:
+
+| Department | Assistant | Number (in `.env.local`, never in git) |
+|---|---|---|
+| Owner HQ | the owner's head assistant / manager | `TWILIO_FROM_OWNER_ASSISTANT` |
+| Finance Department | the finance owner's assistant (money decisions, marketing reports) | `TWILIO_FROM_FINANCE_ASSISTANT` |
+| Online Customer Service Department | the online customer-service manager | `TWILIO_FROM_ONLINE_ASSISTANT` |
+| Salon Department | Cindy, the head stylist's existing assistant (separate app) | her own number |
+
+Every text gets an immediate acknowledgement from the webhook; the assistant's real work runs afterwards
+and replies when it is done.
+
+**The Admin console** (`apps/console`) is the owner's backend for all of them: one **Admin** tab with a
+sub-tab per department. Each sub-tab shows:
+- the assistant's tasks;
+- its mailbox (requests, proposals, decisions);
+- approvals (status only, never codes);
+- outbox (with codes blanked);
+- receipts (step, model, data source, outcome, time);
+- the decisions in its memory;
+- its slice of the shared record.
+
+It is read-only and owner-only (localhost for the event; behind the platform's admin role in production).
+Phone numbers show only their last four digits.
+
+The **Salon Department** sub-tab is reserved for Cindy, which is a separate, already-running app. In
+production it mirrors Cindy's own backend (her memory, her salon actions, her personal-to-business
+hand-offs) at the same admin level, with the head stylist's knowledge. Her family and personal data stay in
+her app; only salon work crosses into the business brain. For the event it is a labeled placeholder.
+
+## 8. Production path (planned, not built here)
 
 - The four assistants (owner, salon, finance, online staff) move into the business's existing internal
   platform behind its existing sign-in and roles.
