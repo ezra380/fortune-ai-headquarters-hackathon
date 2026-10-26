@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "description": "Read-only Assistants console. Owner: lane B (Cursor), after packages/data.",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@fahq/contracts": "*" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fahq/brain": "^0.1.0",
+    "@fahq/contracts": "*",
+    "@supabase/supabase-js": "^2.118.0"
+  }
 }
