@@ -6,7 +6,7 @@ import type { HmemLike, MemoryRecordLike, MeterlessEngines } from './meterless.t
 // proposal it settles. Recall for planning returns decisions only, so an unapproved model idea is
 // never treated as a fact.
 
-export type Decision = { memory: MemoryRecordLike; score: number };
+export type Decision = { memory: MemoryRecordLike; relevance: number };
 
 export class AssistantMemory {
   constructor(

@@ -101,8 +101,9 @@ export class SharedRecord {
     });
   }
 
-  timeline(limit = 50): readonly { id: string; type: string; at?: string }[] {
-    return this.wm.events().slice(-limit);
+  /** Oldest first. `type` is the World Model event kind (upsertEntity, relate, assertFact, ...). */
+  timeline(limit = 50): readonly { id: string; type: string; at: string }[] {
+    return this.wm.events().slice(-limit).map((e) => ({ id: e.id, type: e.kind, at: e.at }));
   }
 
   audit(limit = 50) {

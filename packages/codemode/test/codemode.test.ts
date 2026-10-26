@@ -58,6 +58,10 @@ describe.skipIf(!haveMeterless)('brain behind Cloudflare Code Mode (MCP)', () =>
     // MOCK: stands in for lane B's Zetaris adapter in this unit test only.
     const dataMock: DataPort = { health: async () => ({ ok: true, detail: 'mock' }), getFinanceMetrics: async () => ({ metrics, queryHash: source.queryHash, view: source.view }) };
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-cm-'));
+    // One real decision and one recorded request, so recall and timeline return real engine shapes.
+    const seed = await openBrain({ meterlessDir, dataDir, actor: 'seed' });
+    seed.memory('finance').rememberDecision({ proposalId: 'p1', personId: 'demo-p-finance-owner', verdict: 'declined', planRank: 1, planTitle: 'Mazali discount twenty percent', runId: 'r1' });
+    await seed.record.request({ taskId: '11111111-1111-4111-8111-111111111111', personId: 'demo-p-owner', personName: 'Demo Owner', from: 'owner', to: 'finance', text: 'Plans please', at: '2026-10-26T12:00:00Z', runId: '00000000-0000-4000-8000-000000000001' });
     const server = await createCodeModeBrainServer({
       data: dataMock,
       openBrain: () => openBrain({ meterlessDir, dataDir, actor: 'test' }),
@@ -75,12 +79,21 @@ describe.skipIf(!haveMeterless)('brain behind Cloudflare Code Mode (MCP)', () =>
     const code = `async () => {
       const m = await codemode.get_finance_metrics({ period: '2026-09' });
       const d = await codemode.recall_decisions({ assistant: 'finance', query: 'mazali discount' });
+      const t = await codemode.get_timeline({ limit: 50 });
       const salon = m.metrics.filter((x) => x.business === 'salon').map((x) => x.id);
-      return { metricCount: m.metrics.length, salon, decisions: d.decisions.length, hash: m.queryHash.slice(0, 8) };
+      return {
+        metricCount: m.metrics.length, salon, decisions: d.decisions.length, hash: m.queryHash.slice(0, 8),
+        relevanceIsNumber: typeof d.decisions[0].relevance === 'number',
+        typedEvents: t.events.length > 0 && t.events.every((e) => typeof e.type === 'string'),
+        hasRelate: t.events.some((e) => e.type === 'relate'),
+      };
     }`;
     const result = await client.callTool({ name: 'code', arguments: { code } });
     const text = (result.content as { type: string; text: string }[])[0]?.text ?? '';
-    expect(JSON.parse(text)).toEqual({ metricCount: 2, salon: ['m:salon.revenue.wash_set'], decisions: 0, hash: 'bbbbbbbb' });
+    expect(JSON.parse(text)).toEqual({
+      metricCount: 2, salon: ['m:salon.revenue.wash_set'], decisions: 1, hash: 'bbbbbbbb',
+      relevanceIsNumber: true, typedEvents: true, hasRelate: true,
+    });
     await client.close();
   });
 });

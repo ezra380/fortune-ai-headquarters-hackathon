@@ -32,7 +32,12 @@ describe.skipIf(!haveMeterless)('shared record (Meterless World Model)', () => {
     // Re-recording the same proposal at the same time is a no-op for the relationships it already has.
     await reader.record.proposal({ proposalId, requestTaskId: taskId, by: 'finance', forPersonId: 'demo-p-owner', titles: ['A', 'B', 'C'], citedMetricIds: ['m:online.revenue.mazali'], dataSource: 'zetaris:abc', ...stamp(2) });
     const relates = (b: typeof reader) => b.record.timeline(1000).filter((e) => e.type === 'relate').length;
+    expect(relates(brain)).toBeGreaterThan(0); // the event kind is really read (it was undefined before)
     expect(relates(reader)).toBe(relates(brain));
+    for (const e of brain.record.timeline(1000)) {
+      expect(['upsertEntity', 'upsertContext', 'relate', 'assertFact', 'snapshot', 'tombstone', 'alias', 'view-rebuild']).toContain(e.type);
+      expect(Number.isNaN(Date.parse(e.at))).toBe(false);
+    }
   });
 });
 
@@ -47,6 +52,7 @@ describe.skipIf(!haveMeterless)('assistant memory (Meterless H-MEM)', () => {
     const decisions = finance.recallDecisions('wash and set prices weekday');
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.memory.content).toContain('declined');
+    expect(decisions[0]?.relevance).toBeGreaterThan(0); // H-MEM's field is `relevance`, not `score`
   });
 
   it('flags a new plan that repeats a declined idea, and keeps assistants apart', async () => {

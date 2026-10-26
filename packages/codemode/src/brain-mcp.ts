@@ -59,7 +59,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps): McpServer {
     async ({ assistant: who, query, limit }) => {
       const brain = await deps.openBrain();
       const decisions = brain.memory(who).recallDecisions(query, limit ?? 5);
-      return ok({ decisions: decisions.map((d) => ({ id: d.memory.id, text: d.memory.content, tags: d.memory.tags, score: Number(d.score.toFixed(3)) })) });
+      return ok({ decisions: decisions.map((d) => ({ id: d.memory.id, text: d.memory.content, tags: d.memory.tags, relevance: Number(d.relevance.toFixed(3)) })) });
     },
   );
 
@@ -71,7 +71,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps): McpServer {
     },
     async ({ limit }) => {
       const brain = await deps.openBrain();
-      return ok({ events: brain.record.timeline(limit ?? 25).map((e) => ({ id: e.id, type: e.type, at: e.at ?? null })) });
+      return ok({ events: brain.record.timeline(limit ?? 25).map((e) => ({ id: e.id, type: e.type, at: e.at })) });
     },
   );
 

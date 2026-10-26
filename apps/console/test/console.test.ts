@@ -492,7 +492,7 @@ describe('the brain reader', () => {
       fs.mkdirSync(path.join(opts.dataDir, 'memory', 'finance'), { recursive: true });
       fs.writeFileSync(path.join(opts.dataDir, 'memory', 'finance', 'state.json'), '{}');
       return {
-        memory: () => ({ recallDecisions: (q: string, n: number) => (q.includes('decision') && n === 10 ? [{ memory: { content: 'Decision: approved plan 2', tags: ['decision', 'approved'] }, score: 1 }] : []) }),
+        memory: () => ({ recallDecisions: (q: string, n: number) => (q.includes('decision') && n === 10 ? [{ memory: { content: 'Decision: approved plan 2', tags: ['decision', 'approved'] }, relevance: 1 }] : []) }),
         record: { timeline: (n: number) => (n === 30 ? [{ id: 'e1', type: 'request', at: '2026-10-26T20:00:00Z' }, { id: 'e2', type: 'proposal' }] : []) },
       };
     }) as never;

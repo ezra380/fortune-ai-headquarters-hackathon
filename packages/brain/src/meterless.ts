@@ -29,8 +29,10 @@ export interface WorldModelLike {
     value: unknown;
     source: WmProvenance;
   }): Promise<{ id: string }>;
-  events(): readonly { id: string; type: string; at?: string; payload?: unknown }[];
-  audit(): readonly { action?: string; by?: string; detail?: string; at?: string }[];
+  /** WorldEvent upstream: the event's type is `kind` (upsertEntity, relate, assertFact, ...). */
+  events(): readonly { id: string; seq: number; kind: string; at: string; payload?: unknown }[];
+  /** AuditEntry upstream. */
+  audit(): readonly { seq: number; at: string; kind: string; actor: string; summary: string; eventId?: string; runId?: string }[];
 }
 
 export interface MemoryRecordLike {
@@ -55,7 +57,8 @@ export interface HmemLike {
     supersedes?: string;
   }): MemoryRecordLike;
   query(q: string, opts?: { topN?: number; threshold?: number }): {
-    memories: { memory: MemoryRecordLike; score: number }[];
+    /** Upstream names the score `relevance` (hmem/reference/src/types.ts). */
+    memories: { memory: MemoryRecordLike; relevance: number }[];
   };
   store: { get(id: string): MemoryRecordLike | undefined; all(): MemoryRecordLike[] };
 }
