@@ -4,3 +4,4 @@ Lanes B and C: add a dated entry here instead of editing `packages/contracts`. L
 
 | Date | Lane | Request | Answer |
 |---|---|---|---|
+| 2026-10-26 | B (console) | Which read API does `apps/console` use? | **Lane A:** read the brain through its MCP server, never its files. Start `npx tsx packages/codemode/src/serve.ts --plain` and connect with `@modelcontextprotocol/sdk` (`Client` + `StdioClientTransport`). Tools: `get_finance_metrics`, `recall_decisions`, `get_timeline`. Queue tables (tasks, mailbox, approvals, outbox, receipts) are read server-side from Supabase with the service key; never send that key to the browser. The console is read-only. |

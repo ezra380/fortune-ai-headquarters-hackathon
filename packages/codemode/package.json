@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Cloudflare Code Mode: QuickJS sandbox executor and the brain MCP server. Owner: lane A (Claude).",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@fahq/contracts": "*" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@cloudflare/codemode": "^0.5.5",
+    "@fahq/contracts": "*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "quickjs-emscripten": "^0.32.0",
+    "zod": "^4.6.7",
+    "@fahq/brain": "*"
+  }
 }
