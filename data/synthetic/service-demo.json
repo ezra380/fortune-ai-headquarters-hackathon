@@ -1,0 +1,72 @@
+{
+  "synthetic": true,
+  "scenario": "All records are invented. Evaluate relative to as_of, not the current clock.",
+  "as_of": "2026-10-26T12:00:00Z",
+  "customers": [
+    {
+      "id": "demo-c001",
+      "name": "Demo Customer One"
+    },
+    {
+      "id": "demo-c002",
+      "name": "Demo Customer Two"
+    }
+  ],
+  "orders": [
+    {
+      "id": "demo-o001",
+      "customer_id": "demo-c001",
+      "status": "delivered",
+      "delivered_at": "2026-10-15T12:00:00Z"
+    },
+    {
+      "id": "demo-o002",
+      "customer_id": "demo-c002",
+      "status": "processing"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "demo-t001",
+      "customer_id": "demo-c001",
+      "order_id": "demo-o001",
+      "type": "repair",
+      "status": "open",
+      "promised_followup_at": "2026-10-23T12:00:00Z",
+      "last_staff_response_at": "2026-10-20T12:00:00Z"
+    },
+    {
+      "id": "demo-t002",
+      "customer_id": "demo-c002",
+      "order_id": "demo-o002",
+      "type": "order_status",
+      "status": "resolved",
+      "promised_followup_at": "2026-10-24T12:00:00Z",
+      "last_staff_response_at": "2026-10-24T10:00:00Z"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "demo-msg001",
+      "ticket_id": "demo-t001",
+      "role": "customer",
+      "text": "Can you confirm when my repair will be ready? I was expecting an update."
+    },
+    {
+      "id": "demo-msg002",
+      "ticket_id": "demo-t002",
+      "role": "staff",
+      "text": "Your order status was confirmed and the question is resolved."
+    }
+  ],
+  "expected_review": {
+    "missed_followups": [
+      "demo-t001"
+    ],
+    "do_not_flag_as_overdue": [
+      "demo-t002"
+    ],
+    "required_action_status": "draft",
+    "external_actions_allowed": false
+  }
+}
