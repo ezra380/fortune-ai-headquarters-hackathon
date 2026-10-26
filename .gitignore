@@ -1,0 +1,23 @@
+# Local credentials and private state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+private/
+exports/
+logs/
+*.log
+.local/
+# Generated dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
