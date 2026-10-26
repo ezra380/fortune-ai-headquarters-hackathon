@@ -6,9 +6,9 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openBrain } from '@fahq/brain';
-import type { WorkerDeps } from '../src/flows.ts';
+import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { runUntilIdle } from '../src/runner.ts';
-import { createStore } from '../src/store.ts';
+import { createStore, type TaskRow } from '../src/store.ts';
 import { dataMock, modelMock } from './fixtures.ts';
 
 // The whole chain on the real local database and the real Meterless engines. Only NVIDIA and the
@@ -108,5 +108,39 @@ describe.skipIf(!api)('finance chain end to end (real DB + real Meterless; model
     expect(stored.rows[0].body).not.toMatch(/\d{6}/);
     const steps = await pool.query(`select step, outcome from public.receipts where step in ('front-door','finance.plans','approval.forward','approval.decide') order by id desc limit 10`);
     expect(steps.rows.map((r: { step: string }) => r.step)).toEqual(expect.arrayContaining(['front-door', 'finance.plans', 'approval.forward', 'approval.decide']));
+  });
+
+  it('re-running a step after a crash keeps the plans, the code already sent and the approval', async () => {
+    const taskRow = async (kind: string) =>
+      (await pool.query(`select id, assistant_id, kind, status, payload, attempts, max_attempts from public.tasks where kind = $1 order by created_at desc limit 1`, [kind])).rows[0] as TaskRow;
+    const planCalls = () => (deps.models.nvidia as ReturnType<typeof modelMock>).calls.filter((c) => c === 'finance.plans').length;
+
+    await textIn(ownerPhone, 'Three safe plans for next month, please.');
+    const proposalSms = lastTo(ownerPhone);
+    const forwardCode = /SEND <1-3> (\d{6})/.exec(proposalSms)?.[1] ?? '';
+    const before = { plans: planCalls(), texts: sms.length };
+
+    // The mailbox task runs again (as after a crash past its last write): nothing new is produced.
+    expect((await handleTask(await taskRow('mailbox'), deps)).status).toBe('done');
+    await runUntilIdle(deps);
+    expect(planCalls()).toBe(before.plans);
+    expect(sms.length).toBe(before.texts);
+
+    // The right code under the wrong command word is refused and stays usable.
+    await textIn(ownerPhone, `CONFIRM ${forwardCode}`);
+    expect(lastTo(ownerPhone)).toContain('That code is for sending a plan');
+    await textIn(ownerPhone, `SEND 1 ${forwardCode}`);
+    expect(lastTo(ownerPhone)).toContain('Sent plan 1');
+    const forwards = () => sms.filter((m) => m.to === financePhone && m.body.includes('sent you plan')).length;
+    const forwardsBefore = forwards();
+
+    // The SEND task runs again: it resumes instead of "That code didn't work", and sends nothing twice.
+    const sendTask = await taskRow('inbound_text');
+    expect((await handleTask(sendTask, deps)).status).toBe('done');
+    await runUntilIdle(deps);
+    expect(forwards()).toBe(forwardsBefore);
+    // Replies share the task's dedupe key, so the receipts tell whether the re-run resumed or refused.
+    const receipts = await pool.query(`select outcome from public.receipts where task_id = $1 and step = 'approval.forward' order by id`, [sendTask.id]);
+    expect(receipts.rows.map((r: { outcome: string }) => r.outcome)).toEqual(['ok', 'ok']);
   });
 });

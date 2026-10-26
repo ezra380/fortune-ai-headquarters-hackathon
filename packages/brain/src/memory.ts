@@ -17,6 +17,9 @@ export class AssistantMemory {
   ) {}
 
   rememberProposal(input: { proposalId: string; summary: string; runId: string }): MemoryRecordLike {
+    // A retried task calls this again: keep one memory per proposal.
+    const existing = this.hmem.store.all().find((m) => m.tags.includes('proposal') && m.tags.includes(`proposal:${input.proposalId}`));
+    if (existing) return existing;
     return this.hmem.add({
       content: `Proposal ${input.proposalId}: ${input.summary}`.slice(0, 2000),
       type: 'general',
@@ -38,6 +41,10 @@ export class AssistantMemory {
   }): MemoryRecordLike {
     const proposal = this.hmem.store.all().find((m) => m.tags.includes(`proposal:${input.proposalId}`) && m.tags.includes('unapproved'));
     const word = input.verdict === 'signed' ? 'approved' : 'declined';
+    // A retried task calls this again: keep one decision per person, proposal and verdict.
+    const existing = this.hmem.store.all().find((m) =>
+      m.tags.includes('decision') && m.tags.includes(word) && m.tags.includes(`proposal:${input.proposalId}`) && m.content.includes(` ${input.personId} `));
+    if (existing) return existing;
     return this.hmem.add({
       content: `Decision: ${input.personId} ${word} plan ${input.planRank ?? '-'} "${input.planTitle}" (proposal ${input.proposalId}).`,
       type: 'factual',

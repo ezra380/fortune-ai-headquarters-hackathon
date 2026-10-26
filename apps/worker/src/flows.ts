@@ -104,51 +104,65 @@ async function mailbox(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
   const requester = await deps.store.personByAssistant(request.from_assistant);
   const askText = String(request.body.text ?? '');
 
-  if (!deps.data) {
-    await text(deps, requester, 'finance', "Business data isn't connected yet, so I can't prepare plans. Nothing was sent.", `reply:${task.id}`);
-    return fail('business data (packages/data) is not connected');
-  }
-  const started = deps.now();
-  let result;
-  try {
-    result = await writePlans({
-      model: deps.models.nvidia, planModel: deps.models.planModel, data: deps.data,
-      memory: deps.brain.memory('finance'), now: started, request: askText, period: deps.period,
+  // A retry after the plans were stored reuses them: plans are never regenerated under a code that
+  // may already be on the owner's phone.
+  let proposal = await deps.store.messageByKey(`proposal:${request.id}`);
+  if (!proposal) {
+    if (!deps.data) {
+      await text(deps, requester, 'finance', "Business data isn't connected yet, so I can't prepare plans. Nothing was sent.", `reply:${task.id}`);
+      return fail('business data (packages/data) is not connected');
+    }
+    const started = deps.now();
+    let result;
+    try {
+      result = await writePlans({
+        model: deps.models.nvidia, planModel: deps.models.planModel, data: deps.data,
+        memory: deps.brain.memory('finance'), now: started, request: askText, period: deps.period,
+      });
+    } catch (error) {
+      const detail = error instanceof PlanError ? error.objections.join(' | ') : error instanceof Error ? error.message : 'unknown error';
+      await receipt(deps, { runId, taskId: task.id, step: 'finance.plans', assistant: 'finance', started, outcome: 'failed', model: deps.models.planModel, detail });
+      await text(deps, requester, 'finance', "I couldn't produce plans whose numbers all check out, so I'm not sending any. The reasons are on the console.", `reply:${task.id}`);
+      return fail(`plans not produced: ${detail}`);
+    }
+    await receipt(deps, {
+      runId, taskId: task.id, step: 'finance.plans', assistant: 'finance', started, outcome: 'ok', model: result.model,
+      dataSource: `zetaris:${result.view}#${result.queryHash.slice(0, 12)}`,
+      detail: `attempts ${result.attempts}, tokens ${result.tokens}, cited ${result.citedMetricIds.length} metrics`,
     });
-  } catch (error) {
-    const detail = error instanceof PlanError ? error.objections.join(' | ') : error instanceof Error ? error.message : 'unknown error';
-    await receipt(deps, { runId, taskId: task.id, step: 'finance.plans', assistant: 'finance', started, outcome: 'failed', model: deps.models.planModel, detail });
-    await text(deps, requester, 'finance', "I couldn't produce plans whose numbers all check out, so I'm not sending any. The reasons are on the console.", `reply:${task.id}`);
-    return fail(`plans not produced: ${detail}`);
+    const cited = result.metrics.filter((m) => result.citedMetricIds.includes(m.id));
+    proposal = await deps.store.postMessage({
+      from: 'finance', to: request.from_assistant, kind: 'proposal', replyTo: request.id, dedupeKey: `proposal:${request.id}`,
+      body: { plans: result.plans, metrics: cited, queryHash: result.queryHash, view: result.view, model: result.model, declinedEchoes: result.declinedEchoes, requestText: askText },
+    });
   }
-  await receipt(deps, {
-    runId, taskId: task.id, step: 'finance.plans', assistant: 'finance', started, outcome: 'ok', model: result.model,
-    dataSource: `zetaris:${result.view}#${result.queryHash.slice(0, 12)}`,
-    detail: `attempts ${result.attempts}, tokens ${result.tokens}, cited ${result.citedMetricIds.length} metrics`,
-  });
 
-  const cited = result.metrics.filter((m) => result.citedMetricIds.includes(m.id));
-  const proposal = await deps.store.postMessage({
-    from: 'finance', to: request.from_assistant, kind: 'proposal', replyTo: request.id, dedupeKey: `proposal:${request.id}`,
-    body: { plans: result.plans, metrics: cited, queryHash: result.queryHash, view: result.view, model: result.model, declinedEchoes: result.declinedEchoes, requestText: askText },
-  });
-  const stamp = { at: deps.now().toISOString(), runId };
+  // Everything below reads the stored proposal, so a re-run repeats it exactly (each step is keyed).
+  const plans = proposal.body.plans as ProfitPlans;
+  const view = String(proposal.body.view ?? '');
+  const queryHash = String(proposal.body.queryHash ?? '');
+  const citedMetricIds = citedMetricsOf(proposal).map((m) => m.id);
+  const declinedEchoes = (proposal.body.declinedEchoes as { rank: number }[] | undefined) ?? [];
   await deps.brain.record.proposal({
     proposalId: proposal.id, requestTaskId: String(request.body.taskId ?? request.id), by: 'finance', forPersonId: requester.id,
-    titles: result.plans.plans.map((p) => p.title), citedMetricIds: result.citedMetricIds,
-    dataSource: `zetaris:${result.queryHash}`, ...stamp,
+    titles: plans.plans.map((p) => p.title), citedMetricIds, dataSource: `zetaris:${queryHash}`,
+    at: new Date(proposal.created_at).toISOString(), runId,
   });
-  deps.brain.memory('finance').rememberProposal({ proposalId: proposal.id, summary: result.plans.plans.map((p) => `${p.rank}. ${p.title}`).join(' / '), runId });
+  deps.brain.memory('finance').rememberProposal({ proposalId: proposal.id, summary: plans.plans.map((p) => `${p.rank}. ${p.title}`).join(' / '), runId });
 
   const financeOwner = await deps.store.personByAssistant('finance');
   const code = newCode();
-  await deps.store.createApproval({ messageId: proposal.id, personId: requester.id, action: 'forward_plan', code, now: deps.now() });
-  const echoes = result.declinedEchoes.length
-    ? `\nNote: plan ${[...new Set(result.declinedEchoes.map((e) => e.rank))].join(', ')} resembles an idea that was declined before.`
+  const echoes = declinedEchoes.length
+    ? `\nNote: plan ${[...new Set(declinedEchoes.map((e) => e.rank))].join(', ')} resembles an idea that was declined before.`
     : '';
-  await text(deps, requester, 'finance',
-    `Your finance assistant's 3 plans (every number checked against ${result.view}):\n${planDigest(result.plans)}${echoes}\nReply SEND <1-3> ${code} to send one to ${financeOwner.name}. The code expires in 15 minutes.`,
-    `proposal-sms:${proposal.id}`);
+  await deps.store.issueApproval({
+    messageId: proposal.id, personId: requester.id, action: 'forward_plan', code, from: 'finance', now: deps.now(),
+    smsDedupeKey: `proposal-sms:${proposal.id}`,
+    smsBody: fitSms(
+      `Your finance assistant's 3 plans (every number checked against ${view}):\n${planDigest(plans)}${echoes}`,
+      `Reply SEND <1-3> ${code} to send one to ${financeOwner.name}. The code expires in 15 minutes.`,
+    ),
+  });
   await deps.store.addOutbox({ channel: 'print', toPersonId: requester.id, from: 'finance', body: 'Proposal printout', attachmentRef: `proposal:${proposal.id}`, dedupeKey: `proposal-print:${proposal.id}` });
   await deps.store.setMessageStatus(request.id, 'answered');
   return done;
@@ -177,7 +191,15 @@ async function forwardPlan(
   command: Extract<Command, { kind: 'send' }>, person: PersonRow, task: TaskRow, deps: WorkerDeps,
   runId: string, started: Date, reply: (b: string) => Promise<void>,
 ): Promise<Outcome> {
-  const used = await deps.store.useApprovalCode({ phone: person.phone, code: command.code, verdict: 'signed', detail: { planRank: command.planRank }, now: started });
+  const used = await deps.store.useApprovalCode({
+    phone: person.phone, code: command.code, verdict: 'signed', action: 'forward_plan', taskId: task.id,
+    detail: { planRank: command.planRank }, now: started,
+  });
+  if (used.outcome === 'wrong_action') {
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code is for a decision' });
+    await reply(`That code is for a decision: reply CONFIRM <code> or DECLINE <code>. Nothing was sent.`);
+    return done;
+  }
   if (used.outcome !== 'signed' || used.action !== 'forward_plan' || !used.message_id) {
     await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code refused' });
     await reply("That code didn't work or has expired. Nothing was sent.");
@@ -193,10 +215,14 @@ async function forwardPlan(
     body: { proposalId: proposal.id, planRank: command.planRank, forwardedBy: person.id },
   });
   const code = newCode();
-  await deps.store.createApproval({ messageId: forward.id, personId: financeOwner.id, action: 'decide_plan', code, now: deps.now() });
-  await text(deps, financeOwner, 'finance',
-    `${person.name} sent you plan ${plan.rank}: ${plan.title}\n${plan.summary}\nTest: ${plan.test}\nStop-loss: ${plan.stopLoss}\nReply CONFIRM ${code} or DECLINE ${code}. The code expires in 15 minutes.`,
-    `forward-sms:${forward.id}`);
+  await deps.store.issueApproval({
+    messageId: forward.id, personId: financeOwner.id, action: 'decide_plan', code, from: 'finance', now: deps.now(),
+    smsDedupeKey: `forward-sms:${forward.id}`,
+    smsBody: fitSms(
+      `${person.name} sent you plan ${plan.rank}: ${plan.title}\n${plan.summary}\nTest: ${plan.test}\nStop-loss: ${plan.stopLoss}`,
+      `Reply CONFIRM ${code} or DECLINE ${code}. The code expires in 15 minutes.`,
+    ),
+  });
   await deps.store.addOutbox({ channel: 'print', toPersonId: financeOwner.id, from: 'finance', body: `Plan ${plan.rank} for decision`, attachmentRef: `proposal:${proposal.id}`, dedupeKey: `forward-print:${forward.id}` });
   await deps.brain.record.decision({ proposalId: proposal.id, personId: person.id, personName: person.name, verdict: 'signed', planRank: plan.rank, action: 'forward_plan', at: deps.now().toISOString(), runId });
   await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: person.assistant_id, started, outcome: 'ok', detail: `plan ${plan.rank} forwarded to ${financeOwner.id}` });
@@ -209,7 +235,14 @@ async function decidePlan(
   runId: string, started: Date, reply: (b: string) => Promise<void>,
 ): Promise<Outcome> {
   const verdict = command.kind === 'confirm' ? 'signed' : 'declined';
-  const used = await deps.store.useApprovalCode({ phone: person.phone, code: command.code, verdict, detail: {}, now: started });
+  const used = await deps.store.useApprovalCode({
+    phone: person.phone, code: command.code, verdict, action: 'decide_plan', taskId: task.id, detail: {}, now: started,
+  });
+  if (used.outcome === 'wrong_action') {
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code is for sending a plan' });
+    await reply(`That code is for sending a plan: reply SEND <1-3> <code>. Nothing was recorded.`);
+    return done;
+  }
   if (used.outcome !== verdict || used.action !== 'decide_plan' || !used.message_id) {
     await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: person.assistant_id, started, outcome: 'refused', detail: 'code refused' });
     await reply("That code didn't work or has expired. Nothing was recorded.");
@@ -231,6 +264,12 @@ async function decidePlan(
   await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: 'finance', started, outcome: 'ok', detail: `plan ${planRank} ${word} by ${person.id}` });
   await reply(`Recorded: you ${word} plan ${planRank}. Thank you.`);
   return done;
+}
+
+/** An SMS body of at most 1600 characters that always keeps its last line (the code and how to reply). */
+export function fitSms(head: string, tail: string): string {
+  const room = 1600 - tail.length - 1;
+  return `${head.length > room ? `${head.slice(0, room - 1).trimEnd()}…` : head}\n${tail}`;
 }
 
 export function citedMetricsOf(proposal: MessageRow): Metric[] {

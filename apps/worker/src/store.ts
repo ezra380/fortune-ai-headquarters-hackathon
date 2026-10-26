@@ -98,13 +98,37 @@ export function createStore(url: string, serviceKey: string) {
         { onConflict: 'idempotency_key', ignoreDuplicates: true },
       ), 'enqueue task');
     },
-    async createApproval(a: { messageId: string; personId: string; action: 'forward_plan' | 'decide_plan'; code: string; now: Date }) {
-      return must(await db.rpc('create_approval', { p_message_id: a.messageId, p_person_id: a.personId, p_action: a.action, p_code: a.code, p_ttl_minutes: 15, p_now: a.now.toISOString() }), 'create approval') as string;
+    async messageByKey(dedupeKey: string): Promise<MessageRow | null> {
+      return must(await db.from('assistant_messages').select('*').eq('dedupe_key', dedupeKey).maybeSingle(), 'message') as MessageRow | null;
     },
-    async useApprovalCode(a: { phone: string; code: string; verdict: 'signed' | 'declined'; detail: Record<string, unknown>; now: Date }) {
-      const rows = must(await db.rpc('use_approval_code', { p_phone: a.phone, p_code: a.code, p_verdict: a.verdict, p_detail: a.detail, p_now: a.now.toISOString() }), 'use approval code') as
-        { approval_id: string | null; message_id: string | null; action: 'forward_plan' | 'decide_plan' | null; outcome: string }[];
-      return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused' };
+    /**
+     * Issues a code and queues the text that carries it, in one transaction keyed by the text's
+     * dedupe key. If that text was already queued, nothing changes (created = false): the code the
+     * person already has stays valid.
+     */
+    async issueApproval(a: {
+      messageId: string; personId: string; action: 'forward_plan' | 'decide_plan'; code: string;
+      from: AssistantId; smsBody: string; smsDedupeKey: string; now: Date;
+    }): Promise<{ created: boolean }> {
+      const rows = must(await db.rpc('issue_approval', {
+        p_message_id: a.messageId, p_person_id: a.personId, p_action: a.action, p_code: a.code,
+        p_from_assistant: a.from, p_sms_body: a.smsBody, p_sms_dedupe_key: a.smsDedupeKey, p_ttl_minutes: 15, p_now: a.now.toISOString(),
+      }), 'issue approval') as { approval_id: string | null; created: boolean }[];
+      return { created: rows[0]?.created === true };
+    },
+    /**
+     * Spends a code for one action. The same task presenting the same code again gets the original
+     * outcome back (replay = true), so a retried task resumes instead of losing the approval.
+     */
+    async useApprovalCode(a: {
+      phone: string; code: string; verdict: 'signed' | 'declined'; action: 'forward_plan' | 'decide_plan';
+      taskId: string; detail: Record<string, unknown>; now: Date;
+    }) {
+      const rows = must(await db.rpc('use_approval_code', {
+        p_phone: a.phone, p_code: a.code, p_verdict: a.verdict, p_action: a.action, p_task_id: a.taskId, p_detail: a.detail, p_now: a.now.toISOString(),
+      }), 'use approval code') as
+        { approval_id: string | null; message_id: string | null; action: 'forward_plan' | 'decide_plan' | null; outcome: string; replay: boolean }[];
+      return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused', replay: false };
     },
     async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
       must(await db.from('outbox').upsert(

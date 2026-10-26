@@ -112,13 +112,17 @@ describe('approval codes', () => {
       ['test:' + randomUUID()],
     );
     const messageId = msg.rows[0].id as string;
-    const approval = await pool.query('select public.create_approval($1, $2, $3, $4, $5, $6) as id', [
-      messageId, 'demo-p-owner', 'forward_plan', code, ttl, T0,
-    ]);
-    return { messageId, approvalId: approval.rows[0].id as string };
+    const smsKey = 'test-sms:' + randomUUID();
+    const approval = await issue(messageId, code, smsKey, ttl);
+    return { messageId, smsKey, approvalId: approval.approval_id as string };
   }
-  const use = (phone: string, code: string, at = '2026-10-26T12:05:00Z') =>
-    pool.query('select * from public.use_approval_code($1, $2, $3, $4, $5)', [phone, code, 'signed', '{}', at]).then((r) => r.rows[0]);
+  const issue = (messageId: string, code: string, smsKey: string, ttl = 15) =>
+    pool.query('select * from public.issue_approval($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
+      messageId, 'demo-p-owner', 'forward_plan', code, 'finance', `Reply SEND <1-3> ${code}`, smsKey, ttl, T0,
+    ]).then((r) => r.rows[0] as { approval_id: string | null; created: boolean });
+  const use = (phone: string, code: string, at = '2026-10-26T12:05:00Z', action = 'forward_plan', taskId: string | null = null) =>
+    pool.query('select * from public.use_approval_code($1, $2, $3, $4, $5, $6, $7)', [phone, code, 'signed', action, taskId, '{}', at]).then((r) => r.rows[0]);
+  const newTask = async () => (await enqueue(sid(), OWNER)).task_id as string;
 
   it('signs once with the right person and code, and never again', async ({ skip }) => {
     if (!reachable) skip();
@@ -137,6 +141,42 @@ describe('approval codes', () => {
     await proposalWithApproval(code, 15);
     expect((await use(OWNER, 'yes')).outcome).toBe('refused');
     expect((await use(OWNER, code, '2026-10-26T12:16:00Z')).outcome).toBe('refused');
+  });
+
+  it('refuses a code under the wrong command word without spending it', async ({ skip }) => {
+    if (!reachable) skip();
+    const code = String(100000 + Math.floor(Math.random() * 899999));
+    const { approvalId } = await proposalWithApproval(code);
+    expect((await use(OWNER, code, undefined, 'decide_plan')).outcome).toBe('wrong_action');
+    expect((await use(OWNER, code)).approval_id).toBe(approvalId); // still usable for SEND
+  });
+
+  it('lets a retried task resume with the code it already spent, and nobody else', async ({ skip }) => {
+    if (!reachable) skip();
+    const code = String(100000 + Math.floor(Math.random() * 899999));
+    const { approvalId, messageId } = await proposalWithApproval(code);
+    const task = await newTask();
+    const first = await use(OWNER, code, undefined, 'forward_plan', task);
+    expect(first).toMatchObject({ approval_id: approvalId, outcome: 'signed', replay: false });
+    const retry = await use(OWNER, code, '2026-10-26T12:30:00Z', 'forward_plan', task); // after expiry, too
+    expect(retry).toMatchObject({ approval_id: approvalId, message_id: messageId, outcome: 'signed', replay: true });
+    expect((await use(OWNER, code, undefined, 'forward_plan', await newTask())).outcome).toBe('refused'); // another task
+  });
+
+  it('issues a code once per text: a re-run keeps the code already sent', async ({ skip }) => {
+    if (!reachable) skip();
+    const code = String(100000 + Math.floor(Math.random() * 899999));
+    const { messageId, smsKey, approvalId } = await proposalWithApproval(code);
+    const rerun = await issue(messageId, '111111', smsKey);
+    expect(rerun.created).toBe(false);
+    expect((await use(OWNER, '111111')).outcome).toBe('refused'); // the re-run minted nothing
+    expect((await use(OWNER, code)).approval_id).toBe(approvalId); // the code on the phone still works
+    const { rows } = await pool.query('select count(*)::int as n from public.outbox where dedupe_key = $1', [smsKey]);
+    expect(rows[0].n).toBe(1);
+    await expect(issue(messageId, '222222', 'test-sms:' + randomUUID()).then(() => null, (e: Error) => e.message)).resolves.toBeNull();
+    await expect(pool.query('select * from public.issue_approval($1, $2, $3, $4, $5, $6, $7, $8, $9)', [
+      messageId, 'demo-p-owner', 'forward_plan', '333333', 'finance', 'no code here', 'test-sms:' + randomUUID(), 15, T0,
+    ])).rejects.toThrow(/must carry the code/);
   });
 
   it('locks pending approvals after five wrong codes', async ({ skip }) => {
