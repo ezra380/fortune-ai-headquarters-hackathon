@@ -2,7 +2,7 @@ import type { Metric, ProposalDocument } from './schemas.ts';
 
 // Ports are the seams between lanes. A lane implements a port; lane A's worker consumes it.
 
-/** Lane B (Cursor): business numbers through Zetaris. Read-only. */
+/** packages/data: business numbers through Zetaris. Read-only. */
 export interface DataPort {
   /** Cheap reachability check; never throws. */
   health(): Promise<{ ok: boolean; detail: string }>;

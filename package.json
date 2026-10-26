@@ -18,7 +18,9 @@
     "db:reset": "supabase db reset",
     "db:status": "supabase status",
     "worker": "tsx apps/worker/src/main.ts",
-    "mcp": "tsx packages/codemode/src/serve.ts"
+    "console": "tsx apps/console/src/server.ts",
+    "mcp": "tsx packages/codemode/src/serve.ts",
+    "zetaris:setup": "tsx scripts/zetaris-setup.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

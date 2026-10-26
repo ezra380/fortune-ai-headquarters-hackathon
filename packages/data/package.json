@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Synthetic business sources, local source APIs, Zetaris setup and the DataPort adapter. Owner: lane B (Cursor).",
+  "description": "Synthetic business sources, local source APIs, Zetaris setup and the DataPort adapter. Owner: lane A (Claude).",
   "exports": { ".": "./src/index.ts" },
   "dependencies": { "@fahq/contracts": "*" }
 }
