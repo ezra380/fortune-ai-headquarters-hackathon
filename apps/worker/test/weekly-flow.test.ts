@@ -548,7 +548,7 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     const task: TaskRow = { id: queued.id, assistant_id: 'owner', kind: 'scheduled', status: 'running', payload: queued.payload, attempts: 1, max_attempts: 3 };
     expect(await handleTask(task, deps)).toEqual({ status: 'done' });
     const words = [
-      `Weekly reports, week of ${monday}:`,
+      `Joey: weekly reports, week of ${monday}:`,
       'Salon: running normally.',
       `Finance: needs a look — ${financeWords(monday).ceoLine}`,
       `Online: needs a decision — ${onlineWords.ceoLine}`,

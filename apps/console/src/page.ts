@@ -112,7 +112,7 @@ const SCRIPT = `
   var sub = HEAD || 'overview';
   var lastBody = null;
 
-  var NAMES = { owner: 'Owner HQ', finance: 'Finance', online: 'Online customer service', manager: 'HQ Manager', salon: 'Salon (Cindy)' };
+  var NAMES = { owner: 'Joey (Owner HQ)', finance: 'Finance', online: 'Online customer service', manager: 'HQ Manager', legal: 'Legal Team', salon: 'Salon (Cindy)' };
   var TONE = {
     ok: 'ok', done: 'ok', sent: 'ok', signed: 'ok', answered: 'ok', closed: 'ok', adopted: 'ok',
     refused: 'warn', skipped: 'warn', waiting: 'warn', pending: 'warn', queued: 'warn', running: 'warn',
@@ -592,7 +592,7 @@ const SCRIPT = `
   }
 
   function digestSection(d) {
-    return section('CEO digest', 'The very short text Owner HQ sends the owner: one line per division. The heads get the detail in their own briefs.',
+    return section('CEO digest', 'The very short text Joey, the CEO assistant, sends the owner: one line per division. The heads get the detail in their own briefs.',
       d.digest ? [d.digest] : [], function (li, dg) {
         li.appendChild(h('div', 'text digest', dg.text));
         var chips = h('div', 'chips');
@@ -605,7 +605,7 @@ const SCRIPT = `
         li.appendChild(h('div', 'meta', 'Written ' + when(dg.createdAt)));
       }, has(d.unread, 'digest')
         ? 'The latest digest could not be read right now. See the notes above.'
-        : 'No digest yet. Owner HQ writes one each morning once the divisions have reported.');
+        : 'No digest yet. Joey writes one each morning once the divisions have reported.');
   }
 
   function subnav() {
@@ -660,7 +660,8 @@ const SCRIPT = `
       who.appendChild(document.createTextNode('Assistant: '));
       who.appendChild(h('b', null, d.assistant.displayName || 'not named yet'));
       who.appendChild(document.createTextNode(d.assistant.number ? ' \\u00b7 texts from ' + d.assistant.number
-        : d.id === 'manager' ? ' \\u00b7 has no number; it reaches the owner through Owner HQ' : ' \\u00b7 no texting number yet'));
+        : d.id === 'manager' ? ' \\u00b7 has no number; it reaches the owner through Joey'
+        : d.id === 'legal' ? ' \\u00b7 has no number; the owner asks it through Joey' : ' \\u00b7 no texting number yet'));
     } else {
       who.appendChild(document.createTextNode('This assistant has no record yet.'));
     }

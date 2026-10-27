@@ -19,7 +19,8 @@ its head. The head decides and does the work. The assistant never acts.
 The salon assistant is a stand-in for Cindy, the head stylist's own assistant (a separate app), and works on synthetic salon
 data. The salon and the online store are two businesses and are never merged into one number.
 
-The **HQ Manager** (`manager`) sits under Owner HQ. It is not a division. It receives every assistant's end-of-work report and
+The CEO division's assistant (`owner`, Owner HQ) is **Joey**, Ezra's CEO assistant (Ezra, 2026-10-27: "You could call my CEO
+assistant by the name of Joey"); the id stays `owner`. The **HQ Manager** (`manager`) sits under Joey. It is not a division. It receives every assistant's end-of-work report and
 recommends changes to the assistants' profiles; the owner adopts each one with a code ([manager.md](manager.md)).
 
 ### The brief
@@ -107,7 +108,7 @@ The rest of this page is the reference: what the code does, step by step, and th
           the third status line queues the digest
 08:30 ET  scheduler: all three in, the digest is queued (same key); a brief still being worked on, it waits;
           a brief stopped for good, or 10:30 come, a PARTIAL digest is queued (the complete one still follows)
-          Owner HQ texts the owner the digest: one line per division, 480 characters at most
+          Joey texts the owner the digest: one line per division, 480 characters at most
 head      replies APPROVE 1 3 <code>: the decisions are recorded; the head carries the actions out
 ```
 
@@ -207,11 +208,11 @@ and the reply says which command it is for. Only the person the code was issued 
 
 ## The CEO digest
 
-`apps/worker/src/digest.ts`. One text from Owner HQ to the owner: a heading and one line per division, **written by a
+`apps/worker/src/digest.ts`. One text from Joey to the owner: a heading and one line per division, **written by a
 program, never a model**, at most 480 characters.
 
 ```
-Company status for 2026-10-27:
+Joey: company status for 2026-10-27:
 Salon: running normally.
 Finance: needs a look — Finance has something to watch; its head has the detail.
 Online: no report yet.
@@ -226,7 +227,7 @@ Online: no report yet.
   out, never cut), the shortest keep all they need and the long ones share what is left.
 - It reads the newest `division_status` report of the day for each division from the mailbox.
 
-**When it is written.** A scheduled task for Owner HQ, `{ job: 'ceo_digest', date, request?, partial? }`, key `digest:<date>`
+**When it is written.** A scheduled task for Joey, `{ job: 'ceo_digest', date, request?, partial? }`, key `digest:<date>`
 (or `digest:<date>:<id of the BRIEF text>`). It is queued when the third division's brief is delivered (that delivery sees all
 three status lines of its run), and the 08:30 clock queues the same key when it finds all three in, so there is one complete
 digest a day. The clock never queues a digest ahead of briefs still being worked on (see the daily clock); when it has to go
@@ -238,7 +239,7 @@ never a second text. A report that arrives after a digest went out is not added 
 **STATUS.** The owner texting `STATUS` gets the digest built right now from the reports that are in (so a late report
 shows). A division head's `STATUS` is unchanged: "Open items for your assistant: N."
 
-**No live number.** If the Owner HQ assistant has no live number, no text is sent; the `digest.send` receipt says so.
+**No live number.** If Joey (the `owner` assistant) has no live number, no text is sent; the `digest.send` receipt says so.
 
 ## The daily clock
 

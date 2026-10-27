@@ -156,7 +156,7 @@ Each assistant is its own department, with its own text number, memory, mailbox 
 
 | Department | Assistant | Number (in `.env.local`, never in git) |
 |---|---|---|
-| Owner HQ | the owner's head assistant / manager | `TWILIO_FROM_OWNER_ASSISTANT` |
+| Joey (Owner HQ) | the owner's CEO assistant (id `owner`) | `TWILIO_FROM_OWNER_ASSISTANT` |
 | Finance Department | the finance owner's assistant (money decisions, marketing reports) | `TWILIO_FROM_FINANCE_ASSISTANT` |
 | Online Customer Service Department | the online customer-service manager | `TWILIO_FROM_ONLINE_ASSISTANT` |
 | Salon Department | Cindy, the head stylist's existing assistant (separate app); here a stand-in on synthetic salon data | her own number |

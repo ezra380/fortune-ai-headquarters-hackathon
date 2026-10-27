@@ -10,6 +10,9 @@ export const ManagedDivision = z.enum(['finance', 'online', 'salon']);
 export type ManagedDivision = z.infer<typeof ManagedDivision>;
 
 /** Who runs each division and whom they report to (Ezra, 2026-10-27). Display names only: people rows hold the rest. */
+/** The CEO division's assistant (assistant id 'owner', Owner HQ) and its head. Ezra, 2026-10-27: "You could call my CEO assistant by the name of Joey". */
+export const CEO_ASSISTANT = { name: 'Joey', head: 'Ezra', title: 'CEO' } as const;
+
 export const MANAGERS: Record<ManagedDivision, { manager: string; head: string; title: string }> = {
   finance: { manager: 'George', head: 'Alan', title: 'Finance' },
   online: { manager: 'Georgette', head: 'Emma', title: 'Online' },

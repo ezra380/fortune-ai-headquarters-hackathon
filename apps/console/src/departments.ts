@@ -11,10 +11,11 @@ export type DepartmentInfo = { id: DepartmentId; name: string };
 // Every department is live: the salon's assistant is a stand-in for Cindy on synthetic salon data, and it reads from the same
 // tables as the others. (Cindy's own app keeps her family and personal data; none of that is read here.)
 export const DEPARTMENTS: readonly DepartmentInfo[] = [
-  { id: 'owner', name: 'Owner HQ' },
+  { id: 'owner', name: 'Joey (Owner HQ)' }, // the CEO assistant's name (Ezra, 2026-10-27)
   { id: 'finance', name: 'Finance Department' },
   { id: 'online', name: 'Online Customer Service Department' },
   { id: 'manager', name: 'HQ Manager' },
+  { id: 'legal', name: 'Legal Team' }, // wave 2: reached through Joey's number; its work comes in through its door
   { id: 'salon', name: 'Salon Department (stand-in for Cindy)' },
 ];
 

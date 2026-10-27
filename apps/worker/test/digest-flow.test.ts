@@ -181,7 +181,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     const outcome = await handleTask(task, deps);
     return { task, outcome, reply: sent.get(`reply:${id}`) };
   };
-  const digestText = (d: string, ...lines: string[]) => [`Company status for ${d}:`, ...lines].join('\n');
+  const digestText = (d: string, ...lines: string[]) => [`Joey: company status for ${d}:`, ...lines].join('\n');
   const codeIn = (body: string | undefined) => /APPROVE <1-3> (\d{6})/.exec(body ?? '')?.[1] ?? '';
 
   // ---- BRIEF ---------------------------------------------------------------------------------------------

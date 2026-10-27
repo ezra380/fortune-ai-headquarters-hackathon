@@ -314,7 +314,7 @@ describe('the weekly CEO digest', () => {
       weeklyLine('online', 'normal', 'An older line.'),
     ]);
     expect(text).toBe([
-      'Weekly reports, week of 2100-03-01:',
+      'Joey: weekly reports, week of 2100-03-01:',
       'Salon: running normally.',
       'Finance: needs a look — Finance has something to watch; its head has the detail.',
       'Online: needs a decision — Online needs a decision from its head.',
@@ -324,7 +324,7 @@ describe('the weekly CEO digest', () => {
 
   it(`says when a division has no weekly line, and is never longer than ${DIGEST_MAX} characters`, () => {
     expect(buildWeeklyDigest('2100-03-01', [weeklyLine('finance', 'normal', 'x')]).text).toBe(
-      ['Weekly reports, week of 2100-03-01:', 'Salon: no report yet.', 'Finance: running normally.', 'Online: no report yet.'].join('\n'));
+      ['Joey: weekly reports, week of 2100-03-01:', 'Salon: no report yet.', 'Finance: running normally.', 'Online: no report yet.'].join('\n'));
     const long = (c: string) => `${c} `.repeat(70).trim();
     const { text } = buildWeeklyDigest('2100-03-01', [weeklyLine('salon', 'act', long('s')), weeklyLine('finance', 'act', long('f')), weeklyLine('online', 'act', long('o'))]);
     expect(text.length).toBeLessThanOrEqual(DIGEST_MAX);

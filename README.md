@@ -9,7 +9,7 @@ Why".
 
 ## The flagship workflow
 
-The owner texts Owner HQ: *"Get me three plans to double profit this month."*
+The owner texts Joey, his CEO assistant (Owner HQ): *"Get me three plans to double profit this month."*
 1. The SMS webhook stores the task once and answers "working on it" in about a second.
 2. An **NVIDIA Nemotron** safety screen and the Nemotron Lightning front door read the text together;
    nothing acts on a text the screen did not pass.
@@ -18,7 +18,7 @@ The owner texts Owner HQ: *"Get me three plans to double profit this month."*
    own decisions and adopted lessons from **Meterless H-MEM** and asks **Nemotron 3 Ultra** for three plans.
 4. A validator rejects any plan whose numbers don't trace to a Zetaris metric, a computed projection, or
    a declared proposed setting.
-5. **Owner HQ picks the final three** and says why; it can rank plans but never change a number.
+5. **Joey picks the final three** and says why; it can rank plans but never change a number.
 6. The owner forwards one plan with `SEND <n> <code>`, and the finance owner answers `CONFIRM <code>` or
    `DECLINE <code>`.
 7. Everything is recorded in the **Meterless World Model**. "Why plan 2?" is answered from that graph: who
@@ -43,13 +43,13 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what:
 | Plan writer (Nemotron 3 Ultra, thinking on) + number validator | **Live-tested on sample metrics** | Passed validation on the first attempt in 82 s; every run recorded in [`docs/research/live-runs-2026-10-26.md`](docs/research/live-runs-2026-10-26.md). The validator proves numbers are traceable, not that assumptions are wise; people approve. |
 | Cloudflare Code Mode over the brain MCP server | **Working** | QuickJS sandbox: no network, files or timers; deadline, memory and tool-call caps; one `code` call answers a multi-tool script |
 | Full chain request → plans → forward → decision | **Working** with models and data **mocked** | End-to-end test on the real local database and the real Meterless engines |
-| Departments propose together; Owner HQ picks three; explain why | **Working** with models **mocked** | Round, pick, number checks, retries and the World Model links tested on the real local database and Meterless; not yet run live end to end |
+| Departments propose together; Joey picks three; explain why | **Working** with models **mocked** | Round, pick, number checks, retries and the World Model links tested on the real local database and Meterless; not yet run live end to end |
 | Ask any department; department heads ask their own | **Working** | Each answers through Code Mode on its own read tools; the salon is a stand-in on synthetic data |
 | Code Mode savings | **Measured live**, 8 runs | 73–88% fewer tokens than classic tool calling every run; answers less reliable with this small model (clean 5 of 15 reasoning off, 4 of 6 on, against 20 of 21): [summary](docs/research/codemode-savings-summary-2026-10-27.md) |
 | HQ Manager: work reports, `REVIEW`, `ADOPT`, lessons | **Working** with models **mocked** | Review numbers traced to the digest; every change (a lesson, a skill note, read tools, a model) waits for the owner's code and becomes a profile version he made; a daily review at 09:00 ET; lessons reach the plan writers and every Code Mode answer |
 | Safety screen (Nemotron 3.5 content safety) | **Built**, fails closed | Every free text screened before any model acts; long texts screened in windows |
 | Business numbers through Zetaris | **Working** on local Zetaris | Three source databases federated into one governed view with data-quality rules; `npm run zetaris:setup` proves the live answer equals an independent computation (33 of 33 metrics, both periods) |
-| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Divisions (digest, briefs, data requests), Owner HQ, Finance, Online Customer Service, the HQ Manager and the Salon stand-in; loopback only, numbers masked, codes redacted |
+| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Divisions (digest, briefs, data requests), Joey (Owner HQ), Finance, Online Customer Service, the HQ Manager and the Salon stand-in; loopback only, numbers masked, codes redacted |
 | Proposal PDF, printing, SMS sender | **Built** | 9 tests; printing is skipped unless a PrintNode printer is configured |
 
 ## What runs where

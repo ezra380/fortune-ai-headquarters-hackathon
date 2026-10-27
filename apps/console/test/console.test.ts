@@ -226,10 +226,10 @@ describe('read-only and local only', () => {
     const health = await request(c.port, { path: '/health' });
     expect(JSON.parse(health.text)).toEqual({ ok: true, time: NOW.toISOString() });
     const list = JSON.parse((await request(c.port, { path: '/api/departments' })).text) as { departments: { id: string; name: string }[] };
-    expect(list.departments.map((d) => d.id)).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);
+    expect(list.departments.map((d) => d.id)).toEqual(['owner', 'finance', 'online', 'manager', 'legal', 'salon']);
     expect(list.departments.every((d) => Object.keys(d).sort().join() === 'id,name')).toBe(true); // no department is a placeholder any more
     expect(list.departments.map((d) => d.name)).toEqual([
-      'Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)',
+      'Joey (Owner HQ)', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Legal Team', 'Salon Department (stand-in for Cindy)',
     ]);
     for (const p of ['/nope', '/api', '/api/department', '/api/department/', '/api/department/finance/extra', '/api/department/FINANCE', '/api/department/%2e%2e', '/health/']) {
       expect((await request(c.port, { path: p })).status, p).toBe(404);
@@ -356,10 +356,10 @@ describe('the page', () => {
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toBe('text/html; charset=utf-8');
     for (const d of DEPARTMENTS) expect(r.text).toContain(d.name);
-    for (const name of ['Divisions', 'Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)']) expect(r.text).toContain(name);
-    // The tab order: the Divisions view first, then the department order: Owner, Finance, Online, HQ Manager, Salon.
+    for (const name of ['Divisions', 'Joey (Owner HQ)', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Legal Team', 'Salon Department (stand-in for Cindy)']) expect(r.text).toContain(name);
+    // The tab order: the Divisions view first, then the department order: Joey, Finance, Online, HQ Manager, Legal Team, Salon.
     const tabs = [...r.text.matchAll(/data-id="([a-z]+)"/g)].map((m) => m[1]);
-    expect(tabs).toEqual(['divisions', 'owner', 'finance', 'online', 'manager', 'salon']);
+    expect(tabs).toEqual(['divisions', 'owner', 'finance', 'online', 'manager', 'legal', 'salon']);
     expect(r.text).not.toContain('placeholder'); // the salon is a live tab
     expect(r.text).toContain('Work reports: what each task did, how many model calls and tokens it used, and what it suggests.');
     for (const title of ['Usage, last 24 hours', 'Latest review', 'Standing lessons']) expect(r.text).toContain(title);
@@ -742,7 +742,7 @@ describe('the HQ Manager tab', () => {
     const { d } = await getManager();
     const usage = d.manager.usage;
     expect(usage.windowHours).toBe(24);
-    expect(usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);
+    expect(usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'legal', 'salon']);
     const by = Object.fromEntries(usage.rows.map((x: { assistant: string }) => [x.assistant, x]));
     expect(by.finance).toEqual({ assistant: 'finance', tasks: 3, done: 2, failed: 1, retrying: 0, modelCalls: 6, inputTokens: 5500, outputTokens: 1000 });
     expect(by.owner).toEqual({ assistant: 'owner', tasks: 2, done: 1, failed: 0, retrying: 1, modelCalls: 2, inputTokens: 500, outputTokens: 20 });
@@ -752,11 +752,11 @@ describe('the HQ Manager tab', () => {
     expect(usage.total).toEqual({ tasks: 6, done: 4, failed: 1, retrying: 1, modelCalls: 9, inputTokens: 8500, outputTokens: 1420 });
   });
 
-  it('counts an unfamiliar assistant id in the total, after the five live rows', async () => {
+  it('counts an unfamiliar assistant id in the total, after the six live rows', async () => {
     const data = dirtyManagerData();
     data.usageRows = [...(data.usageRows ?? []), { assistant_id: 'zeta', outcome: 'done', model_calls: 1, input_tokens: 10, output_tokens: 5 }];
     const { d } = await getManager(managerRaw(data));
-    expect(d.manager.usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'salon', 'zeta']);
+    expect(d.manager.usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'legal', 'salon', 'zeta']);
     expect(d.manager.usage.total.tasks).toBe(7);
   });
 
@@ -1070,7 +1070,7 @@ describe('the page draws the new sections', () => {
       'Standing lessons', 'Newest lesson', 'Older lesson',
       'Work reports: what each task did, how many model calls and tokens it used, and what it suggests.', 'The latest 30, across all assistants.',
       'Finance: inbound text', '2 model calls', '900 in / 300 out tokens', 'Code Mode: 1 script, 3 lookups',
-      'Suggests (speed, Finance)', 'has no number; it reaches the owner through Owner HQ',
+      'Suggests (speed, Finance)', 'has no number; it reaches the owner through Joey',
     ]) expect(shown, part).toContain(part);
     expect(shown).not.toMatch(/undefined|NaN|\[object/);
     expect(shown).not.toMatch(/\d{6}/);

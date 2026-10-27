@@ -127,9 +127,9 @@ export function createCloudLoader(options: LoaderOptions): (department: Departme
   const { db, now } = options;
 
   return async (id) => {
-    if (id !== 'owner' && id !== 'finance' && id !== 'online' && id !== 'manager' && id !== 'salon') throw new Error('unknown department');
+    if (id !== 'owner' && id !== 'finance' && id !== 'online' && id !== 'manager' && id !== 'legal' && id !== 'salon') throw new Error('unknown department');
     const notes: string[] = [];
-    const mine = `from_assistant.eq.${id},to_assistant.eq.${id}`; // id is one of five fixed words, never user text
+    const mine = `from_assistant.eq.${id},to_assistant.eq.${id}`; // id is one of six fixed words, never user text
     const part = reading(notes);
 
     // What only the HQ Manager tab shows: the last day's usage, the latest review with its recommendations,

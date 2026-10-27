@@ -164,20 +164,20 @@ report does not have is refused before the code is spent, so the code still work
 
 The owner's daily digest (08:30, or after the third brief) reads only the briefs' `division_status` lines. When all
 three weekly reports of a run are in (Monday's, or a REPORT ALL text's), the last one to be delivered queues a
-**weekly CEO digest** for Owner HQ: `digest:<date>:weekly` (or `digest:<date>:weekly:<text's task id>`). It is one
+**weekly CEO digest** for Joey: `digest:<date>:weekly` (or `digest:<date>:weekly:<text's task id>`). It is one
 line per division from the managers' weekly CEO lines, by the daily digest's rules (a normal division is the fixed
 sentence "running normally."; a division that needs a look or a decision carries its CEO line, shortened by words)
 and within the same 480 characters:
 
 ```
-Weekly reports, week of 2026-10-26:
+Joey: weekly reports, week of 2026-10-26:
 Salon: running normally.
 Finance: needs a look — Finance has something to watch; its head has the detail.
 Online: needs a decision — Online needs a decision from its head.
 ```
 
 A program writes it, never a model. It is kept as `digestdoc:<key>` and texted once (`digest-sms:<key>`); with no
-live number for Owner HQ it is stored and the receipt says no text was sent. A head's own REPORT is one division's
+live number for Joey it is stored and the receipt says no text was sent. A head's own REPORT is one division's
 run, so it never completes a set and queues no digest.
 
 ## Running a worker or a report by hand

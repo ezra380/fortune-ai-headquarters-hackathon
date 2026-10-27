@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { workerDivision, type DeliveryPort, type ProfitPlans, type ProposalDocument, type ReportEmail } from '@fahq/contracts';
+import { CEO_ASSISTANT, workerDivision, type DeliveryPort, type ProfitPlans, type ProposalDocument, type ReportEmail } from '@fahq/contracts';
 import { reportContext } from '@fahq/delivery';
 import { citedMetricsOf, type WorkerDeps } from './flows.ts';
 import type { OutboxRow, PersonRow } from './store.ts';
@@ -152,7 +152,7 @@ async function proposalDocument(deps: WorkerDeps, delivery: DeliveryPort, propos
     proposalId,
     title: 'Three profit plans',
     requestedBy: requester.name,
-    preparedBy: proposal.from_assistant === 'owner' ? 'Owner HQ' : 'Finance assistant',
+    preparedBy: proposal.from_assistant === 'owner' ? `${CEO_ASSISTANT.name}, the ${CEO_ASSISTANT.title} assistant` : 'Finance assistant',
     createdAt: proposal.created_at,
     plans: proposal.body.plans as ProfitPlans,
     citedMetrics: citedMetricsOf(proposal),

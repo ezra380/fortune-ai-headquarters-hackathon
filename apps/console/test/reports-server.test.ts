@@ -113,7 +113,7 @@ describe('a head\'s own page: /?division=', () => {
     // The markup around the script and the style (the script itself is the owner's page's script, which names every tab).
     const markup = res.text.replace(/<script>[\s\S]*<\/script>/, '').replace(/<style>[\s\S]*<\/style>/, '');
     expect(markup).not.toContain('class="tab"');
-    expect(markup).not.toMatch(/Owner HQ|HQ Manager|Online Customer Service|Salon Department|data-id=|<nav/);
+    expect(markup).not.toMatch(/Owner HQ|Joey|HQ Manager|Online Customer Service|Salon Department|data-id=|<nav/);
     expect(res.text).toMatch(/<footer[^>]*>[\s\S]*Fortune Hub[\s\S]*<\/footer>/);
     expect(res.text).toContain("In production, each head's site is part of the Fortune Hub.");
     expect(c.deps.loadDivisions).not.toHaveBeenCalled();

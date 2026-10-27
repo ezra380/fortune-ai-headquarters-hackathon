@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { BriefStatus } from '@fahq/contracts';
+import { BriefStatus, CEO_ASSISTANT } from '@fahq/contracts';
 import { done, errorText, fail, isLiveNumber, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
 import { DEPARTMENT_LABEL, isDepartment, type Department } from './departments.ts';
 import type { MessageRow, PersonRow, TaskRow } from './store.ts';
@@ -92,12 +92,12 @@ function shares(lengths: readonly number[], budget: number): number[] {
  * not all fit.
  */
 export function buildDigest(date: string, rows: readonly Pick<MessageRow, 'body'>[]): { text: string; lines: DigestLine[] } {
-  return compose(`Company status for ${date}:`, digestLines(rows));
+  return compose(`${CEO_ASSISTANT.name}: company status for ${date}:`, digestLines(rows));
 }
 
 /** The weekly digest: the same lines and rules, from the managers' weekly status lines (rows newest first). */
 export function buildWeeklyDigest(weekOf: string, rows: readonly Pick<MessageRow, 'body'>[]): { text: string; lines: DigestLine[] } {
-  return compose(`Weekly reports, week of ${weekOf}:`, digestLines(rows));
+  return compose(`${CEO_ASSISTANT.name}: weekly reports, week of ${weekOf}:`, digestLines(rows));
 }
 
 function compose(heading: string, lines: DigestLine[]): { text: string; lines: DigestLine[] } {

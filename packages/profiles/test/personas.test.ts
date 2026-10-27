@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MANAGERS, WORKER_IDS, workerDivision, type ManagedDivision, type WorkerId } from '@fahq/contracts';
+import { CEO_ASSISTANT, MANAGERS, WORKER_IDS, workerDivision, type ManagedDivision, type WorkerId } from '@fahq/contracts';
 import { loadProfiles } from '../src/index.ts';
 
 // Wave 2 (docs/wave2.md): each department skill opens with its named manager, whom the manager reports to, what the
@@ -79,5 +79,17 @@ describe('the managers in the department skills', () => {
   it('keeps Online and the Salon each to their own business in the persona', () => {
     expect(section(profiles.online.skill, 'Job')).not.toMatch(/salon's money|salon numbers/);
     expect(section(profiles.salon.skill, 'Job')).not.toMatch(/online store's money|online numbers/);
+  });
+});
+
+// Ezra, 2026-10-27: "You could call my CEO assistant by the name of Joey". The assistant id stays 'owner'.
+describe('Joey, the CEO assistant', () => {
+  it('opens the owner skill: Joey, Ezra\'s CEO assistant, who reports to Ezra and serves him alone', () => {
+    const { name, head, title } = CEO_ASSISTANT;
+    expect([name, head, title]).toEqual(['Joey', 'Ezra', 'CEO']);
+    const job = section(profiles.owner.skill, 'Job');
+    expect(job.split('\n')[0]).toMatch(new RegExp(`^You are ${name}, ${head}'s ${title} assistant\\. You report to ${head}, the owner, and you serve ${head} alone\\.`));
+    expect(profiles.owner.skill).toMatch(/^# Joey \(Owner HQ\)$/m);
+    for (const d of DIVISIONS) expect(profiles[d].skill, d).not.toMatch(/\bJoey\b/); // the managers keep their own names
   });
 });

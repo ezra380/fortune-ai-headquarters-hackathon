@@ -719,7 +719,7 @@ describe('the page draws the Divisions view', () => {
     expect(empty).toContain('No brief yet. It is written each morning, or when the owner or the head texts BRIEF.');
     expect(empty).toContain('None. It has asked nothing of the other divisions.');
     expect(empty).toContain('None. No other division has asked it anything.');
-    expect(empty).toContain('No digest yet. Owner HQ writes one each morning once the divisions have reported.');
+    expect(empty).toContain('No digest yet. Joey writes one each morning once the divisions have reported.');
     expect(empty).not.toMatch(NOT_BROKEN);
 
     const unread = await drawTab('divisions', view(raw({

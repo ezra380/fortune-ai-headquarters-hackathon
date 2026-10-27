@@ -3,7 +3,7 @@
 -- Each division's assistant is its manager (George, Georgette, Cindy; docs/wave2.md), and each head is a
 -- synthetic stand-in for the person the manager reports to (Alan, Emma, Esther): a name only, no real phone or email.
 insert into public.assistants (id, display_name, sms_from) values
-  ('owner',   'Owner''s assistant',   '+15550100001'),
+  ('owner',   'Joey (CEO)',           '+15550100001'),
   ('finance', 'George (finance)',     '+15550100002'),
   ('salon',   'Cindy (salon)',        '+15550100003'),
   ('online',  'Georgette (online)',   '+15550100004');

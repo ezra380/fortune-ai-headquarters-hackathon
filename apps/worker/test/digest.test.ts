@@ -9,7 +9,7 @@ import { DIGEST_WAITS_MINUTES, GRACE_MINUTES, SCHEDULE, dueJobs, enqueueDayDiges
 
 const DAY = '2026-10-27';
 const report = (division: string, status: string, ceoLine: string) => ({ body: { type: 'division_status', division, date: DAY, status, ceoLine } });
-const HEADING = `Company status for ${DAY}:`;
+const HEADING = `Joey: company status for ${DAY}:`; // the CEO assistant's name heads the digest (Ezra, 2026-10-27)
 
 describe('the digest text', () => {
   it('has a heading and one line per division in a fixed order: a normal division is one fixed sentence, a division that needs a look says why, one with no report says so', () => {

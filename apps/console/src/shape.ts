@@ -142,7 +142,7 @@ function shapeReport(r: RawWorkReport, flag: Flag): ReportView {
 }
 
 const zeroCounts = (): UsageCounts => ({ tasks: 0, done: 0, failed: 0, retrying: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0 });
-const LIVE_ASSISTANTS = ['owner', 'finance', 'online', 'manager', 'salon'];
+const LIVE_ASSISTANTS = ['owner', 'finance', 'online', 'manager', 'legal', 'salon'];
 
 /** The last day of finished work, added up per assistant. Every live assistant has a row, even at zero. */
 function shapeUsage(source: readonly RawUsageRow[]): NonNullable<ManagerBlock['usage']> {
