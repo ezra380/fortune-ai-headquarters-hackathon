@@ -164,11 +164,12 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     await enqueueBrief(deps, division, d, request);
     const outcome = await runQueued(briefKey(division, d, request));
     expect(outcome).toEqual({ status: 'done' });
+    await rows(`update public.tasks set status = 'done' where idempotency_key = $1`, [briefKey(division, d, request)]); // as the runner finishes it
     return (await rows('select * from public.division_briefs where brief_key = $1', [briefKey(division, d, request)]))[0];
   };
-  const text = async (personId: string, body: string) => {
+  const text = async (personId: string, body: string, receivedAt?: Date) => {
     const phone = (await rows('select phone, assistant_id from public.people where id = $1', [personId]))[0];
-    const payload = { personId, from: phone.phone, body };
+    const payload = { personId, from: phone.phone, body, ...(receivedAt ? { receivedAt: receivedAt.toISOString() } : {}) };
     const id = (await rows(`insert into public.tasks (assistant_id, kind, idempotency_key, payload, status) values ($1, 'inbound_text', $2, $3::jsonb, 'done') returning id`,
       [phone.assistant_id, `digest-test:${randomUUID()}`, JSON.stringify(payload)]))[0].id as string;
     const task = { id, assistant_id: phone.assistant_id, kind: 'inbound_text', status: 'done', payload, attempts: 1, max_attempts: 3 } as TaskRow;
@@ -283,6 +284,22 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     expect(status.reply).toBe(digestText(d, 'Salon: no report yet.', `Finance: needs a decision — ${financeBrief.ceoLine}`, 'Online: no report yet.'));
   });
 
+  it('a BRIEF text handled again after midnight asks for the same runs: the day is the day the text arrived, not the day it is handled', async () => {
+    const d = day();
+    const arrival = etInstant(d, '23:30');
+    clock.at = arrival;
+    const asked = await text(PERSON.owner, 'BRIEF', arrival);
+    expect(await tasksLike(`brief:%:${d}%`)).toHaveLength(3);
+
+    clock.at = new Date(arrival.getTime() + 60 * 60_000); // 00:30 the next morning: the lease ran out, and the task goes round again
+    const next = easternClock(clock.at).date;
+    expect(next).not.toBe(d);
+    expect(await handleTask(asked.task, deps)).toEqual({ status: 'done' });
+    expect(await tasksLike(`brief:%:${d}%`)).toHaveLength(3);
+    expect(await tasksLike(`brief:%:${next}%`)).toEqual([]);
+    expect((await stepsOf(asked.task.id)).map((s) => s.detail)).toEqual([`asked for the finance, salon, online brief of ${d}`, `asked for the finance, salon, online brief of ${d}`]);
+  });
+
   it('BRIEF is for the owner and the heads: a text that cannot be tied to a division starts nothing', async () => {
     // Only the owner and the three heads are registered; the rule is on the person, so show it on a stand-in whose assistant is the manager.
     const d = day();
@@ -300,36 +317,112 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
 
   // ---- The daily clock and the day's digest ----------------------------------------------------------------
 
-  it('at 08:30 New York time the clock queues the three briefs and the digest, once, and the digest takes whatever is in', async () => {
+  const normalLines = ['Salon: running normally.', 'Finance: running normally.', 'Online: running normally.'];
+  const waitingReceipts = (d: string) => rows(`select outcome, detail from public.receipts where step = 'scheduler.enqueue' and detail like $1 order by id`, [`ceo-digest for ${d} is waiting%`]);
+
+  it('at 08:30 New York time the clock queues the three briefs, and the digest waits for them: it is queued once the reports are in, never before', async () => {
     const d = freshDay();
     clock.at = etInstant(d, '08:30');
     await runBrief('salon', d); // the salon's brief is in; the others are not
-    const names = await runDueJobs(deps, new Set());
-    expect(names).toEqual(['division-briefs', 'ceo-digest']);
-    expect(SCHEDULE.map((j) => j.name)).toEqual(names);
-    expect(await runDueJobs(deps, new Set())).toEqual(names); // another worker's clock: the same keys, so nothing doubles
+    const marks = new Set<string>();
+    const names = await runDueJobs(deps, marks);
+    expect(names).toEqual(['division-briefs']); // the digest is due too, and waits
+    expect(SCHEDULE.map((j) => j.name)).toEqual(['division-briefs', 'ceo-digest']);
+    expect(await runDueJobs(deps, new Set())).toEqual(['division-briefs']); // another worker's clock: the same keys, so nothing doubles
     expect(await tasksLike(`brief:%:${d}`)).toMatchObject([
       { idempotency_key: `brief:finance:${d}`, assistant_id: 'finance' }, { idempotency_key: `brief:online:${d}`, assistant_id: 'online' }, { idempotency_key: `brief:salon:${d}`, assistant_id: 'salon' },
     ]);
-    expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}`, assistant_id: 'owner', payload: { job: 'ceo_digest', date: d } }]);
-    expect((await rows(`select outcome, detail from public.receipts where step = 'scheduler.enqueue' and detail like $1 order by id`, [`%${d}%`])).map((r) => r.detail)).toContain(`ceo-digest for ${d} queued`);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]);
+    expect((await waitingReceipts(d)).map((r) => r.detail)).toContain(`ceo-digest for ${d} is waiting: 2 of the day's briefs are still being worked on`);
 
-    // The digest with only the salon in.
-    expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
-    expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, 'Salon: running normally.', 'Finance: no report yet.', 'Online: no report yet.'));
-    expect((await stepsOf((await queued(`digest:${d}`)).id))[0]!.detail).toBe('text queued for the owner; reports in: salon normal; no report yet: finance, online');
-
-    // The other two report afterwards: the day's digest is not queued or sent a second time ...
+    // The other two report: the third queues the day's digest (once), and it says all three.
     await runBrief('finance', d);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]);
     await runBrief('online', d);
+    expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}`, assistant_id: 'owner', payload: { job: 'ceo_digest', date: d } }]);
+    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']); // the clock's next beat finds it there
     expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
+    expect((await rows(`select detail from public.receipts where step = 'scheduler.enqueue' and detail like $1`, [`%${d}%`])).map((r) => r.detail)).toContain(`ceo-digest for ${d} queued`);
+
+    expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
+    expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, ...normalLines));
+    expect((await stepsOf((await queued(`digest:${d}`)).id))[0]!.detail).toBe('text queued for the owner; reports in: salon normal, finance normal, online normal');
     expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
     expect(await rows(`select id from public.outbox where dedupe_key = $1`, [`digest-sms:digest:${d}`])).toHaveLength(1);
-    expect(sent.get(`digest-sms:digest:${d}`)).toContain('Finance: no report yet.'); // ... and the text that went out is the one that was written
 
-    // ... and the owner's STATUS shows what is in now.
-    const status = await text(PERSON.owner, 'STATUS');
-    expect(status.reply).toBe(digestText(d, 'Salon: running normally.', 'Finance: running normally.', 'Online: running normally.'));
+    // The owner's STATUS shows what is in.
+    expect((await text(PERSON.owner, 'STATUS')).reply).toBe(digestText(d, ...normalLines));
+  });
+
+  it('a worker that starts late finds the briefs and the digest due at once: the digest waits, and the owner gets it only after the three reports are in', async () => {
+    const d = freshDay();
+    clock.at = etInstant(d, '09:00');
+    const marks = new Set<string>(); // one worker process's memory
+    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await tasksLike(`brief:%:${d}`)).toHaveLength(3);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]); // not queued, so not sent ahead of the briefs
+
+    // The next beats change nothing, and the wait is reported once.
+    clock.at = etInstant(d, '09:01');
+    expect(await runDueJobs(deps, marks)).toEqual([]);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]);
+    expect(await waitingReceipts(d)).toEqual([{ outcome: 'ok', detail: `ceo-digest for ${d} is waiting: 3 of the day's briefs are still being worked on` }]);
+
+    // The briefs finish one by one; two in and one still open is still a wait.
+    await runBrief('salon', d);
+    await runBrief('finance', d);
+    clock.at = etInstant(d, '09:20');
+    expect(await runDueJobs(deps, marks)).toEqual([]);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]);
+    expect(await waitingReceipts(d)).toHaveLength(1);
+    expect(sent.has(`digest-sms:digest:${d}`)).toBe(false);
+
+    // The third report queues the complete digest; the clock's next beat finds it there.
+    await runBrief('online', d);
+    expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
+    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']);
+    expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
+    expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
+    expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, ...normalLines));
+  });
+
+  it('a brief that is still not in at 10:30 does not hold the digest for ever: a partial digest goes out, and the complete one follows when the last report arrives', async () => {
+    const d = freshDay();
+    clock.at = etInstant(d, '08:30');
+    const marks = new Set<string>();
+    await runBrief('salon', d);
+    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    clock.at = etInstant(d, '10:29');
+    expect(await runDueJobs(deps, marks)).toEqual([]);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]);
+    clock.at = etInstant(d, '10:30');
+    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']);
+    expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}:partial`, assistant_id: 'owner', payload: { job: 'ceo_digest', date: d, partial: true } }]);
+    expect(await runQueued(`digest:${d}:partial`)).toEqual({ status: 'done' });
+    expect(sent.get(`digest-sms:digest:${d}:partial`)).toBe(digestText(d, 'Salon: running normally.', 'Finance: no report yet.', 'Online: no report yet.'));
+    expect((await stepsOf((await queued(`digest:${d}:partial`)).id))[0]!.detail).toBe('text queued for the owner; reports in: salon normal; no report yet: finance, online');
+
+    // The late reports arrive: the third queues the day's complete digest, a second text with all three lines.
+    await runBrief('finance', d);
+    expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
+    await runBrief('online', d);
+    expect((await tasksLike(`digest:${d}%`)).map((t) => t.idempotency_key)).toEqual([`digest:${d}`, `digest:${d}:partial`]);
+    expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
+    expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, ...normalLines));
+    expect(sent.get(`digest-sms:digest:${d}:partial`)).toContain('Finance: no report yet.'); // the first text was not rewritten
+  });
+
+  it('when the briefs that are not in have stopped for good, nothing is coming: the partial digest does not wait for 10:30', async () => {
+    const d = freshDay();
+    clock.at = etInstant(d, '08:30');
+    const marks = new Set<string>();
+    await runBrief('salon', d);
+    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]);
+    await rows(`update public.tasks set status = 'failed' where idempotency_key = any($1)`, [[`brief:finance:${d}`, `brief:online:${d}`]]); // out of attempts
+    clock.at = etInstant(d, '08:31');
+    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']);
+    expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}:partial` }]);
   });
 
   it('when the third scheduled brief arrives first, the day\'s digest is queued by it and the 08:30 clock finds it already there', async () => {
@@ -456,26 +549,36 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     expect(await decisions(doc.id)).toHaveLength(2);
   });
 
-  it('a rank the brief does not have is named and not recorded, while the ones it has are', async () => {
+  it('a rank the brief does not have is named and nothing is recorded, not even the ranks it has; the code stays usable, so one wrong digit costs nothing', async () => {
     const d = day();
     attention.finance = [{ metricId: 'm:online.ads.google.roas', level: 'act', rule: 'return below target' }];
     model.script('finance.brief', JSON.stringify({ ...financeBrief, actions: financeBrief.actions.slice(0, 2) }));
     const row = await runBrief('finance', d);
     const doc = await message(`briefdoc:brief:finance:${d}`);
-    const approved = await text(PERSON.finance, `APPROVE 1 2 3 ${codeIn(sent.get(`brief-sms:${row.id}`))}`);
-    expect(approved.reply).toBe("Recorded: you approved action 1 (Hold Google spend) and action 2 (Review the ad copy). They're yours to carry out. Not recorded: action 3, which this brief does not have.");
+    const code = codeIn(sent.get(`brief-sms:${row.id}`));
+    const asked = await text(PERSON.finance, `APPROVE 1 2 3 ${code}`);
+    expect(asked.reply).toBe('This brief has no action 3. Nothing was recorded, and your code still works.');
+    expect(await decisions(doc.id)).toEqual([]);
+    expect((await stepsOf(asked.task.id))[0]!.detail).toBe('the brief has no action 3; the code was not spent');
+    expect(await rows(`select status from public.approvals where message_id = $1`, [doc.id])).toEqual([{ status: 'pending' }]);
+
+    // The same code with the right ranks records them.
+    const again = await text(PERSON.finance, `APPROVE 1 2 ${code}`);
+    expect(again.reply).toBe("Recorded: you approved action 1 (Hold Google spend) and action 2 (Review the ad copy). They're yours to carry out.");
     expect((await decisions(doc.id)).map((r) => r.dedupe_key)).toEqual([`action-decision:${doc.id}:1`, `action-decision:${doc.id}:2`]);
-    expect((await stepsOf(approved.task.id))[0]!.detail).toBe(`action 1, 2 of the finance brief approved by ${PERSON.finance}; the brief has no action 3`);
   });
 
-  it('APPROVE 2 3 for a brief with one action records nothing and says which ranks it lacks', async () => {
+  it('APPROVE 2 3 for a brief with one action records nothing and says which ranks it lacks; APPROVE 1 with the same code then works', async () => {
     const d = day();
     attention.finance = [{ metricId: 'm:online.ads.google.roas', level: 'act', rule: 'return below target' }];
     model.script('finance.brief', JSON.stringify({ ...financeBrief, actions: financeBrief.actions.slice(0, 1) }));
     const row = await runBrief('finance', d);
-    const asked = await text(PERSON.finance, `APPROVE 2 3 ${codeIn(sent.get(`brief-sms:${row.id}`))}`);
-    expect(asked.reply).toBe('This brief has no action 2 or 3. Nothing was recorded.');
-    expect((await decisions((await message(`briefdoc:brief:finance:${d}`)).id))).toEqual([]);
-    expect((await stepsOf(asked.task.id))[0]).toMatchObject({ outcome: 'refused', detail: 'the brief has no action 2, 3' });
+    const doc = await message(`briefdoc:brief:finance:${d}`);
+    const code = codeIn(sent.get(`brief-sms:${row.id}`));
+    const asked = await text(PERSON.finance, `APPROVE 2 3 ${code}`);
+    expect(asked.reply).toBe('This brief has no action 2 or 3. Nothing was recorded, and your code still works.');
+    expect(await decisions(doc.id)).toEqual([]);
+    expect((await stepsOf(asked.task.id))[0]).toMatchObject({ outcome: 'refused', detail: 'the brief has no action 2, 3; the code was not spent' });
+    expect((await text(PERSON.finance, `APPROVE 1 ${code}`)).reply).toBe("Recorded: you approved action 1 (Hold Google spend). It's yours to carry out.");
   });
 });

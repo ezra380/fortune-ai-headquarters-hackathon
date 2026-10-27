@@ -8,8 +8,11 @@ import type { MessageRow, PersonRow, TaskRow } from './store.ts';
 // detail in their own briefs; the CEO division only hears whether things are running normally. A program writes it,
 // never a model: a normal division is one fixed sentence, and the only words from a division are its own CEO line,
 // which its brief already checked (every number in it traces to that division's data).
-//   queued → when all three divisions have reported (the third brief's delivery), or by the scheduler at 08:30 ET
-//            with whatever is in; a BRIEF text queues its own digest for that run
+//   queued → when all three divisions have reported (the third brief's delivery, or the 08:30 clock finding all three in);
+//            a BRIEF text queues its own digest for that run. The 08:30 clock never sends a digest ahead of briefs that are
+//            still being worked on: it waits for them, and only when one has stopped for good, or has not come by 10:30,
+//            does it queue a PARTIAL digest (digest:<date>:partial, "no report yet" for the missing). The complete digest
+//            still follows when the last report arrives.
 //   built  → from the latest status line of the day for each division (mailbox reports to `owner`)
 //   sent   → one text, keyed by the digest, and the digest itself kept as a mailbox row so a retry sends the same words
 
@@ -109,16 +112,26 @@ export async function currentDigest(deps: Pick<WorkerDeps, 'store' | 'now'>): Pr
 
 // ---- The scheduled job ---------------------------------------------------------------------------------
 
-const DigestJob = z.object({ job: z.literal('ceo_digest'), date: z.iso.date(), request: z.uuid().optional() });
+const DigestJob = z.object({ job: z.literal('ceo_digest'), date: z.iso.date(), request: z.uuid().optional(), partial: z.boolean().optional() });
 
-/** digest:<date> is the day's digest; digest:<date>:<id of the BRIEF text> is the one that follows a BRIEF. */
-export const digestKey = (date: string, request?: string) => `digest:${date}${request ? `:${request}` : ''}`;
+/**
+ * digest:<date> is the day's digest; digest:<date>:<id of the BRIEF text> is the one that follows a BRIEF;
+ * digest:<date>:partial is the one the clock sends when a report did not come in time.
+ */
+export const digestKey = (date: string, request?: string, partial?: boolean) => `digest:${date}${request ? `:${request}` : ''}${partial ? ':partial' : ''}`;
 
 /** Queues the digest for Owner HQ. Queuing it twice for the same key changes nothing. */
 export async function enqueueDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string, request?: string): Promise<void> {
   await deps.store.enqueueTask({
     assistant: 'owner', kind: 'scheduled', key: digestKey(date, request),
     payload: { job: 'ceo_digest', date, ...(request ? { request } : {}) }, now: deps.now(),
+  });
+}
+
+/** Queues the partial digest of a day (some reports are missing and are not coming in time). Its own key: the complete digest can still follow. */
+export async function enqueuePartialDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string): Promise<void> {
+  await deps.store.enqueueTask({
+    assistant: 'owner', kind: 'scheduled', key: digestKey(date, undefined, true), payload: { job: 'ceo_digest', date, partial: true }, now: deps.now(),
   });
 }
 
@@ -138,8 +151,8 @@ function reportsIn(lines: readonly DigestLine[]): string {
 export async function ceoDigest(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
   const job = DigestJob.safeParse(task.payload);
   if (!job.success) return fail('the digest job needs a date (YYYY-MM-DD)');
-  const { date, request } = job.data;
-  const key = digestKey(date, request);
+  const { date, request, partial } = job.data;
+  const key = digestKey(date, request, partial);
   let owner: PersonRow;
   try {
     owner = await deps.store.personByAssistant('owner');

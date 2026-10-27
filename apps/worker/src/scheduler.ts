@@ -1,24 +1,44 @@
 import { randomUUID } from 'node:crypto';
-import { enqueueBrief } from './brief.ts';
+import { briefKey, enqueueBrief } from './brief.ts';
 import { errorText, receipt, type WorkerDeps } from './common.ts';
 import { ROUND_DEPARTMENTS } from './departments.ts';
-import { easternClock, enqueueDigest } from './digest.ts';
+import { digestLines, easternClock, enqueueDigest, enqueuePartialDigest } from './digest.ts';
 
 // The daily clock. Once a day, in New York time, the worker queues the day's work for the assistants:
-//   08:00  the three division briefs        08:30  the CEO digest (with whatever reports are in)
+//   08:00  the three division briefs        08:30  the CEO digest
 // Queuing is idempotent by key (the same job for the same day is never a second task), so a worker that restarts,
 // two workers, or a missed minute cannot double anything. A job that was due while the worker was down is still queued
 // when it comes back, but only within a few hours of its time: a worker started in the evening does not send the
 // morning's briefs. The loop only enqueues; the claim loops do the work.
+// The digest is not queued ahead of briefs that are still being worked on (a worker started at 09:00 finds both jobs due at
+// once, and a digest takes milliseconds where a brief takes minutes): the job answers "waiting" and is asked again at every
+// tick. It goes when all three reports are in (the third brief queues it too, under the same key), or as a PARTIAL digest when
+// the missing briefs have stopped for good or 10:30 has come.
 
 export type ScheduledJob = {
   /** Shown in the receipt. */
   name: string;
   /** New York time, HH:MM. */
   at: string;
-  /** Queues the job for that day (YYYY-MM-DD). Must be idempotent by key. */
-  enqueue(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string): Promise<void>;
+  /** Queues the job for that day (YYYY-MM-DD). Must be idempotent by key. A job that is not ready answers { waiting } with the plain reason, and is asked again at the next tick. */
+  enqueue(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string): Promise<void | { waiting: string }>;
 };
+
+/** The digest waits for the day's briefs until this time, two hours after its slot; after it, the digest goes with whatever is in. */
+export const DIGEST_WAITS_UNTIL = '10:30';
+
+/**
+ * The 08:30 job. All three reports in: the day's complete digest (the third brief queued it already; same key). Some
+ * missing: wait while any of the day's briefs is queued, running or waiting and it is before 10:30; otherwise queue the
+ * partial digest, because nothing more is coming (or no longer in time) and the owner should hear what is in.
+ */
+export async function enqueueDayDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string, waitsUntil: string = DIGEST_WAITS_UNTIL): Promise<void | { waiting: string }> {
+  const lines = digestLines(await deps.store.divisionStatusMessages(date));
+  if (lines.every((line) => line.state !== 'missing')) return enqueueDigest(deps, date);
+  const open = await deps.store.openTasksByKey(ROUND_DEPARTMENTS.map((division) => briefKey(division, date)));
+  if (open > 0 && easternClock(deps.now()).minutes < minutesOf(waitsUntil)) return { waiting: `${open} of the day's briefs are still being worked on` };
+  return enqueuePartialDigest(deps, date);
+}
 
 /**
  * The jobs, in the order they run. Another lane adds its own here (the HQ Manager's daily review, say): a job needs
@@ -26,7 +46,7 @@ export type ScheduledJob = {
  */
 export const SCHEDULE: ScheduledJob[] = [
   { name: 'division-briefs', at: '08:00', enqueue: async (deps, date) => { for (const division of ROUND_DEPARTMENTS) await enqueueBrief(deps, division, date); } },
-  { name: 'ceo-digest', at: '08:30', enqueue: (deps, date) => enqueueDigest(deps, date) },
+  { name: 'ceo-digest', at: '08:30', enqueue: (deps, date) => enqueueDayDigest(deps, date) },
 ];
 
 /** How long after its time a job is still queued by a worker that was not running at that time. */
@@ -64,7 +84,8 @@ async function note(deps: WorkerDeps, r: { runId: string; started: Date; outcome
 /**
  * Queues every job that is due and has not been queued by this process today. `queued` remembers (job, day) pairs, so
  * the minute-by-minute loop asks the database once per job per day. A job that fails is reported in a receipt and
- * tried again at the next tick. Returns the names of the jobs queued now.
+ * tried again at the next tick; a job that is waiting is tried again at the next tick too, and its wait is reported once.
+ * Returns the names of the jobs queued now.
  */
 export async function runDueJobs(deps: WorkerDeps, queued: Set<string>, jobs: readonly ScheduledJob[] = SCHEDULE): Promise<string[]> {
   const ran: string[] = [];
@@ -72,11 +93,20 @@ export async function runDueJobs(deps: WorkerDeps, queued: Set<string>, jobs: re
     const mark = `${job.name}@${date}`;
     if (queued.has(mark)) continue;
     const base = { runId: randomUUID(), started: deps.now() };
+    let result: void | { waiting: string };
     try {
-      await job.enqueue(deps, date);
+      result = await job.enqueue(deps, date);
     } catch (error) {
       console.error(`scheduler.job_failed ${job.name}`);
       await note(deps, { ...base, outcome: 'failed', detail: `${job.name} for ${date}: ${errorText(error, 'could not be queued')}` });
+      continue;
+    }
+    if (result) {
+      const said = `${mark}:waiting`; // report the wait once, not at every tick
+      if (!queued.has(said)) {
+        queued.add(said);
+        await note(deps, { ...base, outcome: 'ok', detail: `${job.name} for ${date} is waiting: ${result.waiting}` });
+      }
       continue;
     }
     queued.add(mark);

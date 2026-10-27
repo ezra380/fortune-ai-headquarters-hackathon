@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Receipt } from '@fahq/contracts';
 import type { WorkerDeps } from '../src/common.ts';
 import { DIGEST_MAX, buildDigest, clipWords, companyDay, digestKey, easternClock } from '../src/digest.ts';
-import { GRACE_MINUTES, SCHEDULE, dueJobs, runDueJobs, scheduleEnabled, startScheduler, type ScheduledJob } from '../src/scheduler.ts';
+import { DIGEST_WAITS_UNTIL, GRACE_MINUTES, SCHEDULE, dueJobs, enqueueDayDigest, runDueJobs, scheduleEnabled, startScheduler, type ScheduledJob } from '../src/scheduler.ts';
 
 // The parts of the CEO digest and of the daily clock that need no database: the words of the digest, how it is kept
 // short, the New York clock, which jobs are due, and the loop that queues them.
@@ -128,6 +128,11 @@ describe('the company\'s clock (New York time)', () => {
   it('keys the day\'s digest by its date, and the one after a BRIEF text by that text too', () => {
     expect(digestKey(DAY)).toBe(`digest:${DAY}`);
     expect(digestKey(DAY, '123e4567-e89b-42d3-a456-426614174000')).toBe(`digest:${DAY}:123e4567-e89b-42d3-a456-426614174000`);
+  });
+
+  it('keys the partial digest (sent when a report did not come in time) apart from the day\'s complete one', () => {
+    expect(digestKey(DAY, undefined, true)).toBe(`digest:${DAY}:partial`);
+    expect(digestKey(DAY, undefined, true)).not.toBe(digestKey(DAY));
   });
 });
 
@@ -256,5 +261,90 @@ describe('queuing what is due', () => {
     expect(error).toHaveBeenCalledWith('scheduler.tick_failed: the clock broke');
     expect(calls).toEqual(['a@2026-10-27']);
     vi.restoreAllMocks();
+  });
+});
+
+describe('a job that is not ready: it waits, and says so once', () => {
+  const clock = { at: new Date('2026-10-27T12:30:00Z') };
+  const receipts: Receipt[] = [];
+  const deps = () => ({ now: () => clock.at, live: false, store: { receipt: async (r: Receipt) => { receipts.push(r); } } }) as unknown as WorkerDeps;
+
+  it('is not counted as queued, is asked again at every tick, reports its wait once a day, and is queued when it is ready', async () => {
+    receipts.length = 0;
+    let ready = false;
+    const calls: string[] = [];
+    const slow: ScheduledJob = { name: 'w', at: '08:30', enqueue: async (_deps, date) => { calls.push(date); return ready ? undefined : { waiting: 'the briefs are not in' }; } };
+    const queued = new Set<string>();
+    expect(await runDueJobs(deps(), queued, [slow])).toEqual([]);
+    expect(await runDueJobs(deps(), queued, [slow])).toEqual([]);
+    expect(receipts.map((r) => [r.step, r.outcome, r.detail])).toEqual([['scheduler.enqueue', 'ok', 'w for 2026-10-27 is waiting: the briefs are not in']]);
+    ready = true;
+    expect(await runDueJobs(deps(), queued, [slow])).toEqual(['w']);
+    expect(await runDueJobs(deps(), queued, [slow])).toEqual([]); // queued now: not asked again
+    expect(calls).toHaveLength(3);
+    expect(receipts.at(-1)!.detail).toBe('w for 2026-10-27 queued');
+    // The next day starts over, and reports its own wait.
+    ready = false;
+    clock.at = new Date('2026-10-28T12:30:00Z');
+    expect(await runDueJobs(deps(), queued, [slow])).toEqual([]);
+    expect(receipts.at(-1)!.detail).toBe('w for 2026-10-28 is waiting: the briefs are not in');
+  });
+});
+
+describe('the 08:30 digest: it waits for the briefs and never goes ahead of them', () => {
+  const statusRow = (division: string) => ({ body: { type: 'division_status', division, date: DAY, status: 'normal', ceoLine: 'x' } });
+  const run = async (opts: { reported: string[]; open: number; at: string; waitsUntil?: string }) => {
+    const queued: { key: string; payload: Record<string, unknown>; assistant: string }[] = [];
+    const asked: string[][] = [];
+    const deps = {
+      now: () => new Date(opts.at),
+      store: {
+        divisionStatusMessages: async () => opts.reported.map(statusRow),
+        openTasksByKey: async (keys: readonly string[]) => { asked.push([...keys]); return opts.open; },
+        enqueueTask: async (t: { key: string; payload: Record<string, unknown>; assistant: string }) => { queued.push(t); },
+      },
+    } as unknown as Parameters<typeof enqueueDayDigest>[0];
+    const result = await enqueueDayDigest(deps, DAY, opts.waitsUntil);
+    return { result, queued, asked };
+  };
+  const all = ['salon', 'finance', 'online'];
+
+  it('waits until 10:30 by default, two hours after its slot', () => {
+    expect(DIGEST_WAITS_UNTIL).toBe('10:30');
+  });
+
+  it('queues the day\'s complete digest when all three reports are in, without asking about the briefs', async () => {
+    const out = await run({ reported: all, open: 3, at: '2026-10-27T12:31:00Z' });
+    expect(out.result).toBeUndefined();
+    expect(out.queued).toEqual([{ assistant: 'owner', kind: 'scheduled', key: `digest:${DAY}`, payload: { job: 'ceo_digest', date: DAY }, now: new Date('2026-10-27T12:31:00Z') }]);
+    expect(out.asked).toEqual([]);
+  });
+
+  it('waits while any of the day\'s three briefs is still open, and queues nothing', async () => {
+    const out = await run({ reported: ['salon'], open: 2, at: '2026-10-27T13:00:00Z' }); // 09:00
+    expect(out.result).toEqual({ waiting: '2 of the day\'s briefs are still being worked on' });
+    expect(out.queued).toEqual([]);
+    expect(out.asked).toEqual([[`brief:finance:${DAY}`, `brief:salon:${DAY}`, `brief:online:${DAY}`]]);
+  });
+
+  it('queues the partial digest at 10:30 even if a brief is still open, but not a minute earlier', async () => {
+    expect((await run({ reported: ['salon'], open: 1, at: '2026-10-27T14:29:00Z' })).result).toEqual({ waiting: '1 of the day\'s briefs are still being worked on' }); // 10:29
+    const late = await run({ reported: ['salon'], open: 1, at: '2026-10-27T14:30:00Z' }); // 10:30
+    expect(late.result).toBeUndefined();
+    expect(late.queued.map((t) => [t.key, t.payload])).toEqual([[`digest:${DAY}:partial`, { job: 'ceo_digest', date: DAY, partial: true }]]);
+  });
+
+  it('queues the partial digest at once when no brief is open: nothing more is coming', async () => {
+    const out = await run({ reported: ['salon', 'online'], open: 0, at: '2026-10-27T12:31:00Z' });
+    expect(out.result).toBeUndefined();
+    expect(out.queued.map((t) => t.key)).toEqual([`digest:${DAY}:partial`]);
+  });
+
+  it('takes the time to give up from its caller', async () => {
+    expect((await run({ reported: [], open: 3, at: '2026-10-27T13:00:00Z', waitsUntil: '09:00' })).queued.map((t) => t.key)).toEqual([`digest:${DAY}:partial`]);
+  });
+
+  it('is the 08:30 job in the schedule', () => {
+    expect(SCHEDULE.find((j) => j.name === 'ceo-digest')!.at).toBe('08:30');
   });
 });

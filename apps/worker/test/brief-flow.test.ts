@@ -59,6 +59,10 @@ const salonBrief = {
   ceoLine: 'Salon is running normally.',
 };
 const salonFacts = { metrics: { 'm:salon.appointments.count': { label: 'Salon appointments', value: 310, unit: 'count', business: 'salon' } } };
+// What a reply keeps of that script result: the metric ids and their values, nothing else.
+const salonMetrics = [{ id: 'm:salon.appointments.count', value: 310, unit: 'count' }];
+/** A script result and the tool outputs it was made from (so the numbers in it trace to a tool). */
+const lookedUp = (result: unknown, ...outputs: unknown[]) => okResult(result, { toolOutputs: outputs.map((output) => ({ tool: 'get_metrics', output })) });
 const none = JSON.stringify({ requests: [] });
 const asks = (division: string, question = 'How many appointments did the salon book?') => JSON.stringify({ requests: [{ division, question }] });
 
@@ -235,13 +239,13 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect(codeMode.calls[0]!.tools.map((t) => t.name)).toEqual(reads.salon);
     expect(codeMode.calls[0]!.question).toContain('The Online division asks you: How many appointments did the salon book?');
 
-    // The reply is a mailbox report from the salon to online, replying to the request, carrying the lookup's result as facts.
+    // The reply is a mailbox report from the salon to online, replying to the request, carrying the lookup's metric values as facts.
     const reply = await message(`datareply:${request.id}`);
-    expect(reply).toMatchObject({ from_assistant: 'salon', to_assistant: 'online', kind: 'report', reply_to: request.id, body: { type: 'data_reply', ok: true, facts: salonFacts, briefKey: key } });
+    expect(reply).toMatchObject({ from_assistant: 'salon', to_assistant: 'online', kind: 'report', reply_to: request.id, body: { type: 'data_reply', ok: true, facts: salonMetrics, briefKey: key } });
 
     // The writer was given the reply as facts, and the brief uses a salon number from it (and stays inside the rules).
     const given = JSON.parse(model.of('online.brief')[0]!.user);
-    expect(given.replies).toEqual([{ from: 'salon', question: 'How many appointments did the salon book?', facts: salonFacts }]);
+    expect(given.replies).toEqual([{ from: 'salon', question: 'How many appointments did the salon book?', facts: salonMetrics }]);
     expect(given.metrics.every((m: { business: string }) => m.business === 'online')).toBe(true);
     expect(row.brief.findings[1].text).toContain('310');
     expect(row.status).toBe('normal');
@@ -258,6 +262,53 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     const recorded = deps.brain.record.audit(3000).map((a) => a.summary).filter((s) => s.includes(request.id));
     expect(recorded.some((s) => s.includes('-[assigned_to]->'))).toBe(true);
     expect(recorded.some((s) => s.includes('-[asked]->'))).toBe(true);
+  });
+
+  it('a question with medical wording, a phone number or a code is never posted: no mailbox row, no World Model record, no lookup, and the brief still goes out', async () => {
+    model.script('online.needs', JSON.stringify({ requests: [
+      { division: 'salon', question: 'How many hair loss clients booked toppers last month?' },
+      { division: 'finance', question: 'Call 212-555-0123 and ask what the ad return was.' },
+    ] }));
+    model.script('online.brief', JSON.stringify({ ...onlineBrief, findings: [onlineBrief.findings[0]], actions: [] }));
+    const before = deps.brain.record.audit(3000).length;
+    const { key, task, outcome } = await run('online');
+    expect(outcome).toEqual({ status: 'done' });
+    expect(await rows(`select id from public.assistant_messages where dedupe_key like $1`, [`datareq:${key}:%`])).toEqual([]);
+    expect(codeMode.calls).toHaveLength(0);
+    expect(deps.brain.record.audit(3000).slice(before).map((a) => a.summary).join('\n')).not.toMatch(/hair loss|212-555/i);
+    // The note records that two were dropped and why, never the words themselves.
+    const note = await message(`needs:${key}`);
+    expect(note.body).toMatchObject({ type: 'data_needs', requests: [], dropped: ['medical wording', 'a phone number'] });
+    expect(JSON.stringify(note.body)).not.toMatch(/hair loss|212-555/i);
+    const needs = (await stepsOf(task.id)).find((s) => s.step === 'brief.needs')!;
+    expect(needs).toMatchObject({ outcome: 'ok' });
+    expect(needs.detail).toBe('no questions went out; dropped 2 questions that broke the rules (medical wording, a phone number)');
+    expect(JSON.parse(model.of('online.brief')[0]!.user).replies).toEqual([]);
+  });
+
+  it('a question that passes the rules is still posted when another one is dropped', async () => {
+    model.script('online.needs', JSON.stringify({ requests: [
+      { division: 'finance', question: 'What did the patient customers spend?' }, { division: 'salon', question: 'How many appointments did the salon book?' },
+    ] }));
+    model.script('online.brief', JSON.stringify(onlineBrief));
+    const { key, task } = await run('online');
+    expect(await rows(`select id from public.assistant_messages where dedupe_key like $1`, [`datareq:${key}:%`])).toHaveLength(1);
+    expect(await message(`datareq:${key}:salon`)).toMatchObject({ body: { question: 'How many appointments did the salon book?' } });
+    expect((await stepsOf(task.id)).find((s) => s.step === 'brief.needs')!.detail).toBe('asks salon; dropped 1 question that broke the rules (medical wording)');
+  });
+
+  it('a brief whose actions are ranked 1 and 3 is stored as 1 and 2, and the text tells the head the ranks she can use', async () => {
+    const gapped = { ...financeBrief, actions: [{ ...financeBrief.actions[0]!, rank: 1 }, { ...financeBrief.actions[0]!, rank: 3, title: 'Review the ad copy' }] };
+    model.script('finance.needs', none);
+    model.script('finance.brief', JSON.stringify(gapped));
+    const { row, key } = await run('finance');
+    expect(row.brief.actions.map((a: { rank: number; title: string }) => [a.rank, a.title])).toEqual([[1, 'Hold Google spend'], [2, 'Review the ad copy']]);
+    const sms = sent.get(`brief-sms:${row.id}`)!;
+    const code = codeIn(sms);
+    expect(sms).toContain(`(APPROVE 1 2 ${code} for more)`);
+    // Following the text does what it says: both actions are recorded.
+    expect((await text(HEAD.finance, `APPROVE 1 2 ${code}`)).reply).toBe("Recorded: you approved action 1 (Hold Google spend) and action 2 (Review the ad copy). They're yours to carry out.");
+    expect(await rows(`select id from public.assistant_messages where dedupe_key like $1`, [`action-decision:${(await message(`briefdoc:${key}`)).id}:%`])).toHaveLength(2);
   });
 
   it('an answer the other division cannot give is stored as unavailable, and the writer is told', async () => {
@@ -279,6 +330,51 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     const { key } = await run('finance');
     const request = await message(`datareq:${key}:salon`);
     expect((await message(`datareply:${request.id}`)).body).toMatchObject({ ok: false, reason: 'the script threw: x is not defined' });
+  });
+
+  // What the writer is told when a reply cannot be used, and the step's receipt.
+  const refusedReply = async (asker: BriefDivision, target: string, brief: unknown) => {
+    model.script(`${asker}.needs`, asks(target));
+    model.script(`${asker}.brief`, JSON.stringify(brief));
+    const { key, task, row } = await run(asker);
+    const request = await message(`datareq:${key}:${target}`);
+    const reply = await message(`datareply:${request.id}`);
+    const told = JSON.parse(model.of(`${asker}.brief`)[0]!.user).replies;
+    const step = (await stepsOf(task.id)).find((s) => s.step === `${target}.lookup`)!;
+    return { reply, told, step, row };
+  };
+  const onlineAsksSalon = { ...onlineBrief, findings: [onlineBrief.findings[0]], actions: [] };
+
+  it('a reply carrying a number no tool returned (a sum of two businesses, say) is refused, whole, and the writer is told it is unavailable', async () => {
+    // Online asks Finance for revenue; Finance's script adds the salon's number to the online one: 6200 + 12400 is nobody's data.
+    const outputs = { metrics: [{ id: 'm:online.revenue.mazali', value: 12400 }, { id: 'm:salon.revenue.wash_set', value: 6200 }] };
+    codeMode.respond(() => lookedUp({ total: 18600, parts: [{ id: 'm:online.revenue.mazali', value: 12400 }] }, outputs));
+    const { reply, told, step } = await refusedReply('online', 'finance', onlineAsksSalon);
+    expect(reply.body).toMatchObject({ type: 'data_reply', ok: false, reason: 'the answer had a number that no data tool returned, so none of it can be used' });
+    expect(reply.body).not.toHaveProperty('facts');
+    expect(told).toEqual([{ from: 'finance', question: expect.any(String), unavailable: 'the answer had a number that no data tool returned, so none of it can be used' }]);
+    expect(step).toMatchObject({ outcome: 'refused', assistant_id: 'finance' });
+    expect(step.detail).toContain('untraced 1');
+  });
+
+  it('a reply whose numbers carry no metric id is refused: a number with no business cannot be kept off the other side', async () => {
+    // 310 is a number the tool returned, but nothing says it is the salon's.
+    codeMode.respond(() => lookedUp({ appointments: 310 }, { metrics: [{ id: 'm:salon.appointments.count', value: 310 }] }));
+    const { reply, told, step } = await refusedReply('online', 'salon', onlineAsksSalon);
+    expect(reply.body).toMatchObject({ ok: false, reason: 'the answer had no metric values tied to a metric id, so none of it can be used' });
+    expect(told).toEqual([{ from: 'salon', question: expect.any(String), unavailable: 'the answer had no metric values tied to a metric id, so none of it can be used' }]);
+    expect(step).toMatchObject({ outcome: 'refused', assistant_id: 'salon' });
+  });
+
+  it('a reply keeps only the metric ids and values of the business that answered, and the writer sees nothing else', async () => {
+    const output = { metrics: [{ id: 'm:salon.appointments.count', value: 310, unit: 'count', label: 'Salon appointments (30 days)' }, { id: 'm:online.revenue.mazali', value: 12400, unit: 'usd' }] };
+    codeMode.respond(() => lookedUp({ rows: output.metrics, note: 'Appointments for the last 30 days' }, output));
+    model.script('online.needs', asks('salon'));
+    model.script('online.brief', JSON.stringify(onlineBrief));
+    const { key } = await run('online');
+    const request = await message(`datareq:${key}:salon`);
+    // The salon's own id and value, with no label and no online metric: the other business never rides along in a salon answer.
+    expect((await message(`datareply:${request.id}`)).body).toMatchObject({ ok: true, facts: salonMetrics });
   });
 
   it('a brief with a number nobody gave it is corrected once, then refused, and a program writes the brief from the rules', async () => {
@@ -543,13 +639,75 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect((await text(HEAD.finance, `APPROVE 1 ${code}`)).reply).toContain('Recorded: you approved action 1');
   });
 
-  it('APPROVE for an action the brief does not have records nothing', async () => {
-    const { key, code } = await finished();
-    const asked = await text(HEAD.finance, `APPROVE 3 ${code}`);
-    expect(asked.reply).toBe('This brief has no action 3. Nothing was recorded.');
+  it('APPROVE for an action the brief does not have records nothing and does not spend the code: the right action with the same code still works', async () => {
+    const { key, code } = await finished(); // a brief with one action
     const doc = await message(`briefdoc:${key}`);
-    expect(await rows(`select id from public.assistant_messages where dedupe_key like $1`, [`action-decision:${doc.id}:%`])).toEqual([]);
-    expect((await rows(`select outcome, detail from public.receipts where task_id = $1`, [asked.task.id]))[0]).toMatchObject({ outcome: 'refused', detail: 'the brief has no action 3' });
+    const decisions = () => rows(`select id from public.assistant_messages where dedupe_key like $1`, [`action-decision:${doc.id}:%`]);
+    const attempts = () => rows(`select a.status, a.failed_attempts, a.used_by_task from public.approvals a where a.message_id = $1`, [doc.id]);
+
+    const asked = await text(HEAD.finance, `APPROVE 3 ${code}`);
+    expect(asked.reply).toBe('This brief has no action 3. Nothing was recorded, and your code still works.');
+    expect(await decisions()).toEqual([]);
+    expect((await rows(`select outcome, detail from public.receipts where task_id = $1`, [asked.task.id]))[0]).toMatchObject({ outcome: 'refused', detail: 'the brief has no action 3; the code was not spent' });
+    expect(await attempts()).toEqual([{ status: 'pending', failed_attempts: 0, used_by_task: null }]);
+
+    // One rank the brief has and one it lacks is refused whole: the head names what she means, and nothing is half done.
+    expect((await text(HEAD.finance, `APPROVE 1 3 ${code}`)).reply).toBe('This brief has no action 3. Nothing was recorded, and your code still works.');
+    expect(await decisions()).toEqual([]);
+    expect(await attempts()).toEqual([{ status: 'pending', failed_attempts: 0, used_by_task: null }]);
+
+    // The same code with the right action records it, once.
+    expect((await text(HEAD.finance, `APPROVE 1 ${code}`)).reply).toBe("Recorded: you approved action 1 (Hold Google spend). It's yours to carry out.");
+    expect(await decisions()).toHaveLength(1);
+    expect(await approvalsOf(key)).toMatchObject([{ status: 'signed' }]);
+  });
+
+  it('a wrong code is still counted, and a wrong action number does not count against the right one', async () => {
+    const { key, code } = await finished();
+    const doc = await message(`briefdoc:${key}`);
+    const wrong = String((Number(code) % 900000) + 100001).padStart(6, '0'); // a different six-digit code
+    expect((await text(HEAD.finance, `APPROVE 1 ${wrong}`)).reply).toBe("That code didn't work or has expired. Nothing was recorded.");
+    expect((await text(HEAD.finance, `APPROVE 3 ${code}`)).reply).toContain('no action 3');
+    expect(await rows(`select status, failed_attempts from public.approvals where message_id = $1`, [doc.id])).toEqual([{ status: 'pending', failed_attempts: 1 }]);
+    expect((await text(HEAD.finance, `APPROVE 1 ${code}`)).reply).toContain('Recorded: you approved action 1');
+  });
+
+  it('a spent code that finds the brief lacking an action records nothing and says so (a state the check before spending prevents)', async () => {
+    // The look-before-spending finds nothing (as if the code had been taken a moment earlier), so the code is spent for an action the brief lacks.
+    const { key, code } = await finished();
+    const store = deps.store;
+    deps.store = { ...store, peekApprovalCode: async () => null };
+    try {
+      const asked = await text(HEAD.finance, `APPROVE 3 ${code}`);
+      expect(asked.outcome).toEqual({ status: 'failed', error: 'the brief has no action 3, though the code was spent for it: nothing was recorded' });
+      expect(asked.reply).toBe('This brief has no action 3, and the code was already used up, so nothing was recorded. Text BRIEF for a new brief and a new code.');
+      const doc = await message(`briefdoc:${key}`);
+      expect(await rows(`select id from public.assistant_messages where dedupe_key like $1`, [`action-decision:${doc.id}:%`])).toEqual([]);
+    } finally {
+      deps.store = store;
+    }
+  });
+
+  it('looks at a code without spending it: nothing is changed or counted, and only the right person, action and time see it', async () => {
+    const { key, code } = await finished();
+    const doc = await message(`briefdoc:${key}`);
+    const phoneOf = async (person: string) => (await rows('select phone from public.people where id = $1', [person]))[0].phone as string;
+    const finance = await phoneOf(HEAD.finance);
+    const peek = (over: Partial<Parameters<typeof deps.store.peekApprovalCode>[0]> = {}) =>
+      deps.store.peekApprovalCode({ phone: finance, code, action: 'approve_action', now: new Date(), ...over });
+    const wrong = String((Number(code) % 900000) + 100001).padStart(6, '0');
+
+    expect(await peek()).toEqual({ message_id: doc.id, approver_person_id: HEAD.finance });
+    expect(await peek()).not.toBeNull(); // looking twice changes nothing
+    expect(await peek({ code: wrong })).toBeNull();
+    expect(await peek({ code: 'abcdef' })).toBeNull();
+    expect(await peek({ phone: await phoneOf(HEAD.online) })).toBeNull(); // another person's phone
+    expect(await peek({ action: 'adopt_change' })).toBeNull(); // another kind of code
+    expect(await peek({ now: new Date(Date.now() + 13 * 3600_000) })).toBeNull(); // after the 12 hours
+    expect(await rows(`select status, failed_attempts, used_by_task from public.approvals where message_id = $1`, [doc.id])).toEqual([{ status: 'pending', failed_attempts: 0, used_by_task: null }]);
+
+    expect((await text(HEAD.finance, `APPROVE 1 ${code}`)).reply).toContain('Recorded: you approved action 1');
+    expect(await peek()).toBeNull(); // spent
   });
 
   it('only the head the code was issued to can use it', async () => {

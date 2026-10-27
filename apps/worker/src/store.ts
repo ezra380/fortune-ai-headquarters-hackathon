@@ -211,6 +211,16 @@ export function createStore(url: string, serviceKey: string) {
         { approval_id: string | null; message_id: string | null; action: ApprovalAction | null; outcome: string; replay: boolean; approver_person_id: string | null }[];
       return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused', replay: false, approver_person_id: null };
     },
+    /**
+     * Looks at a pending code without spending it: which message it hangs from and who it was issued to, or null when
+     * no pending code of that person matches. Nothing is changed and no failed attempt is counted, so a command can be
+     * checked against what the code is for before the code is used up.
+     */
+    async peekApprovalCode(a: { phone: string; code: string; action: ApprovalAction; now: Date }): Promise<{ message_id: string; approver_person_id: string } | null> {
+      const rows = must(await db.rpc('peek_approval_code', { p_phone: a.phone, p_code: a.code, p_action: a.action, p_now: a.now.toISOString() }), 'peek approval code') as
+        { message_id: string; approver_person_id: string }[];
+      return rows[0] ?? null;
+    },
     async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
       must(await db.from('outbox').upsert(
         { channel: o.channel, to_person_id: o.toPersonId, from_assistant: o.from, body: o.body.slice(0, 1600), attachment_ref: o.attachmentRef, dedupe_key: o.dedupeKey },
@@ -336,6 +346,12 @@ export function createStore(url: string, serviceKey: string) {
     async divisionStatusMessages(date: string): Promise<MessageRow[]> {
       return must(await db.from('assistant_messages').select('*').eq('to_assistant', 'owner').eq('kind', 'report')
         .eq('body->>type', 'division_status').eq('body->>date', date).order('created_at', { ascending: false }).limit(200), 'division statuses') as MessageRow[];
+    },
+    /** How many of the tasks with these keys are still queued, running or waiting (a task that is done, failed or cancelled is not open). */
+    async openTasksByKey(keys: readonly string[]): Promise<number> {
+      const r = await db.from('tasks').select('id', { count: 'exact', head: true }).in('idempotency_key', [...keys]).in('status', ['queued', 'running', 'waiting']);
+      if (r.error) throw new Error(`count tasks failed (${r.error.code ?? 'db'})`);
+      return r.count ?? 0;
     },
     /** Open work per assistant. Counts only: never a code, a hash or a message body. */
     async openItems(now: Date): Promise<OpenItems[]> {
