@@ -19,7 +19,7 @@ Branch `hq/w2-delivery`, worktree `~/fahq-w2-delivery`, cut from `hq/divisions-m
   no code, the goal and the three paths.
 - **Outbox**: `apps/worker/test/outbox-reports.test.ts` (14 tests, real delivery port over a fake fetch): weekly and worker report emails to `HQ_REPORT_TO` only with
   the PDF, built from the stored report (not the row text), once, skipped without token / address / report, failed plainly when the report is gone,
-  retried on a 5xx at most three times, the provider body kept out of the row; printouts on the head's printer, skipped without one; the proposal printout as before.
+  retried on a 429 or 503 at most three times (changed in "Review fixes": other 5xx are not retried), the provider body kept out of the row; printouts on the head's printer, skipped without one; the proposal printout as before.
 - **Store reads**: `apps/worker/test/store-reports.test.ts` (4 tests, real local database, run under the lock).
 - **Mutation checks** (each guard broken in turn, the tests seen to fail, then restored): recipient check, once-ledger, redirect, provider body, skip without token,
   scrub, long words, allowed set, email text from the row.
@@ -109,3 +109,75 @@ Details: [../delivery.md](../delivery.md), "The console".
 - `ConsoleDeps.loadDivisions` now takes an optional division; `ConsoleDeps.loadReport` is new and optional (without it the PDF links answer 404). `main()` wires both.
 - No migration, no change to contracts, no new env setting beyond a commented `CONSOLE_PORT` in `.env.example`.
 - The preview server used for the browser check lives in `.local/` (ignored) and is stopped.
+
+## Review fixes (2026-10-27, 12:20 to 12:45 ET)
+
+An independent review found 2 majors and 5 minors. All seven were right and are fixed; each fix has a test that was seen failing first (the
+recording of each is below). No finding was disputed. Class 1 work (customer-class email, a database claim), so every fix is for the top-tier gate to
+re-review (Law 10).
+
+### What changed, finding by finding
+
+1. **Major: a projection's result is written in its base's unit.** `projectionLine(p, base)` in `packages/delivery/src/format.ts` is now the one place that
+   writes "label: base x factor = result", used by the weekly PDF and by the console (`shape.ts`). The result goes through `formatValue` with the base's own
+   unit: dollars stay money, a rate stays a rate, an ad return stays a multiple (`0.3% x 1.1 = 0.33%`, `3.1x x 0.85 = 2.64x`; before, `= 0` and `= 2.64`).
+   To make `0.33%` possible, a rate under one percent now keeps two decimals (`percent()`: whole from 10, one decimal from 1, two decimals below 1), so a
+   small rate and a tenth more of it no longer read the same. Side effect, on purpose: every value under 1% now reads with up to two decimals (0.45%, not 0.5%).
+   Tests (failed first): `report-pdf.test.ts` ("writes a projection result in the unit of its base", "writes a ratio as a percent" with 0.33% and 0.45%),
+   `reports-shape.test.ts` ("writes a projection's result in the unit of its base"), and a twin in `delivery.test.ts` ("proposal PDF ... a rate stays a rate").
+   **Twins searched:** the wave-1 proposal PDF (`pdf.ts`) had the same flaw (a bare result next to a base in its unit): fixed with `formatMetric({ value: result, unit: base.unit })`.
+   The evidence fallback (`report-pdf.ts` and `citedNumber` in `shape.ts`, a metric the report does not hold) still writes the plain number with its id: with no
+   metric there is no unit to write it in, `checkPlans` rejects a plan that cites an unknown metric, and a test pins the console's behaviour (left as it was).
+2. **Major: one way to load a packet.** New `packages/delivery/src/packet.ts` (`checkedWorkerReport`, `checkedWeeklyReport`, `packetWorkers`, `reportContext`).
+   The worker's store (`weeklyReportById`, `workerReportById`, `workerReportsByIds(division, ids)`) and the console's `createReportLoader` both select the same
+   columns and call these. (a) A packet takes its own division only: `.eq('division')` in the read and the division filter in `packetWorkers` (a salon report id listed
+   in a finance weekly is never drawn). (b) A worker row that is not in its shape, or whose report is another worker's (`worker_id` is now compared with
+   `report.workerId`, in the packet and for a single report in both paths), is dropped, not thrown on, and the cover says "N of M could not be loaded". (c) The manager,
+   head and division title come from `MANAGERS` (`reportContext`), never from words stored in the report; the weekly row's `division` column is checked against the report.
+   Tests (failed first): `packet.test.ts` (8, new), `store-reports.test.ts` (foreign division, malformed and swapped rows, wrong division and wrong worker),
+   `reports-loader.test.ts` (foreign division, swapped worker, bad row; the single-report selects), `outbox-reports.test.ts` ("builds the packet from the weekly report's
+   own division", "says on the cover how many ... could not be loaded"), and **`outbox-reports-db.test.ts` ("emails the very packet the console's PDF link opens")**, which
+   writes real rows (two valid, one other-division, one malformed, one swapped, one missing id), sends the email through the real outbox and store, opens the PDF through the
+   real console server and loader, and asserts the two files are byte for byte equal, with 2 worker pages and "4 of 6 worker reports could not be loaded". So the earlier line
+   "the same bytes as the emailed and printed packet" is now proved, not only claimed.
+3. **Minor: email is retried only when Postmark has certainly not taken it.** Outbox `retryable(error, channel)`: for `email` only HTTP 429 and 503; any other 5xx settles
+   as failed. `sendEmail` words it `Postmark failed (HTTP 502); the message may have been sent`. Tests: `email.test.ts` (wording), `outbox-reports.test.ts`
+   ("never sends again after Postmark fails with HTTP 500/502/504": one Postmark call, status failed; 429 and 503 still tried three times).
+   **Twin, not changed:** a Twilio text and a PrintNode job still retry on any 5xx (wave-1 behaviour, outside this finding); a gateway timeout could double a text or a
+   printout in the same way. Worth the same one-line change for SMS if the top tier agrees.
+4. **Minor: the subject is scrubbed.** `buildWeeklyEmail` and `buildWorkerEmail` pass the subject through `scrub()`. With the registry names in the outbox the dirty
+   case cannot arise from a stored head any more, but the builders are a public function. Tests: `email.test.ts` ("puts no code, address or phone number in a subject"),
+   `outbox-reports.test.ts` (stored head "Alan 482913" still gives "For Alan: George's weekly report").
+5. **Minor: the console masks email addresses.** `cleanText` in `apps/console/src/scrub.ts` replaces an address with `[email]` (the same pattern as the PDF's). Test:
+   `reports-shape.test.ts` ("lets no phone number, address, code ... out"), with an address in a headline, finding, rule, weekly summary, goal reason and asked question and answer.
+6. **Minor: a failure before the provider is called is retried.** `reportDocument` wraps the read and the drawing in a `BeforeSend` error; the outbox retries those up to
+   three times. (A report that is gone is tried three times too, then ends as a plain "failed".) Tests: `outbox-reports.test.ts` ("tries again when reading the report fails
+   for a moment ... exactly one email", "tries again when drawing the report fails once, and gives up after three tries without calling any provider", and the gone-report test
+   now flushes four times).
+7. **Minor: a real-database test of send-once.** `outbox-reports-db.test.ts` ("sends one email when two senders race for the same row"): two senders, each with its own
+   store connection and its own delivery port (so the port's in-process ledger cannot be what saves it), a Postmark fake that answers slowly so both are inside the send, and
+   one email row in the real `outbox`. Exactly one Postmark call; the row is `sent`; a later flush sends nothing. Rows are removed afterwards.
+
+### Proof that the new tests can fail (mutation checks, each restored, `git status` clean after)
+
+- `claimOutbox` without `.eq('status','pending')`: the race test failed (2 emails, not 1).
+- No division filter in the store read and in `packetWorkers`: the byte-equality test failed (the salon page was in the emailed packet only) and the store test failed
+  (`['finance.email', 'salon.clients']`).
+- Each of findings 1 and 3 to 6 was run red before its fix (the test output shows the old behaviour: `= 0`, 3 Postmark calls for a 502, a code in a subject, an `@` on the
+  console, a row failed for good after one database blip).
+
+### Run
+
+- `npm run typecheck`: clean. Full suite under the lock at 12:40 ET: **67 files passed, 9 skipped (they need Meterless), 1,241 tests passed, 173 skipped** (before: 65 files,
+  1,214 tests). New: `packet.test.ts` (8), `outbox-reports-db.test.ts` (2), and 17 more tests in existing files.
+- Process note: once I ran `apps/console` (which includes two database-backed files that read and insert their own rows) without the lock, while no other run was known to be
+  active; both passed and were run again under the lock in the full suite.
+
+### What the merge must know (in addition to the above)
+
+- **`workerReportsByIds` now takes `(division, ids)`** (it was `(ids)`). If W1's section of `store.ts` or any other caller uses it, update the call.
+- **`apps/worker/package.json` now lists `@fahq/delivery`** (and `package-lock.json` has the same one line under `apps/worker`): `store.ts` and `outbox.ts` import the shared
+  packet checks from it. `main.ts` still loads the delivery port with its `optional()` import; the static import means the worker needs the package present, which it is.
+- Outside the "delivery reads (W2)" section of `store.ts`: only its first imports (`WeeklyReport`, `WORKER_IDS`, `WorkerReport` are no longer used as values there).
+- The email subject is built the same way for every division; `parseReport` (store) is gone, replaced by the delivery package's checks.
+- Not done: the Twilio and PrintNode 5xx retry (above); the weekly report's delivery state is still not on the division tab.

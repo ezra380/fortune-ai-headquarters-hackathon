@@ -89,14 +89,36 @@ Samples from synthetic fixtures: [`docs/samples/finance-weekly-packet.pdf`](samp
 5. The request: `POST https://api.postmarkapp.com/email`, JSON, the token in `X-Postmark-Server-Token`, `redirect: 'error'`, a 20 second timeout,
    no open or link tracking, the PDF as a base64 attachment named from a safe character set, the subject on one line.
 6. **Errors say what happened and nothing the provider said:** `Postmark refused the message (HTTP 422)`, `Postmark did not accept the message`
-   (a 200 that carries an error code), `Postmark could not be reached; the message may not have been sent`. A 429 or 5xx is tried again, at most
-   three times, by the outbox; anything else is failed.
+   (a 200 that carries an error code), `Postmark could not be reached; the message may not have been sent`, and for a 5xx other than 503
+   `Postmark failed (HTTP 502); the message may have been sent` (a gateway can fail after Postmark has taken the message). **Only a 429 or a 503 is
+   tried again** (at most three times, by the outbox): both come before Postmark takes the message. Any other 5xx, a refusal or a network error is
+   failed, and a failed row is never sent again, so an email goes out at most once. (A text through Twilio, and a printout, still retry on any 5xx:
+   see the lane notes.)
 
 `apps/worker/src/outbox.ts` passes `allowedRecipients = { HQ_REPORT_TO }` and `to = HQ_REPORT_TO`. **Whoever the head is, the email goes to that
 one address**; the subject says who it is for: `For Alan: George's weekly report`, `For Emma: Georgette's weekly report`,
-`For Esther: Cindy's weekly report`, and the body says so too. Replying to the email does nothing: a path or an action is chosen by text, with
+`For Esther: Cindy's weekly report`, and the body says so too. The people on a report (the manager, the head, the division's title) come from the
+registry (`MANAGERS`), never from words stored in the report, and the subject passes `scrub` like every other string. Replying to the email does nothing: a path or an action is chosen by text, with
 the one-time code on the head's phone. The email carries the summary, the goal and the path or action titles with their one-line summaries,
 and the PDF; it never carries a code, and every word of it is escaped for HTML.
+
+### Reading the report back: one way (`packages/delivery/src/packet.ts`)
+
+The emailed and printed packet and the console's PDF link read their reports through the same functions, so they are the same packet
+(a database test sends one and opens the other from the same rows and compares the bytes):
+
+- `checkedWorkerReport(row)`: the report must be in its contract's shape AND be the report of the worker (and division) the row names.
+- `checkedWeeklyReport(row)`: in its shape, and its division is the row's.
+- `packetWorkers(division, rows)`: of the rows read for the ids a weekly report lists, only reports that pass the check **and belong to this
+  division** (another division's id is never drawn in this packet), in the registry's order. A row that fails is left out, not thrown on; the cover
+  says "N of M worker reports could not be loaded".
+
+The worker's store (`weeklyReportById`, `workerReportById`, `workerReportsByIds(division, ids)`) and the console's `createReportLoader` both
+select the same columns (`worker_id`, `division`, `report`) and call these. The store still raises a fixed sentence for a single report that fails
+(`the stored weekly report does not match its contract`), never the stored words.
+
+A failure while the report is read or drawn (a short database failure, say) happens before any provider is called, so the outbox row is tried again
+(at most three times) instead of being failed for good. This includes a report that is gone: it ends as a plain "failed" after the three reads.
 
 ## Printouts
 
@@ -210,8 +232,12 @@ shape of what it should be allowed to read.
   and HTML (escaped, labeled for the head, no code).
 - `apps/worker/test/outbox-reports.test.ts` (real delivery port, fake fetch): the packet emailed to `HQ_REPORT_TO` only with the PDF attached; built from
   the stored report, not the row text; sent once; skipped with no token, no address, no report; failed plainly when the report is gone; the provider's body
-  kept out of the row; retried on 5xx at most three times; printed on the head's printer; skipped with no printer; one worker report; the proposal printout as before.
-- `apps/worker/test/store-reports.test.ts` (real local database): the reads.
+  kept out of the row; retried on 429 and 503 only (a 500, 502 or 504 is failed as "may have been sent"); retried when the report cannot be read or drawn
+  for a moment; the packet read for its own division; the people from the registry; printed on the head's printer; skipped with no printer; one worker report; the proposal printout as before.
+- `packages/delivery/test/packet.test.ts`: the one way a stored report is read back (a row that is another worker's or division's, a bad row, the registry's order).
+- `apps/worker/test/store-reports.test.ts` (real local database): the reads, another division's id left out, a bad or swapped row left out.
+- `apps/worker/test/outbox-reports-db.test.ts` (real local database, under the lock): two senders racing for one email row send once; the emailed packet is
+  byte for byte the packet the console's PDF link opens, from the same rows (another division's id and two bad rows included).
 - `apps/console/test/reports-shape.test.ts`: the manager line, every worker of a division in order, a report's findings, rules and key numbers by
   unit, the last seven days (one a day, New York days, none older), a worker with an old report or none, a report in the wrong shape or of another
   worker, unread parts, the weekly report (goal, three paths with arithmetic, actions, asked, sections), where each path or action stands, scrubbing
