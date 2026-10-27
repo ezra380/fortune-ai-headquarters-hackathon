@@ -6,7 +6,7 @@ changing anything. Work only in your lane's directories.
 ## What this is
 
 Fortune AI Headquarters is a company brain and AI assistants for a family wig business (a salon and an
-online store), built for the Open Agent Hackathon 2026 (Track 02). The sponsor tech is real (Zetaris,
+online store), built for the Open Agent Hackathon 2026 (primary Track 01; also 03 and 02). The sponsor tech is real (Zetaris,
 Meterless, NVIDIA Nemotron); the data is synthetic.
 
 ## Hard boundaries

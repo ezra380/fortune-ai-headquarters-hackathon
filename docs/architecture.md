@@ -1,6 +1,7 @@
 # Fortune AI Headquarters — Architecture
 
-Status: **foundation built** (branch `hq/foundation`, Oct 26–27, 2026; 524 tests). This file is the
+Status: **foundation built** (branch `hq/foundation`, Oct 26–27, 2026; 524 tests then), then waves 1 and 2 merged
+(`hq/divisions-merge`; 1,641 tests passed at the wave 2 merge). This file is the
 source of truth for every agent working in this repository. Lane ownership is in [`LANES.md`](LANES.md).
 Live vs mock status is recorded in the README; nothing here claims a component works until its tests pass.
 Where this is headed: [`roadmap.md`](roadmap.md).
