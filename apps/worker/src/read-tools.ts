@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AssistantId, type DataPort, type ReadTool } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
+import { explainProposal } from './explain.ts';
 import { summarizeUsage } from './reports.ts';
 import type { Store } from './store.ts';
 
@@ -10,7 +11,7 @@ import type { Store } from './store.ts';
 // limits, and never returns phone numbers, codes, code hashes or message bodies (only plan titles).
 
 export type ReadToolContext = {
-  store: Pick<Store, 'workReports' | 'adoptedLessons' | 'openItems' | 'latestProposal'>;
+  store: Pick<Store, 'workReports' | 'adoptedLessons' | 'openItems' | 'latestProposal' | 'latestFinalProposal' | 'proposalByPrefix' | 'approvalsOf'>;
   brain: Pick<Brain, 'record' | 'memory'>;
   data: DataPort | null;
   now: () => Date;
@@ -24,6 +25,8 @@ const Period = z.enum(['2026-09', '2026-10-mtd']);
 const Limit = z.number().min(1).optional();
 const Query = z.string().min(1).max(200);
 const Hours = z.number().positive();
+// A proposal's id, or the first characters of it (a uuid: hex digits and dashes).
+const ProposalRef = z.string().regex(/^[0-9a-fA-F-]{8,36}$/, 'must be a proposal id or its first 8 characters');
 
 const clampRows = (limit: number | undefined, fallback: number) => Math.min(MAX_ROWS, Math.max(1, Math.floor(limit ?? fallback)));
 const round = (n: number, digits: number) => Math.round(n * 10 ** digits) / 10 ** digits;
@@ -70,9 +73,10 @@ function tool<S extends z.ZodType>(def: {
 
 const Metrics = '{ view: string; queryHash: string; metrics: { id: string; label: string; value: number; unit: "usd" | "count" | "ratio" | "percent"; business: "salon" | "online" | "combined" }[] }';
 const Suggestion = '{ kind: string; about: string; text: string }';
+const Explained = '{ proposal: { id: string; createdAt: string; from: string; requestText: string; view: string; queryHash: string; pickedBy: "model" | "rule" | null; failedDepartments: string[] } | null; plans: { rank: number; title: string; department: string; originalRank: number; why: string | null; cites: string[] }[]; cited: { id: string; label: string; value: number; unit: string; business: string }[]; approvals: { action: string; status: string; planRank: number | null; decidedAt: string | null }[]; decisions: { by: string; action: string; planRank: number | null; at: string }[]; record: { askedBy: string | null; request: { text: string; from: string; at: string } | null; cites: string[] } | null; notes: string[] }';
 
 export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Record<string, ReadTool> {
-  const financeMetrics = async (period: z.infer<typeof Period>, only?: 'online') => {
+  const financeMetrics = async (period: z.infer<typeof Period>, only?: 'online' | 'salon') => {
     if (!ctx.data) throw new Error('Business data is not connected, so there are no metrics to read.');
     const { metrics, queryHash, view } = await ctx.data.getFinanceMetrics({ asOf: ctx.now().toISOString(), period });
     return {
@@ -102,6 +106,13 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
       signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
       schema: z.object({ period: Period }).strict(),
       run: ({ period }) => financeMetrics(period, 'online'),
+    }),
+    tool({
+      name: 'get_salon_metrics',
+      description: "Only the salon metrics for a period, read from Zetaris (synthetic data here, standing in for the head stylist's own backend).",
+      signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
+      schema: z.object({ period: Period }).strict(),
+      run: ({ period }) => financeMetrics(period, 'salon'),
     }),
     tool({
       name: 'recall_my_decisions',
@@ -182,10 +193,17 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     }),
     tool({
       name: 'latest_proposal',
-      description: 'The newest set of plans: its short id, when it was made, the plan titles, the metric ids it cited, and whether a decision was recorded. No plan text beyond titles.',
+      description: 'The newest set of plans the owner sees: its short id, when it was made, the plan titles, the metric ids it cited, and whether a decision was recorded. No plan text beyond titles.',
       signature: '(args: {}) => Promise<{ proposal: { id: string; createdAt: string; titles: string[]; citedMetricIds: string[]; decided: boolean } | null }>',
       schema: z.object({}).strict(),
       run: async () => ({ proposal: await ctx.store.latestProposal() }),
+    }),
+    tool({
+      name: 'explain_proposal',
+      description: 'Why a proposal exists: the request and who asked it, which department each plan came from and why it was picked, the metrics it cited (value, unit, Zetaris view and query hash), the approvals on it (status only, never a code) and who decided. Default: the newest set of plans.',
+      signature: `(args: { proposal?: string }) => Promise<${Explained}>`,
+      schema: z.object({ proposal: ProposalRef.optional() }).strict(),
+      run: ({ proposal }) => explainProposal(ctx, proposal),
     }),
   ];
   return Object.fromEntries(tools.map((t) => [t.name, t]));

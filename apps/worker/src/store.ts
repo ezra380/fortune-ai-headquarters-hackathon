@@ -79,6 +79,8 @@ export type AdoptedLesson = { id: string; review_id: string; assistant_id: Assis
 export type OpenItems = { assistant: AssistantId; openTasks: number; pendingApprovals: number };
 export type LatestProposal = { id: string; createdAt: string; titles: string[]; citedMetricIds: string[]; decided: boolean };
 export type ApprovalAction = 'forward_plan' | 'decide_plan' | 'adopt_change';
+/** One approval on a proposal, without its code: what it was for, where it stands, and (for a decision) the plan. */
+export type ApprovalSummary = { action: ApprovalAction; status: 'pending' | 'signed' | 'declined' | 'expired'; planRank: number | null; expiresAt: string; decidedAt: string | null };
 
 const ASSISTANTS: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
 
@@ -93,6 +95,10 @@ export const redactCodes = (text: string): string => text.replace(/\b\d{6}\b/g, 
 
 export function createStore(url: string, serviceKey: string) {
   const db = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+  /** The newest proposal that is not one department's own in a round (those carry body.department). */
+  const latestFinal = async () =>
+    must(await db.from('assistant_messages').select('*').eq('kind', 'proposal').is('body->>department', null).order('created_at', { ascending: false }).limit(1).maybeSingle(), 'latest proposal') as MessageRow | null;
 
   return {
     async claimTask(worker: string, now: Date): Promise<TaskRow | null> {
@@ -294,20 +300,49 @@ export function createStore(url: string, serviceKey: string) {
       }
       return out;
     },
-    /** The newest proposal in the mailbox: its short id, plan titles, cited metric ids, and whether anyone decided on it. */
+    /**
+     * The newest proposal the owner sees and decides on: its short id, plan titles, cited metric ids, and
+     * whether anyone decided on it. A department's own proposal in a round (body.department) is not it.
+     */
     async latestProposal(): Promise<LatestProposal | null> {
-      const row = must(await db.from('assistant_messages').select('id, created_at, body').eq('kind', 'proposal').order('created_at', { ascending: false }).limit(1).maybeSingle(), 'latest proposal') as
-        { id: string; created_at: string; body: { plans?: { plans?: { title?: string }[] }; metrics?: { id?: string }[] } } | null;
+      const row = await latestFinal();
       if (!row) return null;
+      const body = row.body as { plans?: { plans?: { title?: string }[] }; metrics?: { id?: string }[] };
       const decisions = await db.from('assistant_messages').select('id', { count: 'exact', head: true }).eq('kind', 'decision').eq('body->>proposalId', row.id);
       if (decisions.error) throw new Error(`count decisions failed (${decisions.error.code ?? 'db'})`);
       return {
         id: row.id.slice(0, 8),
         createdAt: new Date(row.created_at).toISOString(),
-        titles: (row.body.plans?.plans ?? []).map((p) => String(p.title ?? '')).filter(Boolean),
-        citedMetricIds: (row.body.metrics ?? []).map((m) => String(m.id ?? '')).filter(Boolean),
+        titles: (body.plans?.plans ?? []).map((p) => String(p.title ?? '')).filter(Boolean),
+        citedMetricIds: (body.metrics ?? []).map((m) => String(m.id ?? '')).filter(Boolean),
         decided: (decisions.count ?? 0) > 0,
       };
+    },
+    latestFinalProposal: latestFinal,
+    /**
+     * A proposal by its full id or by the first characters of it. The ids are uuids, which cannot be matched by
+     * prefix in the database, so the newest proposals are read and matched here (the demo holds a few).
+     */
+    async proposalByPrefix(prefix: string): Promise<{ proposal: MessageRow | null; ambiguous: boolean }> {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(prefix)) {
+        return { proposal: must(await db.from('assistant_messages').select('*').eq('kind', 'proposal').eq('id', prefix).maybeSingle(), 'proposal') as MessageRow | null, ambiguous: false };
+      }
+      const rows = must(await db.from('assistant_messages').select('*').eq('kind', 'proposal').order('created_at', { ascending: false }).limit(200), 'proposals') as MessageRow[];
+      const found = rows.filter((r) => r.id.startsWith(prefix));
+      return { proposal: found.length === 1 ? found[0]! : null, ambiguous: found.length > 1 };
+    },
+    /** Every approval on a proposal (the send, and the decisions on what was sent). Never a code or its hash. */
+    async approvalsOf(proposalId: string): Promise<ApprovalSummary[]> {
+      const forwards = must(await db.from('assistant_messages').select('id, body').eq('kind', 'request').eq('reply_to', proposalId), 'forwards') as { id: string; body: { planRank?: unknown } }[];
+      const rows = must(await db.from('approvals').select('message_id, action, status, expires_at, decided_at').in('message_id', [proposalId, ...forwards.map((f) => f.id)]).order('created_at'), 'approvals') as
+        { message_id: string; action: ApprovalAction; status: ApprovalSummary['status']; expires_at: string; decided_at: string | null }[];
+      return rows.map((r) => {
+        const rank = Number(forwards.find((f) => f.id === r.message_id)?.body.planRank);
+        return {
+          action: r.action, status: r.status, planRank: r.action === 'decide_plan' && Number.isInteger(rank) ? rank : null,
+          expiresAt: new Date(r.expires_at).toISOString(), decidedAt: r.decided_at ? new Date(r.decided_at).toISOString() : null,
+        };
+      });
     },
   };
 }

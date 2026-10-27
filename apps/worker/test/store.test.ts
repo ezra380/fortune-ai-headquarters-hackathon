@@ -147,4 +147,49 @@ describe.skipIf(!api)('store: reports, reviews, recommendations (real local data
     await store.postMessage({ from: 'finance', to: 'owner', kind: 'decision', replyTo: null, dedupeKey: 'store-test-decision:' + randomUUID(), body: { proposalId: proposal.id, verdict: 'signed' } });
     expect((await store.latestProposal())?.decided).toBe(true);
   });
+
+  it("never offers a department's own proposal in a round as the newest set of plans", async () => {
+    await store.postMessage({
+      from: 'owner', to: 'owner', kind: 'proposal', replyTo: null, dedupeKey: 'store-test-final:' + randomUUID(),
+      body: { plans: { plans: [{ title: 'Final A' }] }, origins: [] },
+    });
+    // Posted AFTER the final one, so by time alone it would be the newest proposal.
+    await store.postMessage({
+      from: 'salon', to: 'owner', kind: 'proposal', replyTo: null, dedupeKey: 'store-test-dept:' + randomUUID(),
+      body: { plans: { plans: [{ title: 'Salon own plan' }] }, department: 'salon', roundId: randomUUID() },
+    });
+    const newest = await store.latestFinalProposal();
+    expect(newest).not.toBeNull();
+    expect(newest!.body.department).toBeUndefined();
+    expect((await store.latestProposal())?.titles).not.toContain('Salon own plan');
+  });
+
+  it('finds a proposal by its whole id or its first characters, and by nothing else', async () => {
+    const proposal = await store.postMessage({ from: 'owner', to: 'owner', kind: 'proposal', replyTo: null, dedupeKey: 'store-test-find:' + randomUUID(), body: { plans: { plans: [] } } });
+    expect((await store.proposalByPrefix(proposal.id)).proposal?.id).toBe(proposal.id);
+    expect((await store.proposalByPrefix(proposal.id.slice(0, 8))).proposal?.id).toBe(proposal.id);
+    expect(await store.proposalByPrefix('zzzzzzzz')).toEqual({ proposal: null, ambiguous: false });
+    // A decision is not a proposal, even when its id is asked for.
+    const decision = await store.postMessage({ from: 'finance', to: 'owner', kind: 'decision', replyTo: null, dedupeKey: 'store-test-find-d:' + randomUUID(), body: {} });
+    expect((await store.proposalByPrefix(decision.id)).proposal).toBeNull();
+  });
+
+  it('lists the approvals on a proposal and on what was sent from it, with the plan, and never a code', async () => {
+    const proposal = await store.postMessage({ from: 'owner', to: 'owner', kind: 'proposal', replyTo: null, dedupeKey: 'store-test-appr:' + randomUUID(), body: { plans: { plans: [] } } });
+    const forward = await store.postMessage({ from: 'owner', to: 'finance', kind: 'request', replyTo: proposal.id, dedupeKey: 'store-test-appr-f:' + randomUUID(), body: { proposalId: proposal.id, planRank: 2 } });
+    const now = new Date();
+    await store.issueApproval({ messageId: proposal.id, personId: 'demo-p-owner', action: 'forward_plan', code: '123456', from: 'owner', now, smsBody: 'store test 123456', smsDedupeKey: 'store-test-appr-s1:' + randomUUID() });
+    await store.issueApproval({ messageId: forward.id, personId: 'demo-p-finance-owner', action: 'decide_plan', code: '654321', from: 'finance', now, smsBody: 'store test 654321', smsDedupeKey: 'store-test-appr-s2:' + randomUUID() });
+    try {
+      const approvals = await store.approvalsOf(proposal.id);
+      expect(approvals.map((a) => [a.action, a.status, a.planRank, a.decidedAt])).toEqual([['forward_plan', 'pending', null, null], ['decide_plan', 'pending', 2, null]]);
+      expect(Date.parse(approvals[0]!.expiresAt)).toBe(now.getTime() + 15 * 60_000);
+      expect(JSON.stringify(approvals)).not.toMatch(/123456|654321|hash/i);
+      expect(await store.approvalsOf(randomUUID())).toEqual([]);
+    } finally {
+      // Leave no pending approval or text behind for the other tests that read the queue.
+      await pool.query(`update public.approvals set status = 'expired' where message_id = any($1)`, [[proposal.id, forward.id]]);
+      await pool.query(`update public.outbox set status = 'skipped', last_error = 'store test' where dedupe_key like 'store-test-appr-s%' and status = 'pending'`);
+    }
+  });
 });
