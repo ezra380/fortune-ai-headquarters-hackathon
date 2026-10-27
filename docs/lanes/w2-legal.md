@@ -65,6 +65,20 @@ failure was seen.
     Legal Team as a question" failed (the owner got "I couldn't get plans ..." instead of a Legal Team answer);
   - the `assistants` row in `20261027130010_legal.sql`: `migrations.test.ts` "makes the Legal Team a real assistant ..." failed.
 
+### Verification (all under `flock ~/.fahq-db-test.lock`, 2026-10-27)
+
+- `npm run typecheck`: clean on every commit.
+- Full suite, first run: 1246 passed, 4 failed. The four counted the file profiles by hand (five) and were fixed in the last
+  commit (`supabase/tests/profiles.test.ts` three seed tests, `apps/worker/test/profiles.test.ts` the start-up log line); both
+  files then passed (70 tests).
+- Full suite, second run (66 files, 1250 tests): 1249 passed, 1 failed:
+  `apps/worker/test/manager-decides.test.ts` "lessons come from the database > reach the next Code Mode answer ..." (no
+  `finance.answer` call was recorded). The file is the manager lane's, it passed in the first full run, and it passed on its own
+  afterwards (36 of 36), so I read it as a flake under the afternoon's load; it is not touched by this lane, but the merge
+  run should watch it.
+- Local database: `legal` enum value and `assistants` row applied; `legal` profile row seeded by the doors-db test's
+  `seedProfiles`; door tokens and reports made by the tests are deleted again.
+
 ## What is not done
 
 - **No Legal Team tab in the Admin console.** `apps/console` (`DEPARTMENTS`, `LIVE_ASSISTANTS`, the loader's id check and
