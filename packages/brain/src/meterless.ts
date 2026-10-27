@@ -8,6 +8,20 @@ import { pathToFileURL } from 'node:url';
 
 export type WmProvenance = { kind: string; by?: string; at: string | Date; runId?: string };
 
+export type WmEntity = { id: string; type: string; name?: string; attrs: Record<string, unknown>; createdAt?: string };
+
+/**
+ * The graph view's reads we use (GraphView upstream, engines/world-model/reference/src/index.ts).
+ * Closed edges (a newer edge superseded them) are left out of every one of these.
+ */
+export interface GraphViewLike {
+  entity(id: string): WmEntity | undefined;
+  /** Entities on the other end of an open edge, in either direction. */
+  neighborsOf(id: string, opts?: { via?: string; inContext?: string }): WmEntity[];
+  /** The sources of open edges that point at this entity. */
+  incoming(id: string, opts?: { via?: string }): WmEntity[];
+}
+
 export interface WorldModelLike {
   upsertEntity(input: {
     type: string;
@@ -20,6 +34,11 @@ export interface WorldModelLike {
     from: string;
     type: string;
     to: string;
+    /**
+     * A new open edge with the same (from, type, context) and a different target CLOSES the old one
+     * (store.ts, the `relate` case). Pass the target's id here whenever one source may have many targets.
+     */
+    context?: string;
     attrs?: Record<string, unknown>;
     source: WmProvenance;
   }): Promise<{ id: string }>;
@@ -29,6 +48,7 @@ export interface WorldModelLike {
     value: unknown;
     source: WmProvenance;
   }): Promise<{ id: string }>;
+  view(name: 'graph'): GraphViewLike;
   /** WorldEvent upstream: the event's type is `kind` (upsertEntity, relate, assertFact, ...). */
   events(): readonly { id: string; seq: number; kind: string; at: string; payload?: unknown }[];
   /** AuditEntry upstream. */

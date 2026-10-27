@@ -5,7 +5,7 @@ import { AssistantMemory } from './memory.ts';
 import { SharedRecord } from './record.ts';
 
 export { SharedRecord } from './record.ts';
-export type { Stamp } from './record.ts';
+export type { DecisionWord, ProposalExplanation, Stamp } from './record.ts';
 export { AssistantMemory } from './memory.ts';
 export type { Decision } from './memory.ts';
 export { loadMeterless } from './meterless.ts';
