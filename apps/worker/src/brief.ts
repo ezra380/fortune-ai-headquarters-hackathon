@@ -167,9 +167,6 @@ export function parseNeeds(raw: unknown, self: Division): { requests: DataReques
   return { requests: requests.slice(0, MAX_REQUESTS), unusable: null };
 }
 
-const requestsOf = (marker: MessageRow): DataRequest[] =>
-  (Array.isArray(marker.body.requests) ? marker.body.requests : []).flatMap((r) => { const p = DataRequest.safeParse(r); return p.success ? [p.data] : []; });
-
 /**
  * One model call (the division's code model, reasoning on) asks what, if anything, it needs from another division.
  * The answer is stored as a note in the mailbox, so a task that runs again does not ask the model again. A model that
@@ -179,7 +176,7 @@ async function decideNeeds(run: Run, read: DivisionData): Promise<DataRequest[]>
   const { deps, task, runId, division, assistant } = run;
   const noteKey = `needs:${run.key}`;
   const stored = await deps.store.messageByKey(noteKey);
-  if (stored) return requestsOf(stored);
+  if (stored) return parseNeeds(stored.body, division).requests; // the stored note goes through the same rules
 
   const started = deps.now();
   const model = deps.profiles.model(assistant, 'code');
