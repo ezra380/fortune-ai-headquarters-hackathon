@@ -407,6 +407,82 @@ Two things learned the hard way:
 - Because window functions work, the season index can stay in Zetaris (computed from the grouped rows in
   the period view), not in TypeScript. The oracle computes the same number independently.
 
+## Wave 2, slice 1: the channels (Finance's sources, docs/wave2.md items 1 to 3)
+
+`packages/data/src/channels.ts` (sources, rules, metrics) and `generateChannels` in `synthetic.ts` (rows), built the
+way version 2 is: each source its own seeded stream (`marketplace_sales`, `walmart_ads`, `marketplace_stock`,
+`email_messages`, `order_lines`), exactly one planted bad row with its rule and a rejected-rows count, an oracle,
+live proof. Seventeen sources now; the catalog holds 104 period, 14 derived and 20 standing metrics.
+
+| Source (Zetaris table, row view) | Rows | What it is | Planted bad row |
+|---|---|---|---|
+| `fortune_demo_marketplace.sales` (`marketplace_sales`, new database `FORTUNE_DEMO_MARKETPLACE`) | 3,023 | one marketplace order of one listing, sold and shipped from the marketplace's warehouse: units, revenue, fees (15% referral plus a warehouse fee per unit). Amazon lists the 16 accessories and four Tuni pieces, Walmart ten accessories | `demo-mk-bad-fees` (June): a fee reversal exported as a negative fee |
+| `fortune_demo_marketplace.ads` (`marketplace_ads`) | 783 | Walmart's own ads, two keywords a day (Amazon's have been among the marketing ads since version 1) | `demo-wa-bad-negative` (January): negative spend |
+| `fortune_demo_marketplace.stock` (`marketplace_stock`) | 391 | each listing on every period's last day: on hand, inbound, units sold in the 28 days to that day (equal to the sales, a test) | `demo-ms-bad-negative` (May): negative on hand |
+| `fortune_demo_marketing.email_messages` (`marketing_email_messages`) | 2,793 | each email row split into its messages (a flow's steps from a fixed list; a campaign is one message): sends and revenue to the cent, and unsubscribes | `demo-ems-bad-negative` (March): negative sends |
+| `fortune_demo_online.order_lines` (`online_order_lines`) | 1,938 | each store sale split into lines, one unit of one product each (distinct products of the order's line): price, unit cost and the refunds on the order to the data date, shared by weight to the cent | `demo-ol-bad-units` (August): a line of no units |
+
+**What adds up exactly (tests in `channels.test.ts`):** every email row's messages carry its sends and revenue to the
+cent, so flow plus campaign sends are `m:online.email.sends` and their revenue `m:online.email.revenue` in every
+period; every order's lines carry its revenue, cost and valid refunds to the cent, so `m:online.products.cogs` is the
+orders' cost and the lines' revenue `m:online.revenue.total`; a warehouse's 28-day units are the sales. **Every one
+of the 1,224 values the base (16449bf) served is unchanged** (pinned by a hash computed by running the base's own
+code). Not re-counted: the marketplaces are not the store, so `m:online.revenue.total`, the all-channel ad spend,
+the MER and the contribution keep their Google, Meta and Amazon meaning (Walmart's ad spend says so in `about`).
+
+| Metrics | Unit | Rule | Divisions |
+|---|---|---|---|
+| `m:online.{amazon,walmart}.{revenue,orders.count,fees}` | usd / count / usd | valid sales of the marketplace, by order day | finance, hq |
+| `m:online.ads.walmart.{spend,revenue,roas,conversions}` | as Google's | valid Walmart ad days | online, finance |
+| `m:online.{amazon,walmart}.stock.out.count` (standing) | count | none on hand at the warehouse on the data date | finance, hq |
+| `m:online.{amazon,walmart}.stock.low_cover.count` (standing) | count | in stock with under 21 days of cover at the last 28 days' pace (`on_hand * 28 < 21 * units_28d`); never also out | finance, hq |
+| `m:online.marketplace.inbound_units` (standing) | count | units on their way to both warehouses on the data date | finance, hq |
+| `m:online.email.{flow,campaign}.{sends,revenue}`, `m:online.email.campaign.count`, `m:online.email.unsubscribe_rate` | count / usd / count / ratio | valid email messages by kind; campaigns sent; unsubscribes over sends | online, finance |
+| `m:online.products.cogs` | usd | the lines' units × unit cost, by order date | online, finance |
+| `m:online.products.negative_margin.count` | count | products whose lines in the period made less than they cost once their refunds (to the data date) are off; a returned piece's cost is not added back | online, hq |
+| `m:online.dq.rejected_{marketplace_sales,marketplace_stock}`, `…_{marketplace_ads,email_messages,order_lines}` | count | the source's rejected rows | the source's readers, hq |
+
+`m:online.email.sends` gained the phrases "total emails" and "marketing emails" (its value is unchanged), so a plan
+can name it apart from the flow and campaign sends. The products that lost money are counted per product inside the
+period view's one read of the lines: an inner `GROUP BY period, sku`, then a count of the products below zero
+(`groupedSelect` in `finance-sql.ts`, a new aggregate kind `losing`; every other source's SQL is byte-for-byte as
+before). Ids per division (period / derived / standing): salon 24 / 2 / 3; finance 76 / 14 / 16; online 65 / 5 / 3;
+hq 31 / 14 / 16; a `2026-10-mtd` read returns salon 28, finance 104, online 72, hq 59 metrics.
+
+**The asks of docs/wave2.md, pinned by a test** (`channels.test.ts`, "who must not read what"): Online never reads the
+marketplace stock (`m:online.{amazon,walmart}.stock.*`, `m:online.marketplace.*`; Finance and HQ do); Finance reads
+no product number but the money totals and no `returns`/`reviews` number; Finance never reads `m:salon.clients.*`;
+Online never reads `m:salon.*`.
+
+**Attention** (new rules): a marketplace listing out of stock (act); low on cover (watch). On the synthetic year:
+Amazon has 2 out and 4 low, Walmart 0 out and 2 low, 78 units inbound; Finance and HQ see them.
+
+**Row reads** (`RowRead` in `@fahq/contracts`, `rows.ts`):
+- `marketplace_stock { status: 'all' | 'low', marketplace? }`: each listing on the data date, by marketplace and sku:
+  sku, marketplace, line, on hand, inbound, units in 28 days, units a day, days of cover (null when none sold) and a
+  status (`out`, `low`, `ok`). Totals: listings, out of stock, low on cover, units on hand and inbound (units, never
+  money, so both marketplaces add up). The out, low and inbound totals equal the standing numbers (a test).
+- `products { period, sort: 'best' | 'worst' }`: each store product's period from its lines, by profit: units,
+  revenue, cost, refunds, profit, margin, refund rate and views in the period's last week (from the inventory). One
+  fixed statement: the period's valid lines added up per product, left-joined to that day's valid stock rows; its hash
+  covers both row views. Totals: products, units, revenue, cost, refunds, profit, and how many lost money (equal to
+  the period metrics, a test). The average rating joins when the reviews source exists (slice 2).
+
+**Read tools** (worker and door): `get_marketplace_stock({ status?, marketplace?, limit? })` for the owner and
+Finance; `get_product_performance({ period, sort?, limit? })` for the owner and Online. Their lines are in the skills.
+
+**Live run, 2026-10-27 11:24–11:58 ET:** `--v2 --recreate` dropped every version 2 object (the filter views about 50 s
+a drop today) and was stopped once the period view was gone; `--v2` then created everything missing (database
+`FORTUNE_DEMO_MARKETPLACE`, 17 REST tables and row views, the three layer views, twelve filter views, four marts and
+their twelve tables) and proved it: 104 of 104 period metrics in each of the 13 periods (the grouped select of the
+order lines accepted), derived and standing views, every mart table for every period, the DataPort reads (unsliced
+136 of 136; salon 28, finance 104, online 72, hq 59, in `2026-10-mtd` and `2026-09`): **145 comparisons, all matched,
+0 mismatches**; 13 row reads equal to the oracle (the four new ones among them: all stock 30 listings, 2 out, 6 low,
+78 inbound; Amazon low 6 rows; products `2026-10-mtd` worst first 40 products, `2026-09` best first 48 with 3 that
+lost money); 7 series (Amazon revenue and the losing products among them); version 1's mart listed exactly as
+before; "version 2 verified". Attention that fired: Finance and HQ, the marketplace stock out (act) and low cover
+(watch), beside what fired before. A period read now takes about 12 s.
+
 ## Future work, by owner decision
 
 - **No salon–online customer join yet** (Ezra, 2026-10-27). The "xjoin" database, the customer segments
@@ -417,5 +493,5 @@ Two things learned the hard way:
 - Store sessions and landing pages come last, only if time remains.
 - Not built: rejected-rows metrics for ads and email (their extra rules from the design), average repair
   turnaround in days and average first-reply minutes (the contract's metric units have no `days` or
-  `minutes`; the share metrics carry turnaround and reply speed instead), email flow/campaign splits and
-  unsubscribes, Meta campaigns and agents' late reports.
+  `minutes`; the share metrics carry turnaround and reply speed instead), Meta campaigns and agents' late reports.
+  (The email flow and campaign split and unsubscribes came in wave 2, slice 1.)
