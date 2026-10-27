@@ -49,7 +49,7 @@ export function overlay(base: AssistantProfile, row: Pick<ProfileRow, 'title' | 
     skill: row.skill,
     reads: row.reads as ReadToolName[],
     models,
-    lessons: row.lessons.map((l) => ({ ...l })),
+    lessons: row.lessons.map((l) => ({ ...l, by: l.by ?? 'manager' })), // no record: shown to a model as the manager's
     version: row.version,
     source: 'database',
   };

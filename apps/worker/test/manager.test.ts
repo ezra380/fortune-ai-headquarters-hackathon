@@ -290,12 +290,14 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(profileTables.history).toHaveLength(versionsBefore);
     expect(sms.length).toBe(smsBefore);
 
-    // The next review tells the writer which changes are already in force.
+    // The next review tells the writer which lessons are already in force.
     model.script('manager.review', makeReview().json);
     await textIn(ownerPhone, 'REVIEW');
     const next = JSON.parse(model.of('manager.review').at(-1)!.user) as { lessonsAlreadyAdopted: { assistant: string; text: string }[] };
     expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'finance', text: r.lesson });
-    expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'online', text: r.readsLine });
+    // Lessons and notes only (review fixes, 2026-10-27): a read-tool change is not a lesson; the writer reads what each
+    // assistant may read now from `profiles`.
+    expect(next.lessonsAlreadyAdopted).not.toContainEqual({ assistant: 'online', text: r.readsLine });
   });
 
   it('as shipped: the manager applies the lesson itself, the owner is told, and ADOPT applies what still needs his code', async () => {
@@ -395,12 +397,14 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(profileTables.history).toHaveLength(versionsBefore);
     expect(sms.length).toBe(smsBefore);
 
-    // The next review tells the writer which changes are already in force, the manager's own among them.
+    // The next review tells the writer which lessons are already in force, the manager's own among them.
     model.script('manager.review', makeReview().json);
     await textIn(ownerPhone, 'REVIEW');
     const next = JSON.parse(model.of('manager.review').at(-1)!.user) as { lessonsAlreadyAdopted: { assistant: string; text: string }[] };
     expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'finance', text: r.lesson });
-    expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'online', text: r.readsLine });
+    // Lessons and notes only (review fixes, 2026-10-27): a read-tool change is not a lesson; the writer reads what each
+    // assistant may read now from `profiles`.
+    expect(next.lessonsAlreadyAdopted).not.toContainEqual({ assistant: 'online', text: r.readsLine });
   });
 
   it('rejects a review whose number is not in the digest, twice, and tells the owner plainly', async () => {

@@ -28,7 +28,7 @@ export type ChangeOptions = {
   /** What the change came from (the recommendation's id). A lesson with this source is never added twice. */
   source: string;
   /** Who applies it: the HQ Manager by itself, or the owner with his code. A lesson records it (and is shown to a model as such). */
-  by: ProfileLesson['by'];
+  by: 'manager' | 'owner';
   now: Date;
 };
 

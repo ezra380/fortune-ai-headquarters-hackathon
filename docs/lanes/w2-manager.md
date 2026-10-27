@@ -31,8 +31,8 @@ Synthetic data only. The name Joey for the CEO assistant is the main session's, 
   ...", "queues two reviews a day ...", "sends no text on a day with nothing to review ...", and `digest.test.ts`
   "queues two quiet review tasks keyed by the New York day ...".
 - **D. Retire.** A new kind with typed detail `{ target: 'lesson' | 'note', text, why }`. The exact text must be in the
-  stored profile (the review's check, with the correction round, and again at the write: "there is no standing lesson
-  ... in the stored profile"). It applies by itself only when the manager put the item there: a lesson with `by:
+  stored profile (the review's check, with the correction round, in words that quote nothing; and again at the write:
+  "there is no standing lesson ... in the stored profile"). It applies by itself only when the manager put the item there: a lesson with `by:
   'manager'` in the raw row (`lessonAddedBy`; no `by` is the owner's); a note when an adopted `skill_note`
   recommendation applied by the manager wrote those words (it has a version) and the owner never adopted them
   (`noteAddedBy`); a hand-written note is the owner's. The owner's waits, shown as "Retire from <assistant>: <text>".
@@ -66,14 +66,81 @@ Synthetic data only. The name Joey for the CEO assistant is the main session's, 
   `packages/codemode/test/doors.test.ts`, 75 of 75 passed.
 - `manager-decides.test.ts` (45, the 9 new ones among them) and `manager.test.ts` all green in the full run.
 
+## Review fixes (2026-10-27, after the independent review of this lane)
+
+Every finding was taken; none was judged wrong. Each fix has a test that was run against the code before the fix and
+seen failing (the source files were put back to `HEAD` for that run, the tests kept, then the fixes restored), then
+passing on the fixed code.
+
+- **Blocker: doors-review words reached the internal review** (objection quoted the model's retire words onto the
+  `manager.review` receipt, from there into the work report's suggestion and summary, which the internal digest reads).
+  Fixed twice over:
+  1. `objectionToChange` (profile-changes.ts) never quotes the model: a retire of words not held reads "the retire names
+     words that are not a standing lesson of <assistant>; copy the text exactly from standing"; an unknown read tool or
+     model is named as such ("it names a read tool that does not exist ...", "it names a model no job uses today ..."),
+     never by the name the model wrote. (The write's own reasons in `changes.ts` still quote, but they land only on the
+     `ok` `manager.apply` receipt, which no work report copies, and in the doors review nothing reaches the write.)
+  2. The internal review's digest gets `list_work_reports` over `forTheInternalReview` (manager.ts): a manager task's
+     report is kept only when its task was an internal review (`store.reviewScopes`, from the task payload; unknown scope
+     is left out), and of every other report the Code Mode error text ("Sandbox error: ...", "; error: ...") and a failed
+     task's reason in the summary are left out. The same filter sits under `usage_summary` in the internal review (it
+     reads the same store call), so the counts there leave out the doors and `REVIEW` tasks.
+  Tests: `manager-decides.test.ts` "never hands the internal review words a doors review read: neither a correction
+  round's objection nor a script's error reaches its digest or its prompt" (real database: a doors review whose first
+  attempt names a marker retire, a doors review whose script fails quoting a marker, then the internal review; the
+  marker is in neither the reader's output nor the review model's `user` prompt; seen failing on the old code, and seen
+  failing again with only `internalTools` switched off: the doors report's task id showed up in the internal digest);
+  "what the internal review may read of the work reports (forTheInternalReview, no database)"; the wording in "sends the
+  review writer back ..." and "retire: what the owner put there waits ...".
+- **Major: a lesson with no `by` turned into the manager's on the next write.** `ProfileLesson.by` is now optional in the
+  stored shape (rows.ts): no default is filled in on parse, so a write, an `ADOPT` or a restore keeps it missing; the
+  "shown to a model as the manager's" default lives only in `source.ts` (`overlay`, and `skillWithLessons` already had
+  it). Tests: `changes.test.ts` "keeps a lesson with no record of who added it without one when the profile is read and
+  written again ..."; `manager-decides.test.ts` "keeps a lesson with no record of who added it the owner's after the
+  manager writes the profile in the same review: retiring it waits for the code"; `supabase/tests/profiles.test.ts`
+  "puts a retired lesson back with its record of who added it, and a lesson with no such record stays without one" (a
+  retire version through `save_assistant_profile`, then `restoreProfileVersion`).
+- **Minor: retire time-of-check to time-of-use.** The authorship check moved into `applyRecommendation` for actor
+  `manager` and kind `retire`, on the raw row whose version guards the write; it returns a new status `held` (the
+  recommendation stays open, listed under "Needs your code"; the `manager.apply` receipt reads as before). `holdsRetire`
+  and `retireAuthor` are gone. Test: "the write itself asks who put a lesson there: the manager never retires the
+  owner's, whatever a check before it found".
+- **Minor: carried reports from an earlier Code Mode attempt.** Whenever the reader was handed to the script and outside
+  reports were waiting, every waiting report is stored as carried too (union with the tool's output); rule 2's doors set
+  in the doors review's check still comes from the tool's output only. Test: "a REVIEW whose final script never called
+  the reader still counts every waiting outside report as carried: nothing applies by itself".
+- **Minor: retired lessons still listed.** `store.adoptedLessons` (behind `list_lessons` and the review writer's
+  `lessonsAlreadyAdopted`) lists kinds `lesson` and `skill_note` only, and leaves out one whose words a later adopted
+  retire of the same assistant took out; `list_lessons`' description says so. Test: the end of "retire: takes out a
+  lesson the manager put there with no code ...".
+- **Minor: Law 5 gap.** The five regression tests above were each seen failing on the old code first (run at 14:58 ET:
+  9 failures in the three files, every one of them a new or re-worded test, for the reason it names).
+- `manager.test.ts`: the two loop tests expected the next review's `lessonsAlreadyAdopted` to list the adopted read-tool
+  change; it now lists lessons and notes only (the writer reads each assistant's read tools from `profiles`), so they
+  expect it left out.
+
+### Proof of the review fixes
+
+- `npm run typecheck`: clean (15:02 and 15:13 ET).
+- Full suite under the lock (`flock ~/.fahq-db-test.lock npm test`, 15:02 to 15:11 ET): 1248 passed, 4 failed. Two were
+  `manager.test.ts` expecting the read-tool line in `lessonsAlreadyAdopted` (above); fixed, and `manager.test.ts` rerun on
+  its own under the lock at 15:13 ET: 29 of 29 passed. The other two are `apps/worker/test/profiles.test.ts`, the
+  legal lane's `legal` row in the shared `assistant_profiles` ("assistant_id: Invalid option"), as in the first round;
+  they pass once the legal lane is merged.
+- The three files with the new tests (`manager-decides.test.ts`, `changes.test.ts`, `supabase/tests/profiles.test.ts`):
+  178 of 178 on the fixed code (14:57 ET), and in the full run.
+
 ## Not done
 
-- The DB-backed tests in `manager-decides.test.ts` were written alongside the code, not run against the old code
-  first (the file imports the new exports, so on the old code it fails as a whole). The pure tests (contracts, profiles)
-  were seen failing first.
 - `standing` shows the newest 20 lessons of each assistant; an older one can only be retired by the owner's revert.
-- `list_lessons` and `lessonsAlreadyAdopted` list every adopted recommendation, a retire's row included (as they already
-  did for reads and model rows).
+- Residual, outside this lane's files: other assistants' receipts can still carry free-text details their own checks
+  wrote (a plan writer's objections, a front-door refusal), and a department's Code Mode may read its own door's
+  reports. `forTheInternalReview` leaves out the Code Mode error text and failure reasons, the paths that can quote
+  data; the checks' objections are the program's sentences with at most a number or an id of the model's. A general
+  rule (a work report carries no model-written text at all) belongs in `reports.ts`, which is not this lane's.
+- `list_lessons` follows retires, not a version put back by hand (`my_lessons` and the profile are what is in force).
+- The DB-backed tests of the first round (before the review) were written alongside the code; the review-fix tests
+  above were seen failing first.
 
 ## What the merge must know
 
@@ -84,7 +151,11 @@ Synthetic data only. The name Joey for the CEO assistant is the main session's, 
 - **Reseed** the manager's profile (`npx tsx scripts/seed-profiles.ts --force`) so the stored skill carries the new
   "The kinds of change, and who applies them" section; the adopted lessons and notes stay.
 - **Files touched outside the lane's list:** `apps/worker/src/store.ts` (manager functions only: `saveManagerReview`
-  takes `carried`/`scope`, `ReviewRow` has the two columns, new `skillNotesInForce`); `apps/worker/test/digest.test.ts`
+  takes `carried`/`scope`, `ReviewRow` has the two columns, new `skillNotesInForce`; review fixes: new `reviewScopes`,
+  and `adoptedLessons` now lists standing lessons and notes only); `apps/worker/src/read-tools.ts` (review fixes: the
+  `list_lessons` description, one line); `packages/profiles/src/rows.ts` (`ProfileLesson.by` optional) and
+  `packages/profiles/src/source.ts` (`overlay` fills `by: 'manager'` for a model); `supabase/tests/profiles.test.ts`
+  (one restore case); `apps/worker/test/digest.test.ts`
   (the 09:00 job's test now expects the two tasks); `packages/profiles/src/index.ts` (exports `lessonAddedBy`). The
   `AssistantId` enum and the assistant lists are untouched: a `legal` assistant gets the same rules with no change here
   (`standingOf` and `modelsInUse` walk `AssistantId.options`).

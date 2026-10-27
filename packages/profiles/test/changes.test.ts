@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AssistantId } from '@fahq/contracts';
 import {
-  KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, MONEY_READS, READ_SCOPE, READ_TOOL_NAMES, applyProfileChange, changeOf, checkChangeText,
+  KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, MONEY_READS, ProfileRow, READ_SCOPE, READ_TOOL_NAMES, applyProfileChange, changeOf, checkChangeText,
   checkProfileRow, dataNeverStored, describeChange, lessonAddedBy, loadProfiles, managerNotes, withManagerNotes, type ChangeOptions, type ProfileContent, type ReadToolName,
 } from '../src/index.ts';
 
@@ -344,6 +344,20 @@ describe('describing a change', () => {
 });
 
 describe('a retire', () => {
+  it('keeps a lesson with no record of who added it without one when the profile is read and written again, so it stays the owner\'s to retire', () => {
+    const raw = {
+      assistant_id: 'finance', version: 3, title: 'Finance', skill: files.finance.skill, reads: [...files.finance.reads], models: {},
+      lessons: [{ text: 'Ask which month first.', source: 'rec-older', adoptedAt: '2026-10-01T00:00:00.000Z' }],
+      updated_at: '2026-10-01T00:00:00.000Z', updated_by: 'owner',
+    };
+    expect(lessonAddedBy(raw.lessons, 'Ask which month first.')).toBe('owner');
+    // The manager writes the profile again (any change will do): the row is parsed, changed and stored as JSON.
+    const next = must(applyProfileChange(ProfileRow.parse(raw), { kind: 'lesson', text: 'Name the period first.' }, options({ by: 'manager' }))).next;
+    const stored: unknown = JSON.parse(JSON.stringify(next.lessons));
+    expect(lessonAddedBy(stored, 'Ask which month first.')).toBe('owner');
+    expect(lessonAddedBy(stored, 'Name the period first.')).toBe('manager');
+  });
+
   const lessons = [
     { text: 'Name the month.', source: 'rec-a', adoptedAt: '2026-10-20T00:00:00.000Z', by: 'owner' as const },
     { text: 'Say the period first.', source: 'rec-b', adoptedAt: '2026-10-21T00:00:00.000Z', by: 'manager' as const },

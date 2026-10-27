@@ -6,10 +6,10 @@ import { KIND_LABEL, changeOf, dataNeverStored, describeChange } from '@fahq/pro
 import { BRIEF_CODE_FOR } from './brief.ts';
 import type { Command } from './commands.ts';
 import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
-import { applyRecommendation, objectionToChange, profilesOverview, retireAuthor, standingOf, type Applied, type Standing } from './profile-changes.ts';
-import { MAX_HOURS } from './read-tools.ts';
+import { applyRecommendation, objectionToChange, profilesOverview, standingOf, type Applied, type Standing } from './profile-changes.ts';
+import { MAX_HOURS, createReadTools, pick } from './read-tools.ts';
 import { codeModeDetail, numberTrace } from './reports.ts';
-import type { NewRecommendation, PersonRow, RecommendationRow, ReviewRow, SessionReportRow, TaskRow } from './store.ts';
+import type { NewRecommendation, PersonRow, RecommendationRow, ReviewRow, SessionReportRow, TaskRow, WorkReportRow } from './store.ts';
 
 export { queueDailyReview } from './manager-daily.ts';
 
@@ -93,6 +93,35 @@ function carriedReports(result: CodeModeResult): CarriedReports {
     }
   }
   return carried;
+}
+
+/** Where a Code Mode script's error starts in a work report's suggestion (reports.ts writes both forms). */
+const SCRIPT_ERROR = /(Sandbox error: |; error: )[\s\S]*$/;
+
+/**
+ * The work reports the internal review may read. That review applies by itself, so it never reads words an outside
+ * tool could have steered: the report of a manager task other than an internal review is left out whole (the doors
+ * review and REVIEW read the outside reports, a manager question may, and their receipts carry their model's words and
+ * checks), and of every other report the error a Code Mode script raised (it can quote the data the script was reading)
+ * and a failed task's reason are left out. Fails closed: a manager task whose scope cannot be read is left out.
+ */
+export async function forTheInternalReview(deps: Pick<WorkerDeps, 'store'>, rows: readonly WorkReportRow[]): Promise<WorkReportRow[]> {
+  const managers = rows.filter((r) => r.assistant_id === 'manager').map((r) => r.task_id);
+  const scopes = managers.length > 0 ? await deps.store.reviewScopes(managers) : new Map<string, string | null>();
+  return rows
+    .filter((r) => r.assistant_id !== 'manager' || scopes.get(r.task_id) === 'internal')
+    .map((r) => ({
+      ...r,
+      summary: r.summary.split('; ').slice(0, 2).join('; '), // "<kind> task <outcome> in <n> s; <steps>", without the reason
+      suggestions: r.suggestions.map((s) => ({ ...s, text: s.text.replace(SCRIPT_ERROR, '$1(left out of this review)') })),
+    }));
+}
+
+/** The internal review's read tools: the manager's, without the reader of the outside reports, over forTheInternalReview. */
+function internalTools(deps: WorkerDeps): ReadTool[] {
+  const store = { ...deps.store, workReports: async (q: Parameters<WorkerDeps['store']['workReports']>[0]) => forTheInternalReview(deps, await deps.store.workReports(q)) };
+  return pick(createReadTools({ store, brain: deps.brain, data: deps.data, now: deps.now }, 'manager'), deps.profiles.reads('manager'))
+    .filter((tool) => tool.name !== 'list_session_reports');
 }
 
 /** Rule 2 (in the doors review's check): the plain reason a recommendation is about an assistant whose door filed none of the reports it carried. */
@@ -318,9 +347,10 @@ export async function managerReview(task: TaskRow, deps: WorkerDeps, runId: stri
     reviewed = [...new Set([...reports, ...outsideWork].map((r) => r.assistant_id))];
 
     // 1. The digest: one Code Mode script over the work reports (and the outside reports, when this review reads them).
-    //    The script is handed the reader of the outside reports only then: the internal review never sees their words.
+    //    The script is handed the reader of the outside reports only then: the internal review never sees their words,
+    //    nor the work reports of the reviews that did (internalTools).
     const digestStarted = deps.now();
-    const tools = toolsFor(deps, 'manager').filter((tool) => canReadOutside || tool.name !== 'list_session_reports');
+    const tools = scope === 'internal' ? internalTools(deps) : toolsFor(deps, 'manager').filter((tool) => canReadOutside || tool.name !== 'list_session_reports');
     const looked = await lookup(deps, 'manager', 'manager.digest', digestQuestion(hours, scope, canReadOutside), tools);
     await lookupReceipt(deps, { runId, task, step: 'manager.digest', asker: 'manager', started: digestStarted }, looked);
     if (!looked.ok) {
@@ -334,14 +364,18 @@ export async function managerReview(task: TaskRow, deps: WorkerDeps, runId: stri
     }
 
     // What the digest carried from the doors, from the reader tool's output: it decides, now and on every retry, whether
-    // anything in this review applies by itself.
-    const carried = carriedReports(looked.result);
+    // anything in this review applies by itself. Only the final attempt's tool calls are known, and an earlier attempt
+    // may have called the reader (its error went back to the script model), so whenever the reader was handed over and
+    // reports were waiting, every waiting report counts as carried too.
+    const fromTool = carriedReports(looked.result);
+    const carried = [...fromTool, ...outsideWork.filter((w) => !fromTool.some((c) => c.id === w.id)).map((w) => ({ id: w.id, assistant: w.assistant_id }))];
 
     // 2. The review, with every number traced back to the digest.
     const adopted = (await deps.store.adoptedLessons(undefined, 20)).map((l) => ({ assistant: l.assistant_id, text: l.change }));
     const standing = await standingOf(deps);
     const reviewStarted = deps.now();
-    const doors = scope === 'doors' ? [...new Set(carried.map((c) => c.assistant))] : undefined;
+    // Rule 2 in the doors review's check: the doors whose reports the script was really handed.
+    const doors = scope === 'doors' ? [...new Set(fromTool.map((c) => c.assistant))] : undefined;
     const written = await writeReview(deps, { since, digest, adopted, standing, ...(doors ? { doors } : {}) });
     const tokens = { inputTokens: written.inputTokens, outputTokens: written.outputTokens };
     if (!written.ok) {
@@ -495,19 +529,12 @@ export function holdsAcrossDoors(review: Pick<ReviewRow, 'carried_reports'>, rec
   return other ? `a report it carried was filed at the ${other.assistant} door, not the ${rec.assistant_id} one` : null;
 }
 
-/** A retire applies by itself only when the manager put the lesson or note there; the owner's waits for his code. */
-async function holdsRetire(deps: WorkerDeps, rec: RecommendationRow): Promise<string | null> {
-  if (rec.kind !== 'retire') return null;
-  // Null: the profile does not hold the words (or is not stored); the write then refuses it, or leaves it open, with the reason.
-  return (await retireAuthor(deps, rec)) === 'owner' ? 'the owner put it there, so taking it out is his decision' : null;
-}
-
 /**
  * Applies the open recommendations of a kind the manager applies itself (MANAGER_APPLIES, a table the program owns:
  * a lesson, a skill note, a retire), unless a rule holds them for the owner's code (holdsWholeReview, holdsAcrossDoors,
- * holdsRetire). Each is a new version of the assistant's profile, made by 'manager', with its reason. One that breaks
- * a rule is closed with the reason; one that cannot be written now stays open. Safe to run again: what is in force is
- * found, not redone.
+ * and, in the write itself, a retire of what the owner put there: applyRecommendation). Each is a new version of the
+ * assistant's profile, made by 'manager', with its reason. One that breaks a rule is closed with the reason; one that
+ * cannot be written now stays open. Safe to run again: what is in force is found, not redone.
  */
 async function applyForManager(deps: WorkerDeps, ctx: { runId: string; task: TaskRow; review: ReviewRow }): Promise<void> {
   const started = deps.now();
@@ -518,9 +545,10 @@ async function applyForManager(deps: WorkerDeps, ctx: { runId: string; task: Tas
   const results: [RecommendationRow, Applied][] = [];
   const held: string[] = [];
   for (const rec of open) {
-    const why = whole ?? holdsAcrossDoors(ctx.review, rec) ?? (await holdsRetire(deps, rec));
-    if (why) held.push(`${rec.rank} (${rec.assistant_id} ${KIND_LABEL[rec.kind]}: ${why})`);
-    else results.push([rec, await applyRecommendation(deps, rec, { by: 'manager' })]);
+    const why = whole ?? holdsAcrossDoors(ctx.review, rec);
+    const applied = why ? null : await applyRecommendation(deps, rec, { by: 'manager' });
+    if (applied && applied.status !== 'held') results.push([rec, applied]);
+    else held.push(`${rec.rank} (${rec.assistant_id} ${KIND_LABEL[rec.kind]}: ${why ?? applied?.reason})`);
   }
   // Lessons the manager applied (now or on an earlier run) are remembered here too; remembering twice changes nothing.
   for (const rec of await deps.store.recommendationsOf(reviewId)) {

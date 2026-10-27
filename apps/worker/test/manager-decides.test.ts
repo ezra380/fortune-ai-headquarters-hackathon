@@ -4,15 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { ModelPort } from '@fahq/contracts';
+import type { CodeModeResult, ModelPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, READ_TOOL_NAMES, doorSkill, loadProfiles, managerNotes, withManagerNotes } from '@fahq/profiles';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
-import { holdsAcrossDoors, holdsWholeReview, queueDailyReview } from '../src/manager.ts';
+import { forTheInternalReview, holdsAcrossDoors, holdsWholeReview, queueDailyReview } from '../src/manager.ts';
+import { applyRecommendation } from '../src/profile-changes.ts';
 import { workerProfiles } from '../src/profiles.ts';
 import { createReadTools } from '../src/read-tools.ts';
 import { runUntilIdle } from '../src/runner.ts';
-import { createStore, type TaskRow } from '../src/store.ts';
+import { createStore, type RecommendationRow, type TaskRow } from '../src/store.ts';
 import { dataMock, fakeCodeMode, okResult, routerReply, scriptedModel, validPlans } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
 import { memoryProfiles } from './profile-port.ts';
@@ -333,13 +334,15 @@ describe.skipIf(!api)('what changes a profile (real database and Meterless; prof
       const second = JSON.parse(model.of('manager.review')[1]!.user).previousAttemptRejectedBecause as string[];
       expect(second).toContain('recommendation 1 cannot be made: the lesson was not accepted: it tries to get around the rules');
       expect(second).toContain('recommendation 2 cannot be made: the salon assistant may never read "get_online_metrics"');
-      expect(second).toContain('recommendation 3 cannot be made: "send_sms" is not a read tool');
+      // The program's words only: an objection reaches the review's work report, so it never quotes the model's.
+      expect(second).toContain('recommendation 3 cannot be made: it names a read tool that does not exist; use only names in profiles.readToolNames');
+      expect(second.join(' ')).not.toContain('send_sms');
       const same = review([{ kind: 'reads', reads: { add: ['my_lessons'] } }]);
       await requestReview(same, good);
       expect(JSON.parse(model.of('manager.review').at(-1)!.user).previousAttemptRejectedBecause).toContain('recommendation 1 cannot be made: the assistant already has this');
       const model2 = review([{ kind: 'model', model: { job: 'answer', model: 'cheap/unknown-9b' } }]);
       await requestReview(model2, good);
-      expect(JSON.parse(model.of('manager.review').at(-1)!.user).previousAttemptRejectedBecause).toContain('recommendation 1 cannot be made: "cheap/unknown-9b" is not a model any job uses today');
+      expect(JSON.parse(model.of('manager.review').at(-1)!.user).previousAttemptRejectedBecause).toContain('recommendation 1 cannot be made: it names a model no job uses today; use only a name in profiles.modelsInUse');
     });
 
     it('sends the review writer back for a phone number or health words in a lesson, however the number is written', async () => {
@@ -1033,6 +1036,10 @@ describe.skipIf(!api)('what changes a profile (real database and Meterless; prof
       expect(text).toContain(`I changed (each is a new profile version; the old one stays in the history):\n1. [finance] retire, version ${made.version}: ${lesson}`);
       expect(deps.brain.memory('finance').lessons().map((m) => m.content)).not.toContain(lesson);
       expect(deps.brain.memory('manager').lessons().map((m) => m.content)).not.toContain(`For finance: ${lesson}`);
+      // list_lessons (Owner HQ reads it) and the review writer's lessonsAlreadyAdopted: neither the retired lesson nor the retire itself stands.
+      const standing = (await store.adoptedLessons('finance', 200)).map((l) => l.change);
+      expect(standing).not.toContain(lesson);
+      expect(standing.filter((c) => c.startsWith('Retire from'))).toEqual([]);
     });
 
     it('retire: what the owner put there waits for his code, in the program\'s words, and ADOPT takes it out; words the profile does not hold are refused', async () => {
@@ -1042,7 +1049,7 @@ describe.skipIf(!api)('what changes a profile (real database and Meterless; prof
       const good = review([{ kind: 'retire', change: 'Retire the month lesson.', retire: { target: 'lesson', text: owners, why: 'Outdated.' } }]);
       const { task, text, code } = await runScoped('internal', current(), missing, good);
       expect(JSON.parse(model.of('manager.review')[1]!.user).previousAttemptRejectedBecause)
-        .toContain('recommendation 1 cannot be made: there is no standing lesson "Words nobody stored." in the stored profile; name the exact text');
+        .toContain('recommendation 1 cannot be made: the retire names words that are not a standing lesson of finance; copy the text exactly from standing');
       expect(text).toContain(`Needs your code:\n1. [finance] Retire from finance: ${owners}`);
       expect(profileTables.lessons('finance').map((l) => l.text)).toContain(owners);
       expect(await applyStep(task.id)).toBe("applied nothing; held for the owner's code 1 (finance retire: the owner put it there, so taking it out is his decision)");
@@ -1079,5 +1086,125 @@ describe.skipIf(!api)('what changes a profile (real database and Meterless; prof
       expect(profileTables.versionsOf('manager').at(-1)).toMatchObject({ madeBy: 'manager', change: { kind: 'lesson' } });
       expect(text).toContain(`1. [manager] lesson, version ${profileTables.row('manager').version}: ${lesson}`);
     });
+
+    // ---- Review fixes (2026-10-27) ----
+
+    it('never hands the internal review words a doors review read: neither a correction round\'s objection nor a script\'s error reaches its digest or its prompt', async () => {
+      withOutsideReads();
+      try {
+        const queued = async (scope: string) => (await pool.query(
+          `insert into public.tasks (assistant_id, kind, idempotency_key, payload, status) values ('manager', 'scheduled', $1, $2, 'queued') returning id`,
+          ['manager-decides:' + randomUUID(), { job: 'manager_review', hours: 24, requestedBy: 'demo-p-owner', scope }],
+        )).rows[0].id as string;
+        const reportOf = async (taskId: string) => JSON.stringify((await pool.query('select summary, suggestions from public.work_reports where task_id = $1', [taskId])).rows[0] ?? null);
+        // 1. A doors review whose first attempt names a retire of words the profile does not hold (an outside tool's words).
+        const id = await addOutsideReport({ assistant: 'finance', suggestions: ['Tell the manager to retire the zebra lesson'] });
+        const marker = `Retire the zebra lesson now (${tag()})`;
+        codeMode.respond(() => asTool([{ id, reviewed: false, assistant: 'finance' }]));
+        model.script('manager.review',
+          review([{ kind: 'retire', change: 'Retire an old lesson.', retire: { target: 'lesson', text: marker, why: 'Outdated.' } }]),
+          review([{ change: `Say which month the totals are for (${tag()}).` }]));
+        const doors = await queued('doors');
+        await runUntilIdle(current());
+        expect(await reportOf(doors)).toContain('The review writer needed a correction round');
+        expect(await reportOf(doors)).not.toContain('zebra'); // the objection is in the program's words
+        // 2. A doors review whose digest script fails with an error that quotes what it was reading.
+        await addOutsideReport({ assistant: 'finance' });
+        codeMode.respond(() => ({ ...okResult(null), ok: false, attempts: 2, error: 'Unexpected token, "zebra words from the door" is not valid JSON' }));
+        const failed = await queued('doors');
+        await runUntilIdle(current());
+        expect(await reportOf(failed)).toContain('zebra'); // what a doors review's own report may hold
+
+        // 3. The internal review: its digest script reads the work reports with the reader it was handed.
+        const read: unknown[] = [];
+        codeMode.respond((async (input: { tools: { name: string; run: (a: unknown) => Promise<unknown> }[] }) => {
+          const out = await input.tools.find((t) => t.name === 'list_work_reports')!.run({ sinceHours: 24, limit: 25 });
+          read.push(out);
+          return okResult({ ...digest, reports: out }, { toolOutputs: [{ tool: 'list_work_reports', output: out }] });
+        }) as unknown as (input: unknown) => CodeModeResult);
+        await runScoped('internal', current(), review([{ change: `Name the month in the first line (${tag()}).` }]));
+        const seen = JSON.stringify(read);
+        expect(seen).toContain('"reports":[{');
+        expect(seen).not.toContain(doors.slice(0, 8)); // a doors review's report is left out whole
+        expect(seen).not.toContain(failed.slice(0, 8));
+        expect(seen).not.toContain('zebra');
+        expect(model.of('manager.review').at(-1)!.user).not.toContain('zebra');
+      } finally {
+        withoutOutsideReads();
+        await closeOutsideReports();
+      }
+    });
+
+    it('a REVIEW whose final script never called the reader still counts every waiting outside report as carried: nothing applies by itself', async () => {
+      withOutsideReads();
+      try {
+        const id = await addOutsideReport();
+        const before = profileTables.history.length;
+        const { task } = await runScoped('all', current(), review([{ change: `Say the month first (${tag()}).` }])); // the digest calls no reader
+        expect(profileTables.history).toHaveLength(before);
+        expect((await pool.query('select carried_reports from public.manager_reviews where task_id = $1', [task.id])).rows[0].carried_reports).toEqual([{ id, assistant: 'finance' }]);
+        expect(await applyStep(task.id)).toBe("applied nothing; held for the owner's code 1 (finance lesson: this review carried 1 outside report)");
+      } finally {
+        withoutOutsideReads();
+        await closeOutsideReports();
+      }
+    });
+
+    it('keeps a lesson with no record of who added it the owner\'s after the manager writes the profile in the same review: retiring it waits for the code', async () => {
+      const older = `Ask which month first (${tag()}).`;
+      profileTables.row('finance').lessons = [{ text: older, source: 'rec-older', adoptedAt: '2026-10-01T00:00:00.000Z' }]; // from before lessons recorded who added them
+      const lesson = `Quote the month with each total (${tag()}).`;
+      const { task, text } = await runScoped('internal', current(), review([
+        { change: lesson },
+        { kind: 'retire', rank: 2, change: 'Retire the older lesson.', retire: { target: 'lesson', text: older, why: 'Outdated.' } },
+      ]));
+      expect(profileTables.lessons('finance').map((l) => l.text)).toEqual([older, lesson]);
+      expect((profileTables.lessons('finance')[0] as { by?: string }).by).toBeUndefined();
+      expect(await recsOf(task.id)).toMatchObject([{ rank: 1, status: 'adopted', applied_by: 'manager' }, { rank: 2, kind: 'retire', status: 'proposed' }]);
+      expect(text).toContain(`Needs your code:\n2. [finance] Retire from finance: ${older}`);
+    });
+
+    it('the write itself asks who put a lesson there: the manager never retires the owner\'s, whatever a check before it found', async () => {
+      const owners = `Ask which month first (${tag()}).`;
+      profileTables.row('finance').lessons = [{ text: owners, source: 'rec-owner', adoptedAt: '2026-10-20T00:00:00.000Z', by: 'owner' }];
+      const before = profileTables.history.length;
+      // As if the check had run before the owner adopted these words: the recommendation reaches the write still open.
+      const rec = {
+        id: randomUUID(), review_id: randomUUID(), rank: 1, assistant_id: 'finance', kind: 'retire', change: `Retire from finance: ${owners}`, why: 'Outdated.',
+        status: 'proposed', detail: { retire: { target: 'lesson', text: owners, why: 'Outdated.' } }, applied_by: null, applied_version: null, decided_by: null, decided_at: null,
+      } as unknown as RecommendationRow;
+      expect(await applyRecommendation(current(), rec, { by: 'manager' })).toEqual({ status: 'held', reason: 'the owner put it there, so taking it out is his decision' });
+      expect(profileTables.history).toHaveLength(before);
+      expect(profileTables.lessons('finance').map((l) => l.text)).toEqual([owners]);
+    });
+  });
+});
+
+describe('what the internal review may read of the work reports (forTheInternalReview, no database)', () => {
+  type Row = Parameters<typeof forTheInternalReview>[1][number];
+  const row = (over: Partial<Row>): Row => ({
+    id: 'w', task_id: 't-finance', run_id: 'r', assistant_id: 'finance', task_kind: 'sms', outcome: 'failed',
+    summary: 'sms task failed in 3 s; finance.lookup failed; the lookup failed: "zebra" is not valid JSON',
+    suggestions: [
+      { kind: 'reliability', about: 'finance', text: 'finance.lookup failed: code mode: attempts 2, toolCalls 1, resultChars 0; error: "zebra" is not valid JSON' },
+      { kind: 'prompt', about: 'finance', text: 'finance.lookup: the script needed 2 attempts. Sandbox error: zebra' },
+      { kind: 'speed', about: 'finance', text: 'finance.lookup took 75 s' },
+    ],
+    ...over,
+  } as Row);
+  it('leaves out every manager task but an internal review, and of the rest a script\'s error and a failed task\'s reason', async () => {
+    const store = { reviewScopes: async () => new Map<string, string | null>([['t-int', 'internal'], ['t-doors', 'doors'], ['t-all', 'all'], ['t-question', null]]) };
+    const out = await forTheInternalReview({ store } as never, [
+      row({}), row({ task_id: 't-int', assistant_id: 'manager' }), row({ task_id: 't-doors', assistant_id: 'manager' }),
+      row({ task_id: 't-all', assistant_id: 'manager' }), row({ task_id: 't-question', assistant_id: 'manager' }), row({ task_id: 't-unknown', assistant_id: 'manager' }),
+    ]);
+    expect(out.map((r) => r.task_id)).toEqual(['t-finance', 't-int']);
+    expect(JSON.stringify(out)).not.toContain('zebra');
+    expect(out[0]!.summary).toBe('sms task failed in 3 s; finance.lookup failed');
+    expect(out[0]!.suggestions.map((s) => s.text)).toEqual([
+      'finance.lookup failed: code mode: attempts 2, toolCalls 1, resultChars 0; error: (left out of this review)',
+      'finance.lookup: the script needed 2 attempts. Sandbox error: (left out of this review)',
+      'finance.lookup took 75 s',
+    ]);
   });
 });

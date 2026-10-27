@@ -22,6 +22,8 @@ export type Applied =
   | { status: 'in_force'; version: number | null; changed: boolean; dropped: string[]; earlier: boolean }
   /** The program would not apply it, for this plain reason; the recommendation is closed. */
   | { status: 'refused'; reason: string }
+  /** The manager may not apply it by itself (a retire of what the owner put there); it stays open for his code. */
+  | { status: 'held'; reason: string }
   /** It could not be applied now (no stored profile to change); the recommendation stays open. */
   | { status: 'unavailable'; reason: string };
 
@@ -113,27 +115,28 @@ export async function standingOf(deps: Pick<WorkerDeps, 'store'>): Promise<Stand
 }
 
 /**
- * Who put the lesson or note a retire names into the stored profile, or null when the profile does not hold it (or is
- * not stored). Read fresh from the database each time: a retire applies by itself only when the answer is 'manager'.
+ * Who put the lesson or note a retire names into this stored row (as the database holds it), or null when the row does
+ * not hold it. A retire applies by itself only when the answer is 'manager'; the write asks this of the very row its
+ * version guard is based on, so an owner who adopts the same words in between is never overruled.
  */
-export async function retireAuthor(deps: Pick<WorkerDeps, 'store'>, rec: Pick<RecommendationRow, 'assistant_id' | 'detail'>): Promise<Author | null> {
-  const detail = RecommendationDetail.safeParse(rec.detail);
-  const retire = detail.success ? detail.data.retire : undefined;
-  if (!retire) return null;
-  const raw = await deps.store.profileRow(rec.assistant_id);
-  if (raw === null) return null;
+async function retireAuthorIn(deps: Pick<WorkerDeps, 'store'>, raw: unknown, assistant: AssistantId, retire: { target: 'lesson' | 'note'; text: string }): Promise<Author | null> {
   const text = retire.text.trim();
-  if (retire.target === 'lesson') return lessonAddedBy((raw as { lessons?: unknown }).lessons, text);
+  if (retire.target === 'lesson') return lessonAddedBy((raw as { lessons?: unknown } | null)?.lessons, text);
   const row = ProfileRow.safeParse(raw);
   if (!row.success || !managerNotes(row.data.skill).includes(text)) return null;
-  return noteAddedBy(await deps.store.skillNotesInForce(rec.assistant_id), rec.assistant_id, text);
+  return noteAddedBy(await deps.store.skillNotesInForce(assistant), assistant, text);
 }
+
+/** Why a retire the manager would apply waits for the owner's code. */
+export const OWNERS_TO_RETIRE = 'the owner put it there, so taking it out is his decision';
 
 /**
  * A plain reason a recommendation, as the review model wrote it, would not apply to what the assistant runs on now
  * (a note that breaks a rule, a tool the assistant may never read, a model no job uses, a retire of words the profile
  * does not hold), or that it changes nothing. Null when it would apply. Used by the review's own check, so the model
  * gets one correction round. A retire is checked against `standing` (the stored profiles); the write checks it again.
+ * Every reason is in the program's words and never quotes the model's: an objection lands on the review's receipt and
+ * from there in its work report, which the internal review reads, and a doors review's model has read outside words.
  */
 export function objectionToChange(deps: Pick<WorkerDeps, 'profiles'>, rec: TypedRecommendation, now: Date, standing?: Standing): string | null {
   const change = changeFor({ kind: rec.kind, change: rec.change, detail: { ...(rec.reads ? { reads: rec.reads } : {}), ...(rec.model ? { model: rec.model } : {}), ...(rec.retire ? { retire: rec.retire } : {}) } });
@@ -144,7 +147,13 @@ export function objectionToChange(deps: Pick<WorkerDeps, 'profiles'>, rec: Typed
     const list = change.target === 'lesson' ? held.lessons : held.notes;
     return list.some((item) => item.text.trim() === change.text.trim())
       ? null
-      : `there is no ${change.target === 'lesson' ? 'standing lesson' : 'note'} "${clip(change.text, 120)}" in the stored profile; name the exact text`;
+      : `the retire names words that are not a ${change.target === 'lesson' ? 'standing lesson' : 'note'} of ${rec.assistant}; copy the text exactly from standing`;
+  }
+  if (change.kind === 'reads' && [...change.add, ...change.remove].some((name) => !(READ_TOOL_NAMES as readonly string[]).includes(name))) {
+    return 'it names a read tool that does not exist; use only names in profiles.readToolNames';
+  }
+  if (change.kind === 'model' && !modelsInUse(deps).includes(change.model)) {
+    return 'it names a model no job uses today; use only a name in profiles.modelsInUse';
   }
   const result = applyProfileChange(currentContent(deps, rec.assistant), change, {
     readNames: READ_TOOL_NAMES, knownModels: modelsInUse(deps), source: 'review-check', by: 'owner', now,
@@ -187,6 +196,11 @@ export async function applyRecommendation(deps: WorkerDeps, rec: RecommendationR
     if (made !== null) {
       await deps.store.putInForce(rec.id, { by: actor.by, personId: person, version: made, now: deps.now() });
       return { status: 'in_force', version: made, changed: true, dropped: [], earlier: true };
+    }
+
+    // The manager retires only what it put there, judged on this very row (the one the write below is guarded by).
+    if (actor.by === 'manager' && change.kind === 'retire' && (await retireAuthorIn(deps, raw, rec.assistant_id, change)) === 'owner') {
+      return { status: 'held', reason: OWNERS_TO_RETIRE };
     }
 
     const now = deps.now();
