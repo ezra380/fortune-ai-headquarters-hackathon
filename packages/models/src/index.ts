@@ -1,6 +1,9 @@
+import fs from 'node:fs';
 import type { ModelPort } from '@fahq/contracts';
 
-// One OpenAI-compatible chat client for NVIDIA's hosted Nemotron models (and xAI, optionally).
+// One OpenAI-compatible chat client for NVIDIA's hosted Nemotron models (and xAI, optionally). With
+// MODEL_PROVIDER=meterless the same client talks to the Meterless Runtime that Nightshift serves (its
+// "hotspot"), and Nightshift calls NVIDIA with the key set up inside it.
 // Rules: a token budget is checked before every call; no redirects; a timeout on every call;
 // provider error bodies are never echoed; output cut off mid-answer is rejected; no fallback model.
 
@@ -17,9 +20,11 @@ export class ModelError extends Error {
 export type TokenBudget = { dailyTokens: number; used: number; day: string };
 
 export type ModelClientOptions = {
-  provider: 'nvidia' | 'xai';
+  provider: 'nvidia' | 'xai' | 'meterless';
   baseUrl: string;
   apiKey: string;
+  /** Sent on every call (the Meterless Runtime wants an app id and a scope). */
+  headers?: Readonly<Record<string, string>>;
   fetch?: typeof fetch;
   timeoutMs?: number;
   /** Shared across calls in this process; refuses a call that could exceed the day's tokens. */
@@ -55,7 +60,7 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
           method: 'POST',
           redirect: 'error',
           signal: AbortSignal.timeout(opts.timeoutMs ?? 120_000),
-          headers: { Authorization: `Bearer ${opts.apiKey}`, 'Content-Type': 'application/json' },
+          headers: { ...opts.headers, Authorization: `Bearer ${opts.apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: input.model,
             stream: false,
@@ -69,7 +74,8 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
                 ],
             // NVIDIA-hosted Nemotron honors this switch; measured: routing 0.6 s / 41 tokens with
             // thinking off vs 14 s / 1,436 tokens with it on.
-            ...(input.thinking === false && opts.provider === 'nvidia'
+            // Through Nightshift the switch rides along when the model is an NVIDIA one.
+            ...(input.thinking === false && (opts.provider === 'nvidia' || (opts.provider === 'meterless' && input.model.startsWith('nvidia/')))
               ? { chat_template_kwargs: { enable_thinking: false } }
               : {}),
           }),
@@ -149,17 +155,73 @@ export function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: numb
   return n;
 }
 
+/** The Meterless Runtime contract (0.90.0): any pasted URL becomes <host>/v1, never /v1/v1. */
+export function normalizeMeterlessUrl(raw: string): string {
+  const withScheme = /^[a-z]+:\/\//i.test(raw.trim()) ? raw.trim() : `http://${raw.trim()}`;
+  const url = new URL(withScheme);
+  return `${url.protocol}//${url.host}/v1`;
+}
+
+/** Nightshift's token: METERLESS_TOKEN, or the runtime's proxy-token file. The placeholder rt-local is refused. */
+export function meterlessToken(env: NodeJS.ProcessEnv): string {
+  const fromFile = env.METERLESS_TOKEN_FILE ? fs.readFileSync(env.METERLESS_TOKEN_FILE, 'utf8') : '';
+  const token = (env.METERLESS_TOKEN ?? fromFile).trim();
+  if (token === 'rt-local') throw new Error('METERLESS_TOKEN is the placeholder rt-local; use the token Nightshift wrote to proxy-token');
+  return token;
+}
+
+/**
+ * Whether the Meterless Runtime answers, by its contract: GET /v1/models decides (401/403 means the
+ * token is wrong, 200 with meterless ids or models means online, anything else offline).
+ */
+export async function checkMeterless(baseUrl: string, token: string, doFetch: typeof fetch = fetch): Promise<
+  { status: 'online'; models: string[] } | { status: 'unauthorized' | 'offline'; models: [] }
+> {
+  try {
+    const r = await doFetch(`${normalizeMeterlessUrl(baseUrl)}/models`, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
+      headers: { Authorization: `Bearer ${token}`, 'meterless-app': METERLESS_APP },
+    });
+    if (r.status === 401 || r.status === 403) return { status: 'unauthorized', models: [] };
+    if (r.status !== 200) return { status: 'offline', models: [] };
+    const body = (await r.json()) as { data?: { id?: unknown }[] };
+    const models = (body.data ?? []).map((m) => m.id).filter((id): id is string => typeof id === 'string');
+    return models.length > 0 ? { status: 'online', models } : { status: 'offline', models: [] };
+  } catch {
+    return { status: 'offline', models: [] };
+  }
+}
+
+/** This app's stable id on the Meterless Runtime: its requests are recorded apart from other apps'. */
+export const METERLESS_APP = 'fortune-ai-hq';
+
 export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fetch } = {}) {
   const budget: TokenBudget = { dailyTokens: positiveInt(env, 'MODEL_DAILY_TOKENS', 2_000_000), used: 0, day: '' };
-  const nvidia = createModelClient({
-    provider: 'nvidia',
-    baseUrl: 'https://integrate.api.nvidia.com/v1',
-    apiKey: env.NEMOTRON_API_KEY ?? '',
-    budget,
-    // Ultra writing three plans with reasoning can take minutes; routing calls finish in about a second.
-    timeoutMs: positiveInt(env, 'MODEL_TIMEOUT_MS', 300_000),
-    ...(deps.fetch ? { fetch: deps.fetch } : {}),
-  });
+  // Ultra writing three plans with reasoning can take minutes; routing calls finish in about a second.
+  const timeoutMs = positiveInt(env, 'MODEL_TIMEOUT_MS', 300_000);
+  const provider = env.MODEL_PROVIDER ?? 'nvidia';
+  if (provider !== 'nvidia' && provider !== 'meterless') throw new Error('MODEL_PROVIDER must be nvidia or meterless');
+  // Every assistant's calls go through one client. Through Nightshift, the runtime holds the NVIDIA key,
+  // and a cold model load can take minutes, so the timeout is never under the contract's 180 s.
+  const nvidia = provider === 'meterless'
+    ? createModelClient({
+        provider: 'meterless',
+        baseUrl: normalizeMeterlessUrl(env.METERLESS_BASE_URL ?? '127.0.0.1:8088'),
+        apiKey: meterlessToken(env),
+        headers: { 'meterless-app': METERLESS_APP, 'meterless-scope': 'user' },
+        budget,
+        timeoutMs: Math.max(timeoutMs, 180_000),
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      })
+    : createModelClient({
+        provider: 'nvidia',
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+        apiKey: env.NEMOTRON_API_KEY ?? '',
+        budget,
+        timeoutMs,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      });
   const xai = env.XAI_API_KEY
     ? createModelClient({
         provider: 'xai',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createModelClient, ModelError, modelsFromEnv, parseJsonObject, positiveInt, type TokenBudget } from '../src/index.ts';
+import { checkMeterless, createModelClient, ModelError, modelsFromEnv, normalizeMeterlessUrl, parseJsonObject, positiveInt, type TokenBudget } from '../src/index.ts';
 
 const ask = { purpose: 'test', model: 'nvidia/x', system: 'sys', user: 'hi', maxTokens: 100, temperature: 0, json: true };
 
@@ -75,5 +75,42 @@ describe('daily token budget (review finding 5)', () => {
     const noUsage = (async () => new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: '{}' } }] }), { status: 200 })) as unknown as typeof fetch;
     await client(noUsage, silent).chat(ask);
     expect(silent.used).toBeGreaterThan(100); // the worst case stays counted, not zero
+  });
+});
+
+describe('Nightshift (the Meterless Runtime) as the provider', () => {
+  it('normalizes any pasted runtime address to <host>/v1, never /v1/v1', () => {
+    for (const raw of ['127.0.0.1:8088', 'http://127.0.0.1:8088', 'http://127.0.0.1:8088/v1', 'http://127.0.0.1:8088/v1/chat/completions', 'http://127.0.0.1:8088/healthz', '127.0.0.1:8088/v1/models']) {
+      expect(normalizeMeterlessUrl(raw)).toBe('http://127.0.0.1:8088/v1');
+    }
+  });
+
+  it('sends the bearer token, the app id and the scope, and passes the thinking switch only for NVIDIA models', async () => {
+    const seen: RequestInit[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => { seen.push(init); return okResponse('ok'); }) as unknown as typeof fetch;
+    const { nvidia } = modelsFromEnv({ MODEL_PROVIDER: 'meterless', METERLESS_BASE_URL: '172.23.224.1:8088', METERLESS_TOKEN: 'tok-test' }, { fetch: fetchImpl });
+    expect(nvidia.provider).toBe('meterless');
+    await nvidia.chat({ ...ask, model: 'nvidia/nemotron-3.5-lightning-30b-a3b', thinking: false });
+    await nvidia.chat({ ...ask, model: 'meterless/fast', thinking: false });
+    const headers = seen[0]!.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer tok-test');
+    expect(headers['meterless-app']).toBe('fortune-ai-hq');
+    expect(headers['meterless-scope']).toBe('user');
+    expect(JSON.parse(String(seen[0]!.body)).chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(JSON.parse(String(seen[1]!.body)).chat_template_kwargs).toBeUndefined();
+  });
+
+  it('refuses the rt-local placeholder token and an unknown provider', () => {
+    expect(() => modelsFromEnv({ MODEL_PROVIDER: 'meterless', METERLESS_TOKEN: 'rt-local' })).toThrow(/rt-local/);
+    expect(() => modelsFromEnv({ MODEL_PROVIDER: 'openai' })).toThrow(/MODEL_PROVIDER/);
+  });
+
+  it('reads the runtime status the way the contract says: /v1/models decides', async () => {
+    const answer = (status: number, body: unknown = {}) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+    expect(await checkMeterless('127.0.0.1:8088', 't', answer(200, { data: [{ id: 'meterless/auto' }, { id: 'nvidia/nemotron-3-ultra-550b-a55b' }] })))
+      .toEqual({ status: 'online', models: ['meterless/auto', 'nvidia/nemotron-3-ultra-550b-a55b'] });
+    expect((await checkMeterless('127.0.0.1:8088', 'bad', answer(401))).status).toBe('unauthorized');
+    expect((await checkMeterless('127.0.0.1:8088', 't', answer(500))).status).toBe('offline');
+    expect((await checkMeterless('127.0.0.1:8088', 't', (async () => { throw new Error('refused'); }) as unknown as typeof fetch)).status).toBe('offline');
   });
 });
