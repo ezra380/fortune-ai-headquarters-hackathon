@@ -177,7 +177,9 @@ export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fet
     routerModel: env.NEMOTRON_ROUTER_MODEL ?? 'nvidia/nemotron-3.5-lightning-30b-a3b',
     reviewModel: env.XAI_MODEL ?? '',
     // The safety screen (guard.ts): a small NVIDIA safety model; GUARD=off turns the screen off.
-    guardModel: env.GUARD_MODEL ?? 'nvidia/llama-3.1-nemotron-safety-guard-8b-v3',
+    // Nemotron 3.5 Content Safety answered in 0.3–4.9 s on 2026-10-26; the Llama-based safety guard
+    // stopped answering that evening (it can be chosen with GUARD_MODEL).
+    guardModel: env.GUARD_MODEL ?? 'nvidia/nemotron-3.5-content-safety',
     guard: env.GUARD !== 'off',
   };
 }

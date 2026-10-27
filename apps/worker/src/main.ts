@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import type { DataPort, DeliveryPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
+import { createCodeModeRunner } from '@fahq/codemode';
 import { modelsFromEnv } from '@fahq/models';
+import { loadProfiles } from '@fahq/profiles';
 import type { WorkerDeps } from './flows.ts';
 import { runOnce, runUntilIdle } from './runner.ts';
 import { createStore } from './store.ts';
@@ -33,6 +35,7 @@ if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const models = modelsFromEnv(env);
+const profiles = loadProfiles(env);
 const deps: WorkerDeps = {
   store: createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY),
   brain: await openBrain({
@@ -43,14 +46,16 @@ const deps: WorkerDeps = {
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
   data: await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)'),
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
-  // TEMP: Code Mode and the assistants' profiles are wired here after the profiles lane merges
-  // (packages/profiles). Until then the steps that need Code Mode (questions, the manager's review)
-  // fail with a plain sentence, and no assistant has a read tool.
-  codeMode: null,
+  // Each assistant's read-only profile: its skill text, the model for each job, its read tools.
+  codeMode: createCodeModeRunner({ model: models.nvidia }),
   profiles: {
-    skill: () => '',
-    model: () => models.planModel,
-    reads: () => [],
+    skill: (id) => profiles[id].skill,
+    model: (id, job) => {
+      const setting = profiles[id].models[job];
+      if (!setting) throw new Error(`The ${profiles[id].title} assistant has no model for "${job}".`);
+      return setting.model;
+    },
+    reads: (id) => profiles[id].reads,
   },
   now: () => new Date(),
   worker: `worker@${os.hostname()}:${process.pid}`,

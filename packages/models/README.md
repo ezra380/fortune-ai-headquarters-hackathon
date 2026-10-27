@@ -19,7 +19,7 @@ whitespace is not sent, and a text of only whitespace is safe without a call.
 It **fails closed**: an HTTP error, a timeout (default 8 s per call), a refused budget, an unreadable reply, or a "safe" reply that
 also names harm categories all come back as `safe: false` with the reason "the safety check could not run". It never throws.
 
-Settings: `GUARD_MODEL` (default `nvidia/llama-3.1-nemotron-safety-guard-8b-v3`), `GUARD=off` turns the screen off.
+Settings: `GUARD_MODEL` (default `nvidia/nemotron-3.5-content-safety`), `GUARD=off` turns the screen off.
 It is not wired into the worker yet.
 
 Live check on this key, 2026-10-26 evening: `nvidia/nemotron-3.5-content-safety` answered `User Safety: safe` / `unsafe` in

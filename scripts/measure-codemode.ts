@@ -11,6 +11,7 @@
 // Tokens are the provider's own counts. Whether a reply's numbers are real is checked against an oracle:
 // the same read tools called directly by this script, with no model in between.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ModelPort, ReadTool } from '@fahq/contracts';
@@ -280,15 +281,19 @@ async function main(): Promise<void> {
   const { openBrain } = await import('@fahq/brain');
   const { createStore } = await import('../apps/worker/src/store.ts');
   const { createZetarisDataPort } = await import('@fahq/data');
-  // Assumed at the merge: createReadTools takes the worker's dependencies (as built in apps/worker/src/main.ts).
-  const deps = {
+  // The brain is read from a private copy: even a recall appends to H-MEM's ledger, and the live worker
+  // is the brain's only writer. The copy is deleted when the run ends.
+  const liveBrain = path.join(root, '.local/brain');
+  const snapshot = fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-measure-brain-'));
+  if (fs.existsSync(liveBrain)) fs.cpSync(liveBrain, snapshot, { recursive: true });
+  process.on('exit', () => fs.rmSync(snapshot, { recursive: true, force: true }));
+  const ctx = {
     store: createStore(env.SUPABASE_URL!, env.SUPABASE_SERVICE_ROLE_KEY!),
-    brain: await openBrain({ meterlessDir: path.resolve(root, env.METERLESS_DIR ?? '.local/meterless'), dataDir: path.join(root, '.local/brain'), actor: 'measure-codemode' }),
+    brain: await openBrain({ meterlessDir: path.resolve(root, env.METERLESS_DIR ?? '.local/meterless'), dataDir: snapshot, actor: 'measure-codemode' }),
     data: createZetarisDataPort(env),
     now: () => new Date(),
-    period: PERIOD,
   };
-  const built = (createReadTools as (d: typeof deps) => Record<string, ReadTool> | ReadTool[])(deps);
+  const built = (createReadTools as (c: typeof ctx, caller: 'owner') => Record<string, ReadTool>)(ctx, 'owner');
   const all = Array.isArray(built) ? Object.fromEntries(built.map((t) => [t.name, t])) : built;
 
   const owner = loadProfiles(env).owner;

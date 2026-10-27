@@ -263,15 +263,15 @@ describe('model client: the system message stays unless asked to leave', () => {
 });
 
 describe('modelsFromEnv: the guard settings', () => {
-  it('defaults to the NVIDIA safety guard, on', () => {
+  it('defaults to Nemotron 3.5 Content Safety, on', () => {
     const m = modelsFromEnv({});
-    expect(m.guardModel).toBe(GUARD);
+    expect(m.guardModel).toBe('nvidia/nemotron-3.5-content-safety');
     expect(m.guard).toBe(true);
   });
 
   it('takes another guard model, and GUARD=off turns the screen off', () => {
-    const m = modelsFromEnv({ GUARD_MODEL: 'nvidia/nemotron-3.5-content-safety', GUARD: 'off' });
-    expect(m.guardModel).toBe('nvidia/nemotron-3.5-content-safety');
+    const m = modelsFromEnv({ GUARD_MODEL: GUARD, GUARD: 'off' });
+    expect(m.guardModel).toBe(GUARD);
     expect(m.guard).toBe(false);
     expect(modelsFromEnv({ GUARD: 'on' }).guard).toBe(true);
   });

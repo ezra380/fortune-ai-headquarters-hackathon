@@ -53,7 +53,7 @@ function scriptedModel() {
 
 const okResult = (result: unknown, over: Partial<CodeModeResult> = {}): CodeModeResult => ({
   ok: true, result, error: null, script: 'return 1;', attempts: 1, toolCalls: 3, resultChars: JSON.stringify(result).length,
-  inputTokens: 700, outputTokens: 150, model: 'MOCK/code', ...over,
+  inputTokens: 700, outputTokens: 150, model: 'MOCK/code', toolOutputs: [{ tool: 'usage_summary', output: result }], ...over,
 });
 
 function fakeCodeMode() {
