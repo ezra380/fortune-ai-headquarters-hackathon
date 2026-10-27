@@ -74,7 +74,7 @@ Details: [../delivery.md](../delivery.md), "The console".
   first, one), with named columns; the approval code and the decisions against the weekly report's own note only. A failed read is named by part and code
   and shown as unread, never empty. `reports-loader.test.ts` (20 tests, recording fake), **`reports-db.test.ts` (4 tests, the real local database through the
   real query builder, under the lock)**.
-- **Full suite under the lock, 12:06 ET (after the last source change): 65 files passed, 9 skipped (they need Meterless), 1,214 tests passed, 173 skipped; typecheck clean.**
+- **Full suite under the lock, 12:09 ET (after the last change): 65 files passed, 9 skipped (they need Meterless), 1,214 tests passed, 173 skipped; typecheck clean.**
 - **Mutation checks** (22 guards broken one at a time in the real source, each seen to fail a test, then restored (`git status` was clean after)): see delivery.md. One survived at
   first (a code counted for a report that was never sent); a test was added and it is caught.
 - **Looked at in a real browser** (the built-in pane, synthetic data): the Finance tab at desktop width and at 375 px (no horizontal overflow), the head's page
