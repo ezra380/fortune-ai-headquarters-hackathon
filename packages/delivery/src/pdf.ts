@@ -134,7 +134,8 @@ export async function renderProposalPdf(doc: ProposalDocument): Promise<Uint8Arr
       w.line('Projections (arithmetic on the evidence)', { bold: true });
       for (const p of plan.projections) {
         const base = byId.get(p.baseMetricId);
-        w.line(`-  ${p.label}: ${base ? formatMetric(base) : p.baseMetricId} x ${p.factor} = ${base?.unit === 'usd' ? money(p.result) : p.result.toLocaleString('en-US')}`);
+        // The result is written in the base's own unit, like the base beside it (a rate stays a rate).
+        w.line(`-  ${p.label}: ${base ? formatMetric(base) : p.baseMetricId} x ${p.factor} = ${base ? formatMetric({ value: p.result, unit: base.unit }) : p.result.toLocaleString('en-US')}`);
         w.line(`   assumption: ${p.assumption}`, { size: 9, color: MUTED });
       }
       w.y -= 6;

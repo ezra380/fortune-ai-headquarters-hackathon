@@ -1,6 +1,6 @@
 import { MANAGERS, WeeklyReport, WORKER_IDS, WorkerReport, workerDivision } from '@fahq/contracts';
 import type { Metric, WorkerId } from '@fahq/contracts';
-import { formatValue, keyMetrics, longDate, money, rowKey, rowValue, sourceText, WORKER_LABEL } from '@fahq/delivery';
+import { formatValue, keyMetrics, longDate, projectionLine, rowKey, rowValue, sourceText, WORKER_LABEL } from '@fahq/delivery';
 import { weekStart } from './days.ts';
 import type {
   DepartmentInfo, DepartmentView, ManagerBlock, RawDepartment, RawManager, RawRecommendation, RawReview,
@@ -582,11 +582,10 @@ function weeklyOptions(report: WeeklyReport, metrics: ReadonlyMap<string, Metric
       why: said(plan.summary, 600),
       steps: plan.actions.slice(0, SHOWN_REPORTS.steps).map((s) => said(s, 200)),
       numbers: plan.evidence.slice(0, SHOWN_REPORTS.optionNumbers).map((e) => citedNumber(e.metricId, metrics, e.value)),
-      projections: plan.projections.slice(0, SHOWN_REPORTS.projections).map((p) => {
-        const base = metrics.get(p.baseMetricId);
-        const result = base?.unit === 'usd' ? money(p.result) : plainNumber(p.result);
-        return { text: said(`${p.label}: ${base ? formatValue(base) : p.baseMetricId} x ${p.factor} = ${result}`, 300), assumption: said(p.assumption, 300) };
-      }),
+      projections: plan.projections.slice(0, SHOWN_REPORTS.projections).map((p) => ({
+        text: said(projectionLine(p, metrics.get(p.baseMetricId)), 300),
+        assumption: said(p.assumption, 300),
+      })),
       test: said(plan.test, 300),
       stopLoss: said(plan.stopLoss, 300),
       risks: plan.risks.slice(0, SHOWN_REPORTS.risks).map((r) => said(r, 200)),

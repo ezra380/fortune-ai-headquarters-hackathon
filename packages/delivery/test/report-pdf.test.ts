@@ -27,6 +27,9 @@ describe('numbers by unit', () => {
     expect(at('ratio', 0.52)).toBe('52%');
     expect(at('ratio', 0.003)).toBe('0.3%');
     expect(at('ratio', 0.043)).toBe('4.3%');
+    // Under one percent two decimals are kept, so a change of a tenth of a rate does not vanish (0.33% is not 0.3%).
+    expect(at('ratio', 0.0033)).toBe('0.33%');
+    expect(at('percent', 0.45)).toBe('0.45%');
     expect(at('ratio', 3.1, 'm:online.ads.google.roas')).toBe('3.1x');
     expect(at('ratio', 3.4, 'm:online.mer')).toBe('3.4x');
     expect(at('ratio', 0.9, 'm:salon.season.month_index')).toBe('0.9x');
@@ -121,6 +124,24 @@ describe('weekly packet PDF', () => {
       for (const action of path.actions) expect(text).toContain(action);
     }
     expect(text).toContain('Reply APPROVE 1, 2 or 3');
+  });
+
+  it('writes a projection result in the unit of its base: a rate stays a rate, a return a multiple, dollars money', async () => {
+    const finance = weeklyReport('finance');
+    const plans = finance.paths!.plans.map((p) => p.rank !== 3 ? p : {
+      ...p,
+      projections: [
+        { label: 'Unsubscribes after one more campaign', baseMetricId: 'm:online.email.unsubscribe_rate', factor: 1.1, result: 0.0033, assumption: 'One tenth more people leave' },
+        { label: 'Google return after the move', baseMetricId: 'm:online.ads.google.roas', factor: 0.85, result: 2.64, assumption: 'The next dollars return a little less' },
+        ...p.projections,
+      ],
+    });
+    const weekly = weeklyReport('finance', { paths: { ...finance.paths, plans } });
+    const text = await pdfText(await port.renderWeeklyPacketPdf(weekly, workerReportsOf('finance'), ctxOf('finance')));
+    expect(text).toContain('Unsubscribes after one more campaign: 0.3% x 1.1 = 0.33%');
+    expect(text).toContain('Google return after the move: 3.1x x 0.85 = 2.64x');
+    expect(text).toContain("A campaign like this month's average: $6,900 x 0.5 = $3,450");
+    expect(text).not.toContain('= 0.0033');
   });
 
   it('shows the actions of Online and Salon, and what was asked of other divisions', async () => {

@@ -1,6 +1,6 @@
 import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFPage } from 'pdf-lib';
 import type { Division, Metric, ReportContext, ReportStatus, WeeklyReport, WorkerReport } from '@fahq/contracts';
-import { formatValue, longDate, money, WORKER_LABEL } from './format.ts';
+import { formatValue, longDate, money, projectionLine, WORKER_LABEL } from './format.ts';
 import { toWinAnsi, wrap } from './pdf.ts';
 import { scrub } from './scrub.ts';
 
@@ -247,9 +247,7 @@ function pathBlocks(sheet: Sheet, weekly: WeeklyReport) {
     sheet.text('The numbers behind it', { face: 'bold', size: 10, gap: 1 });
     sheet.bullets(plan.evidence.map((e) => { const m = metrics.get(e.metricId); return `${m?.label ?? e.metricId}: ${m ? formatValue(m) : e.value.toLocaleString('en-US')}`; }), { size: 9.5 });
     for (const p of plan.projections) {
-      const base = metrics.get(p.baseMetricId);
-      const result = base?.unit === 'usd' ? money(p.result) : p.result.toLocaleString('en-US', { maximumFractionDigits: 2 });
-      sheet.text(`${p.label}: ${base ? formatValue(base) : p.baseMetricId} x ${p.factor} = ${result}`, { size: 9.5, indent: 10, gap: 0 });
+      sheet.text(projectionLine(p, metrics.get(p.baseMetricId)), { size: 9.5, indent: 10, gap: 0 });
       sheet.text(`Assumption: ${p.assumption}`, { size: 8.5, color: COLOR.muted, indent: 10, gap: 5 });
     }
     sheet.text(`Test: ${plan.test}`, { gap: 2 });

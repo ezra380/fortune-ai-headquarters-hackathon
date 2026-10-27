@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Metric, ProposalDocument } from '@fahq/contracts';
 import { createDeliveryPort, toWinAnsi } from '../src/index.ts';
+import { pdfText } from './pdf-text.ts';
 
 const env = {
   TWILIO_ACCOUNT_SID: 'AC' + '0'.repeat(32),
@@ -92,6 +93,21 @@ describe('proposal PDF', () => {
     const bytes = await createDeliveryPort(env, { fetch, now: () => new Date(), sentLedger: new Set() }).renderProposalPdf(doc);
     expect(Buffer.from(bytes.slice(0, 5)).toString()).toBe('%PDF-');
     expect(bytes.length).toBeGreaterThan(1500);
+  });
+
+  it('writes a projection result in the unit of its base (a twin of the report PDF: a rate stays a rate)', async () => {
+    const rate: Metric = { ...metric, id: 'm:online.email.unsubscribe_rate', label: 'Unsubscribe rate', value: 0.3, unit: 'percent' };
+    const withRate: ProposalDocument = {
+      ...doc,
+      citedMetrics: [metric, rate],
+      plans: { plans: [{ ...plan(1), evidence: [{ metricId: metric.id, value: 12400 }, { metricId: rate.id, value: 0.3 }], projections: [
+        { label: 'Revenue', baseMetricId: metric.id, factor: 1.1, result: 13640, assumption: 'Steady demand' },
+        { label: 'Unsubscribes', baseMetricId: rate.id, factor: 1.1, result: 0.33, assumption: 'A tenth more leave' },
+      ] }, plan(2), plan(3)], memoryConflicts: [] },
+    };
+    const text = await pdfText(await createDeliveryPort(env, { fetch, now: () => new Date(), sentLedger: new Set() }).renderProposalPdf(withRate));
+    expect(text).toContain('Revenue: $12,400 x 1.1 = $13,640');
+    expect(text).toContain('Unsubscribes: 0.3% x 1.1 = 0.33%');
   });
 
   it('maps text to WinAnsi', () => {

@@ -33,8 +33,10 @@ function plain(value: number, digits = 2): string {
 }
 
 function percent(value: number): string {
-  // Whole percents from ten up, one decimal below (0.3%, 4.2%), so a small rate does not round to nothing.
-  return `${plain(value, Math.abs(value) >= 10 ? 0 : 1)}%`;
+  // Whole percents from ten up, one decimal from one up (4.2%), two below one (0.33%): a small rate, or a tenth more of
+  // it, must not round to nothing or to the same number.
+  const size = Math.abs(value);
+  return `${plain(value, size >= 10 ? 0 : size >= 1 ? 1 : 2)}%`;
 }
 
 export function money(value: number): string {
@@ -54,6 +56,16 @@ export function formatValue(m: Pick<Metric, 'id' | 'value' | 'unit'>): string {
     case 'seconds': return `${plain(m.value)} s`;
     case 'score': return plain(m.value);
   }
+}
+
+/**
+ * A projection as one line: its base as the report holds it, the factor, and the result written in the BASE's unit, so
+ * dollars stay money, a rate stays a rate and an ad return stays a multiple ("0.3% x 1.1 = 0.33%", never "= 0").
+ * A base the report does not hold keeps its id and the result as a plain number: there is no unit to write it in.
+ */
+export function projectionLine(p: { label: string; baseMetricId: string; factor: number; result: number }, base: Pick<Metric, 'id' | 'value' | 'unit'> | undefined): string {
+  const result = base ? formatValue({ id: base.id, unit: base.unit, value: p.result }) : plain(p.result);
+  return `${p.label}: ${base ? formatValue(base) : p.baseMetricId} x ${p.factor} = ${result}`;
 }
 
 /** The date a person reads ("Mon, Oct 26, 2026") for a YYYY-MM-DD day, in any time zone. */

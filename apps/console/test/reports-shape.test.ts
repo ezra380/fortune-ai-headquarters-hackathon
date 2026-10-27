@@ -215,6 +215,23 @@ describe('the Divisions view: the weekly report', () => {
     });
   });
 
+  it('writes a projection\'s result in the unit of its base, so a rate stays a rate and a return a multiple', () => {
+    const finance = weeklyReport('finance');
+    const plans = finance.paths!.plans.map((p) => p.rank !== 3 ? p : {
+      ...p,
+      projections: [
+        { label: 'Unsubscribes after one more campaign', baseMetricId: 'm:online.email.unsubscribe_rate', factor: 1.1, result: 0.0033, assumption: 'One tenth more people leave' },
+        { label: 'Google return after the move', baseMetricId: 'm:online.ads.google.roas', factor: 0.85, result: 2.64, assumption: 'The next dollars return a little less' },
+      ],
+    });
+    const odd = weeklyReport('finance', { paths: { ...finance.paths, plans } });
+    const third = div(view(withReports('finance', { weekly: weeklyRow('finance', odd) })), 'finance').reports.weekly!.options[2]!;
+    expect(third.projections.map((p) => p.text)).toEqual([
+      'Unsubscribes after one more campaign: 0.3% x 1.1 = 0.33%',
+      'Google return after the move: 3.1x x 0.85 = 2.64x',
+    ]);
+  });
+
   it('shows an online or salon report\'s actions, with the numbers each rests on', () => {
     const actions = div(view(raw()), 'online').reports.weekly!.options;
     expect(actions.map((a) => [a.kind, a.rank, a.title])).toEqual([
