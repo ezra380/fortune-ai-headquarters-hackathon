@@ -111,7 +111,7 @@ describe('a door opened with a token', () => {
 
   it('offers exactly the stored reads the door can serve, and no write but file_work_report', async ({ skip }) => {
     if (!ready || !keys) skip();
-    for (const assistant of ['finance', 'online', 'manager'] as const) {
+    for (const assistant of ['finance', 'online', 'manager', 'legal'] as const) {
       const { token } = await newToken(assistant);
       const plain = await connectDoor(token);
       const stored = (await pool.query('select reads from public.assistant_profiles where assistant_id = $1', [assistant])).rows[0].reads as string[];
@@ -261,6 +261,53 @@ describe('file_work_report at a door', () => {
   });
 });
 
+// ---- The Legal Team's door -------------------------------------------------------------------------------------
+
+describe('the Legal Team door', () => {
+  const legalWords = {
+    summary: 'Read a vendor agreement. Auto-renewal with a long notice window, overall call Yellow. Rang +1 718 555 0100, reply 482913. Notices go to legal@vendor.example.',
+    steps: ['Read every clause', 'Marked the renewal clause Yellow'],
+    suggestions: ['Ask for a 30 day notice window'],
+    lessons: ['Check the notice window before the renewal date'],
+  };
+
+  it('serves the stored Legal Team profile, offers the one read the door can serve and file_work_report, and no business data', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const { token } = await newToken('legal');
+    const { client, door } = await connectDoor(token);
+    const row = (await pool.query(`select * from public.assistant_profiles where assistant_id = 'legal'`)).rows[0];
+    expect(door.profile).toMatchObject({ id: 'legal', source: 'database', version: row.version, title: 'Legal Team', serves: null, reads: ['recall_my_decisions', 'my_lessons'] });
+    expect(door.summary).toBe(`profile legal version ${row.version} from the database`);
+    // my_lessons is read inside the worker; the door serves recall_my_decisions, and nothing that holds the company's numbers.
+    expect(await toolNames(client)).toEqual(['file_work_report', 'recall_my_decisions']);
+    const prompt = ((await client.getPrompt({ name: 'skill' })).messages[0]!.content as { text: string }).text;
+    expect(prompt).toContain('- `recall_my_decisions`:');
+    expect(prompt).not.toMatch(/my_lessons|get_finance_metrics|get_online_metrics|get_salon_metrics|get_company_overview/);
+    for (const word of ['Green', 'Yellow', 'Red', 'licensed attorney', '`legal:contract-review`', '`/legal:review-contract`', '`saas-msa-review`', 'call `file_work_report` once']) expect(prompt, word).toContain(word);
+    expect(prompt).not.toMatch(/compliance-check|legal-response/); // names the plugins do not have
+    // Code Mode: one `code` tool for the reads (the sandbox sees the reads only) beside the report tool.
+    const code = await connectDoor(token, 'cursor', { plain: false });
+    expect((await toolNames(code.client)).filter((n) => n !== 'file_work_report')).toEqual(['code']);
+  });
+
+  it('files a Legal Team report under legal, masked, once per retry, and a legal token cannot file under another assistant', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const { token, id } = await newToken('legal');
+    const { client } = await connectDoor(token, 'claude-code');
+    const first = JSON.parse(text(await client.callTool({ name: 'file_work_report', arguments: legalWords }))) as { filed: boolean; id: string; duplicate: boolean };
+    expect(first).toMatchObject({ filed: true, duplicate: false });
+    const retry = JSON.parse(text(await client.callTool({ name: 'file_work_report', arguments: { ...legalWords } }))) as { id: string; duplicate: boolean };
+    expect(retry).toMatchObject({ id: first.id, duplicate: true });
+    const rows = await reportsOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ assistant_id: 'legal', token_id: id, tool: 'claude-code', reviewed_at: null });
+    expect(rows[0].summary).toBe('Read a vendor agreement. Auto-renewal with a long notice window, overall call Yellow. Rang [phone], reply [code]. Notices go to [email].');
+    expect(rows[0].summary).not.toMatch(/@|vendor\.example/); // a contract's notice address is a party's contact detail and never reaches the manager's digest
+    expect(rows[0].lessons).toEqual([{ text: 'Check the notice window before the renewal date' }]);
+    expect((await pool.query(`select count(*)::int as n from public.session_reports where assistant_id <> 'legal' and token_id = $1`, [id])).rows[0].n).toBe(0);
+  });
+});
+
 // ---- serve.ts, started as a program ---------------------------------------------------------------------------
 
 describe('serve.ts', () => {
@@ -298,6 +345,28 @@ describe('serve.ts', () => {
       const rows = await reportsOf(id);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ assistant_id: 'finance', tool: 'codex', summary: 'Started the finance door from serve.ts, called [phone].' });
+      expect(log).not.toContain(token);
+    } finally {
+      await client.close();
+    }
+  }, 60_000);
+
+  it('starts the Legal Team door the way a Claude Code session on a staff laptop would, and its report reaches session_reports under legal', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const { token, id } = await newToken('legal');
+    const transport = new StdioClientTransport({ command: tsx, args: [serve, '--profile', 'legal'], cwd: root, env: envFor(token), stderr: 'pipe' });
+    let log = '';
+    transport.stderr?.on('data', (chunk) => (log += String(chunk)));
+    const client = new Client({ name: 'claude-code', version: '1.0.0' });
+    try {
+      await client.connect(transport);
+      expect(log).toMatch(/fortune-brain MCP ready \(Code Mode, profile legal version \d+ from the database\)/);
+      expect(await toolNames(client)).toEqual(['code', 'file_work_report']);
+      const done = await client.callTool({ name: 'file_work_report', arguments: { summary: 'Read the marketplace terms: two Red clauses, one Yellow. Called 5550101234.', lessons: ['Read the fee-change clause first'] } });
+      expect(done.isError).toBeFalsy();
+      const rows = await reportsOf(id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ assistant_id: 'legal', tool: 'claude-code', summary: 'Read the marketplace terms: two Red clauses, one Yellow. Called [phone].' });
       expect(log).not.toContain(token);
     } finally {
       await client.close();

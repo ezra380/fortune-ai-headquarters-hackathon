@@ -146,7 +146,7 @@ describe('profileFromDoor: the stored profile a door serves', () => {
     expect(p.skill).toBe(files.finance.skill);
   });
 
-  it('serves each of the five file profiles as stored', () => {
+  it('serves each of the six file profiles as stored', () => {
     for (const id of ids) expect(profileFromDoor(doorAnswer(id)), id).toMatchObject({ id, source: 'database', version: 4, reads: [...files[id].reads] });
   });
 
@@ -163,6 +163,9 @@ describe('profileFromDoor: the stored profile a door serves', () => {
     expect(() => profileFromDoor(doorAnswer('salon', { reads: ['get_online_metrics'] }))).toThrow(/salon assistant may never read "get_online_metrics"/);
     expect(() => profileFromDoor(doorAnswer('online', { reads: ['get_salon_metrics'] }))).toThrow(/online assistant may never read "get_salon_metrics"/);
     expect(() => profileFromDoor(doorAnswer('manager', { reads: ['get_finance_metrics'] }))).toThrow(/manager assistant may never read/);
+    for (const name of ['get_finance_metrics', 'get_salon_metrics', 'get_online_metrics', 'list_work_reports']) {
+      expect(() => profileFromDoor(doorAnswer('legal', { reads: [...files.legal.reads, name] })), name).toThrow(new RegExp(`legal assistant may never read "${name}"`));
+    }
     expect(() => profileFromDoor(doorAnswer('owner', { skill: files.owner.skill.replaceAll('read-only', 'careful') }))).toThrow(/no longer says the assistant is read-only/);
     expect(() => profileFromDoor(doorAnswer('owner', { skill: files.owner.skill.replace('## You never', '## You sometimes') }))).toThrow(/lost the "You never" section/);
     expect(() => profileFromDoor(doorAnswer('owner', { skill: files.owner.skill.replaceAll('read-only', 'RO').replace('## You never', '') }))).toThrow(/refused/);

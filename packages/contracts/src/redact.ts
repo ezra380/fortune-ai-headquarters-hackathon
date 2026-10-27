@@ -5,6 +5,10 @@
 //
 // Over-masking is the safe side: any ten-digit number, any phone written with spaces, dots, dashes or brackets, and
 // any lone six-digit group (also written 482-913 or 482 913) is replaced.
+//
+// An email address is a third shape, masked only by the report path (maskContactDetails, and public.redact_text from
+// migration 20261027130020): a contract carries its parties' notice addresses, and an outside session must not file them.
+// maskPhonesAndCodes, which the lesson rules and the read tools use, is unchanged.
 
 /** A phone number: +<country code> with its digits, or a US/Canada number in any spacing, with or without a leading 1 or +1. */
 export const PHONE_SOURCE = String.raw`\+\d[\d ().-]{7,18}\d|(?<!\d)(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{4}(?!\d)`;
@@ -22,4 +26,17 @@ export const hasCode = (text: string): boolean => new RegExp(CODE_SOURCE).test(t
 /** The text with every phone number replaced by [phone] and every code by [code] (the same masks the database writes). */
 export function maskPhonesAndCodes(text: string): string {
   return text.replace(phonePattern(), '[phone]').replace(codePattern(), '[code]');
+}
+
+/**
+ * An email address: letters, digits and . _ % + - before the @, then a domain with at least one dot. An address is
+ * masked before a phone or a code, so the digits inside one never turn into [code]. Same text as public.redact_text.
+ */
+export const EMAIL_SOURCE = String.raw`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`;
+export const emailPattern = () => new RegExp(EMAIL_SOURCE, 'g');
+export const hasEmail = (text: string): boolean => new RegExp(EMAIL_SOURCE).test(text);
+
+/** The text with every email replaced by [email], every phone by [phone] and every code by [code]: exactly what public.redact_text writes. */
+export function maskContactDetails(text: string): string {
+  return text.replace(emailPattern(), '[email]').replace(phonePattern(), '[phone]').replace(codePattern(), '[code]');
 }

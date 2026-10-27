@@ -5,22 +5,23 @@ import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { AssistantId, maskPhonesAndCodes } from '@fahq/contracts';
-import { REDACT_SAMPLES } from '../../packages/contracts/test/redact-samples.ts';
-import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, loadProfiles, managerNotes, newDoorToken, parseProfileRows, restoreProfileVersion, seedProfiles, tokenHash, withManagerNotes } from '@fahq/profiles';
+import { AssistantId, maskContactDetails } from '@fahq/contracts';
+import { EMAIL_SAMPLES, REDACT_SAMPLES } from '../../packages/contracts/test/redact-samples.ts';
+import { OWNER_LESSONS_HEADING, READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, loadProfiles, managerNotes, newDoorToken, parseProfileRows, restoreProfileVersion, seedProfiles, skillWithLessons, tokenHash, withManagerNotes } from '@fahq/profiles';
 
 // Profiles in the database, the two doors an outside tool may call, and what the public (anon) role can reach.
 // Real Postgres and the real Data API (local Supabase: npm run db:start); nothing is mocked.
 //  - The "doors" and "privileges" groups run against the shared local database. They write only tokens and
-//    session reports (which they delete again) and read the five seeded profiles. A profile version is
+//    session reports (which they delete again) and read the seeded profiles. A profile version is
 //    append-only, so nothing here may add one to the shared database.
 //  - The "profile writes" group builds a throwaway database from the real migration file, so it can commit
 //    versions, race two writers and reseed as often as it likes.
 
 const url = process.env.SUPABASE_DB_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 const isLocal = /@(127\.0\.0\.1|localhost|\[::1\]):/.test(url);
-// The migrations that make the profile tables and doors, in order (the second one replaces two helper functions).
-const MIGRATIONS = ['20261027100000_profiles.sql', '20261027100200_profiles_review.sql'].map((name) => path.resolve(import.meta.dirname, '../migrations', name));
+// The migrations that make the profile tables and doors, in order (the second one replaces two helper functions, the third makes
+// redact_text mask an email address too).
+const MIGRATIONS = ['20261027100000_profiles.sql', '20261027100200_profiles_review.sql', '20261027130020_redact_email.sql'].map((name) => path.resolve(import.meta.dirname, '../migrations', name));
 const runMigrations = async (db: pg.Pool) => {
   for (const file of MIGRATIONS) await db.query(fs.readFileSync(file, 'utf8'));
 };
@@ -234,10 +235,10 @@ describe('door_file_report (called with the public anon key, through the Data AP
 
   it('masks exactly what the lesson rules and the read tools mask: one list of strings through the database and through @fahq/contracts', async ({ skip }) => {
     if (!ready) skip();
-    for (const [input, expected] of REDACT_SAMPLES) {
+    for (const [input, expected] of [...REDACT_SAMPLES, ...EMAIL_SAMPLES]) {
       const { rows } = await pool.query('select public.redact_text($1) as masked', [input]);
       expect(rows[0].masked, `the database on ${JSON.stringify(input)}`).toBe(expected);
-      expect(maskPhonesAndCodes(input), `@fahq/contracts on ${JSON.stringify(input)}`).toBe(expected);
+      expect(maskContactDetails(input), `@fahq/contracts on ${JSON.stringify(input)}`).toBe(expected);
     }
   });
 
@@ -464,9 +465,9 @@ describe('profile writes (a throwaway database built from the real migration fil
         create schema extensions;
         create extension pgcrypto with schema extensions;
         alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
+        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager', 'legal');
         create table public.assistants (id public.assistant_id primary key);
-        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
+        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager'), ('legal');`);
       await runMigrations(scratch);
     } catch (error) {
       console.warn(`SKIPPED the profile write tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
@@ -586,7 +587,7 @@ describe('profile writes (a throwaway database built from the real migration fil
 
   it('masks a phone number or code the same in the scratch database made from the migration files as on the stack', async ({ skip }) => {
     if (!scratchName) skip();
-    for (const [input, expected] of REDACT_SAMPLES) {
+    for (const [input, expected] of [...REDACT_SAMPLES, ...EMAIL_SAMPLES]) {
       expect((await scratch.query('select public.redact_text($1) as masked', [input])).rows[0].masked, JSON.stringify(input)).toBe(expected);
     }
   });
@@ -618,9 +619,9 @@ describe('seeding profiles (a second throwaway database)', () => {
         create schema extensions;
         create extension pgcrypto with schema extensions;
         alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
+        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager', 'legal');
         create table public.assistants (id public.assistant_id primary key);
-        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
+        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager'), ('legal');`);
       await runMigrations(scratch);
     } catch (error) {
       console.warn(`SKIPPED the seed tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
@@ -638,14 +639,14 @@ describe('seeding profiles (a second throwaway database)', () => {
   const stored = async () => (await scratch.query('select * from public.assistant_profiles order by assistant_id')).rows;
   const versionCount = async () => (await scratch.query('select count(*)::int as n from public.assistant_profile_versions')).rows[0].n as number;
 
-  it('stores the five file profiles once, each with a version made by "seed"', async ({ skip }) => {
+  it('stores the file profiles once (one per assistant), each with a version made by "seed"', async ({ skip }) => {
     if (!scratchName) skip();
     const first = await seedProfiles(scratch, {});
     expect(first.map((r) => [r.assistant, r.action, r.version, r.differsFromFiles])).toEqual(
       AssistantId.options.map((id) => [id, 'created', 1, false]),
     );
     const versions = (await scratch.query(`select assistant_id, version, made_by, reason, snapshot from public.assistant_profile_versions order by assistant_id`)).rows;
-    expect(versions).toHaveLength(5);
+    expect(versions).toHaveLength(AssistantId.options.length);
     for (const v of versions) {
       const p = files[v.assistant_id as AssistantId];
       expect(v.made_by).toBe('seed');
@@ -691,7 +692,7 @@ describe('seeding profiles (a second throwaway database)', () => {
     const before = await versionCount();
     const results = await seedProfiles(scratch, {}, { force: true });
     expect(results.every((r) => r.action === 'reseeded' && !r.differsFromFiles)).toBe(true);
-    expect(await versionCount()).toBe(before + 5);
+    expect(await versionCount()).toBe(before + AssistantId.options.length);
     const salon = (await scratch.query(`select version, title, skill, lessons from public.assistant_profiles where assistant_id = 'salon'`)).rows[0];
     expect(salon.title).toBe(files.salon.title);
     expect(salon.skill).toBe(files.salon.skill);
@@ -764,6 +765,28 @@ describe('seeding profiles (a second throwaway database)', () => {
     }
   }, 120_000);
 
+  it('hands the Legal Team\'s next session the lesson the owner adopted: a new version made by the owner, then door_profile for a legal token returns it, under the owner\'s heading', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const row = (await scratch.query(`select version, title, skill, reads, models from public.assistant_profiles where assistant_id = 'legal'`)).rows[0];
+    const lesson = { text: 'Check the notice window before the renewal date.', source: 'recommendation:legal-test', adoptedAt: '2026-10-27T15:00:00.000Z', by: 'owner' };
+    // What the owner's ADOPT does for the Legal Team: one more version, made by the owner, carrying the lesson.
+    await scratch.query(
+      `select public.save_assistant_profile('legal', $1, $2, $3, $4::text[], $5::jsonb, $6::jsonb, 'owner', 'the owner adopted a lesson', '{"kind":"lesson","rank":1}')`,
+      [row.version, row.title, row.skill, row.reads, JSON.stringify(row.models), JSON.stringify([lesson])],
+    );
+    expect((await scratch.query(`select version, made_by from public.assistant_profile_versions where assistant_id = 'legal' order by version desc limit 1`)).rows[0]).toEqual({ version: row.version + 1, made_by: 'owner' });
+    // The next staff session's door.
+    const issued = await issueDoorToken(scratch, 'legal', 'scratch legal door');
+    const opened = (await scratch.query('select public.door_profile($1) as profile', [issued.token])).rows[0].profile;
+    expect(opened).toMatchObject({ assistant: 'legal', title: 'Legal Team', version: row.version + 1, reads: ['recall_my_decisions', 'my_lessons'] });
+    expect(opened.lessons).toEqual([lesson]);
+    expect(skillWithLessons({ skill: opened.skill, lessons: opened.lessons })).toContain(`${OWNER_LESSONS_HEADING}\n- ${lesson.text}`);
+    // A salon token still sees none of it.
+    const salon = await issueDoorToken(scratch, 'salon', 'scratch salon door');
+    expect((await scratch.query('select public.door_profile($1) as profile', [salon.token])).rows[0].profile.lessons).toEqual([]);
+  });
+
   it('--force also keeps the notes the HQ Manager added at the end of a skill (they are the manager\'s decision, not the files\')', async ({ skip }) => {
     if (!scratchName) skip();
     await seedProfiles(scratch, {});
@@ -774,7 +797,7 @@ describe('seeding profiles (a second throwaway database)', () => {
     );
     const before = await versionCount();
     const results = await seedProfiles(scratch, {}, { force: true });
-    expect(await versionCount()).toBe(before + 5);
+    expect(await versionCount()).toBe(before + AssistantId.options.length);
     const finance = (await scratch.query(`select skill from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
     expect(finance.skill).toBe(withManagerNotes(files.finance.skill, ['Name the month.', 'Say the return with the spend.']));
     expect(managerNotes(finance.skill)).toEqual(['Name the month.', 'Say the return with the spend.']);

@@ -87,6 +87,7 @@ describe('profile doors (plain tools)', () => {
       ],
       salon: ['get_metric_series', 'get_repair_tickets', 'get_salon_metrics', 'recall_my_decisions'],
       manager: ['get_data_quality', 'get_timeline', 'recall_decisions'],
+      legal: ['recall_my_decisions'],
     };
     for (const id of AssistantId.options) {
       const client = await connect(createBrainMcpServer(makeDeps().deps, id));

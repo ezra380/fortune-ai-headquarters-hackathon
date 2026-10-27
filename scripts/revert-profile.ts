@@ -14,7 +14,7 @@ const assistant = AssistantId.safeParse(positionals[0]);
 const version = Number(positionals[1]);
 const listing = values.list === true;
 if (!assistant.success || (!listing && !Number.isInteger(version))) {
-  console.error('usage: npx tsx scripts/revert-profile.ts <owner|finance|salon|online|manager> <version>   (or <assistant> --list)');
+  console.error('usage: npx tsx scripts/revert-profile.ts <owner|finance|salon|online|manager|legal> <version>   (or <assistant> --list)');
   process.exit(2);
 }
 const dbUrl = values.db ?? process.env.SUPABASE_DB_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';

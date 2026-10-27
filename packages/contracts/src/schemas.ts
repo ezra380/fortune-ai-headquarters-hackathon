@@ -8,7 +8,9 @@ export const Timestamp = z.iso.datetime({ offset: true });
 
 // 'manager' is the HQ Manager: it reviews the other assistants' work reports and keeps the lessons
 // the owner adopts. It has no phone number of its own; it reaches the owner through Owner HQ's number.
-export const AssistantId = z.enum(['owner', 'finance', 'salon', 'online', 'manager']);
+// 'legal' is the Legal Team: it reads terms, contracts and policies and gives a plain-English risk read. It has no phone
+// number and no person either: staff reach it through a door, the owner asks it by text through Owner HQ's number.
+export const AssistantId = z.enum(['owner', 'finance', 'salon', 'online', 'manager', 'legal']);
 export type AssistantId = z.infer<typeof AssistantId>;
 
 export const BusinessUnit = z.enum(['salon', 'online', 'combined']);

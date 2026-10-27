@@ -157,7 +157,7 @@ const readRows = (deps: BrainMcpDeps, read: RowRead, limit: number | undefined) 
 });
 
 // Whose metrics a profile's series may be asked for (as in the worker's read tools).
-const SERIES_DIVISIONS: Record<AssistantId, readonly Division[]> = { owner: ['finance', 'hq'], finance: ['finance'], online: ['online'], salon: ['salon'], manager: [] };
+const SERIES_DIVISIONS: Record<AssistantId, readonly Division[]> = { owner: ['finance', 'hq'], finance: ['finance'], online: ['online'], salon: ['salon'], manager: [], legal: [] };
 const BUDGET_IDS = /^m:online\.(budget\.|ads\.[a-z]+\.spend$|season\.last_year_index$)/;
 const rowLimit = z.number().int().min(1).max(50).optional();
 
