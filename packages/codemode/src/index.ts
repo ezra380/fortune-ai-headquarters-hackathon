@@ -8,6 +8,9 @@ export type { BrainMcpDeps } from './brain-mcp.ts';
 export { QuickJsExecutor } from './quickjs-executor.ts';
 export type { ExecuteResult, ResolvedProvider } from './quickjs-executor.ts';
 export { createCodeModeRunner, declarations } from './runner.ts';
+export { toolLoopAnswer } from './tool-loop.ts';
+export type { ToolLoopResult } from './tool-loop.ts';
+export { traceNumbers, writeAnswer } from './answer.ts';
 
 /**
  * The brain behind Cloudflare Code Mode: every brain tool becomes a typed method on `codemode`,
