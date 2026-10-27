@@ -44,7 +44,7 @@ describe('profile doors (plain tools)', () => {
       owner: ['get_finance_metrics', 'get_timeline', 'recall_decisions'],
       finance: ['get_finance_metrics', 'recall_my_decisions'],
       online: ['get_online_metrics', 'recall_my_decisions'],
-      salon: [],
+      salon: ['recall_my_decisions'], // its salon numbers are served inside the worker only
       manager: ['get_timeline', 'recall_decisions'],
     };
     for (const id of AssistantId.options) {
@@ -173,9 +173,12 @@ describe('profile doors (Code Mode)', () => {
     await manager.close();
   });
 
-  it('gives the salon placeholder no code tool at all, only its skill', async () => {
+  it('gives the salon stand-in a code tool for what the door can serve, and its skill', async () => {
     const salon = await connect(await createCodeModeBrainServer(makeDeps().deps, {}, 'salon'));
-    expect(await toolNames(salon)).toEqual([]);
+    const description = (await salon.listTools()).tools[0]!.description ?? '';
+    expect(description).toContain('recall_my_decisions');
+    expect(description).not.toContain('get_finance_metrics');
+    expect(description).not.toContain('get_online_metrics');
     expect((await salon.listPrompts()).prompts.map((p) => p.name)).toEqual(['skill']);
     expect((await salon.getPrompt({ name: 'skill' })).messages[0]!.content).toMatchObject({ text: profiles.salon.skill });
     await salon.close();
