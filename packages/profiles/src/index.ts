@@ -179,12 +179,12 @@ export function restoreProfileVersion(db: Queryable, assistant: AssistantId, ver
 export type { RestoreResult } from './restore.ts';
 export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
 export type { ParsedProfileRows } from './rows.ts';
-export { DEFAULT_PROFILE_TTL_MS, skillWithLessons } from './source.ts';
+export { DEFAULT_PROFILE_TTL_MS, MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, skillWithLessons } from './source.ts';
 export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, dataNeverStored, describeChange, managerNotes, withManagerNotes } from './changes.ts';
 export type { AppliedChange, ChangeOptions, ProfileChange, ProfileContent } from './changes.ts';
 export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './source.ts';
-export { canonicalJson } from './seed.ts';
-export type { Queryable, SeedAction, SeedResult } from './seed.ts';
+export { canonicalJson, ownerChoices } from './seed.ts';
+export type { OwnerChoices, Queryable, SeedAction, SeedResult } from './seed.ts';
 export { issueDoorToken, newDoorToken, tokenHash, writeTokenFile } from './tokens.ts';
 export { DoorProfile, doorSkill } from './door.ts';
 export type { DoorSkillOptions, DoorTool } from './door.ts';

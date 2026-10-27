@@ -1,4 +1,4 @@
-import type { ChangeKind, ModelChange, ReadsChange } from '@fahq/contracts';
+import { hasCode, hasPhone, type ChangeKind, type ModelChange, type ReadsChange } from '@fahq/contracts';
 import { checkProfileRow, type ProfileLesson, type ProfileRow } from './rows.ts';
 
 // The changes the HQ Manager may make to a profile, as pure functions: a typed change in, the next profile (or a
@@ -25,6 +25,8 @@ export type ChangeOptions = {
   knownModels: readonly string[];
   /** What the change came from (the recommendation's id). A lesson with this source is never added twice. */
   source: string;
+  /** Who applies it: the HQ Manager by itself, or the owner with his code. A lesson records it (and is shown to a model as such). */
+  by: ProfileLesson['by'];
   now: Date;
 };
 
@@ -79,29 +81,42 @@ const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // stored. This is a net, not a proof: what keeps the rest safe is that a lesson or a note is one short line that can
 // be added and nothing more, that it is shown to the owner, and that every version can be put back.
 // What is never stored or sent on, wherever it appears: a phone number, and anything medical or about hair loss.
-const NEVER_STORED: readonly (readonly [RegExp, string])[] = [
-  // The same shapes the database masks in a session report (redact_text): a phone number, and a ten-digit run.
-  [/\+\d[\d ().-]{7,18}\d|(?<!\d)\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\d)|(?<!\d)1?\d{10}(?!\d)/, 'it holds a phone number'],
-  [/\b(hair[- ]?loss|alopecia|chemo(therapy)?|cancer|medical|diagnos\w*|patients?)\b/i, 'it touches medical or hair-loss data, which is never stored'],
+type Rule = readonly [(text: string) => boolean, string];
+const matches = (pattern: RegExp): ((text: string) => boolean) => (text) => pattern.test(text);
+
+// Words that say a person's health or hair loss is the subject, in any of the ways a lesson might put it. A net: a
+// topper "for coverage" is a hair-loss sentence even when it never says so. Over-blocking is the safe side.
+const MEDICAL = new RegExp([
+  String.raw`\b(hair[- ]?loss|alopecia|chemo(therapy)?|cancer|medic\w*|diagnos\w*|patients?|trichotillomania)\b`,
+  String.raw`\b(thinning|bald(ing|ness)?|health\w*|illness(es)?|sickness|diseases?|scalp (condition|disorder)s?)\b`,
+  String.raw`\blos(e|es|ing|t) (their |her |his |your )?hair\b`,
+  String.raw`\btoppers?\b.{0,40}\b(coverage|cover(s|ing)?|thin(ning)?|bald|sparse)\b`,
+  String.raw`\b(coverage|cover(s|ing)?)\b.{0,40}\btoppers?\b`,
+].join('|'), 'i');
+
+const NEVER_STORED: readonly Rule[] = [
+  // The same shapes the database masks in a session report (redact_text): one pattern in @fahq/contracts.
+  [hasPhone, 'it holds a phone number'],
+  [matches(MEDICAL), 'it touches medical or hair-loss data, which is never stored'],
 ];
 
 /** A plain reason a piece of text may not be stored or sent on (a phone number, medical or hair-loss data), or null. */
 export function dataNeverStored(text: string): string | null {
-  for (const [pattern, reason] of NEVER_STORED) if (pattern.test(text)) return reason;
+  for (const [applies, reason] of NEVER_STORED) if (applies(text)) return reason;
   return null;
 }
 
-const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
+const FORBIDDEN: readonly Rule[] = [
   ...NEVER_STORED,
-  // A six-digit group is a one-time code (the database masks it too). A lesson never needs one.
-  [/(?<![\d.,$])\d{6}(?!\d)(?!\.\d)/, 'it holds a code'],
-  [/\b(ignore|disregard|forget|override|bypass)\b.{0,40}\b(rules?|instructions?|limits?|safety|screen|previous|above|approval)s?\b/i, 'it tries to get around the rules'],
-  [/\b(without|bypassing|skipping)\b.{0,20}\b(one-?time )?(code|approval)\b/i, 'it tries to do without a person\'s code'],
-  [/\bplain\s*["'“]?(yes|ok)\b/i, 'it treats a plain "yes" as a decision'],
-  [/\b(no longer|stop being|not) read-?only\b/i, 'it says the assistant is not read-only'],
-  [/\b(you|assistants?)\b.{0,20}\b(may|can|should|must)\b.{0,12}\b(now )?(send|charge|publish|approve|change an ad|message a customer)\b/i, 'it gives the assistant a power it does not have'],
-  [/\b(system prompt|developer message|jailbreak)\b/i, 'it talks about the prompt itself'],
-  [/https?:\/\/|www\./i, 'it holds a web address'],
+  // A six-digit group (also written 482-913) is a one-time code (the database masks it too). A lesson never needs one.
+  [hasCode, 'it holds a code'],
+  [matches(/\b(ignore|disregard|forget|override|bypass)\b.{0,40}\b(rules?|instructions?|limits?|safety|screen|previous|above|approval)s?\b/i), 'it tries to get around the rules'],
+  [matches(/\b(without|bypassing|skipping)\b.{0,20}\b(one-?time )?(code|approval)\b/i), 'it tries to do without a person\'s code'],
+  [matches(/\bplain\s*["'“]?(yes|ok)\b/i), 'it treats a plain "yes" as a decision'],
+  [matches(/\b(no longer|stop being|not) read-?only\b/i), 'it says the assistant is not read-only'],
+  [matches(/\b(you|assistants?)\b.{0,20}\b(may|can|should|must)\b.{0,12}\b(now )?(send|charge|publish|approve|change an ad|message a customer)\b/i), 'it gives the assistant a power it does not have'],
+  [matches(/\b(system prompt|developer message|jailbreak)\b/i), 'it talks about the prompt itself'],
+  [matches(/https?:\/\/|www\./i), 'it holds a web address'],
 ];
 
 /**
@@ -113,7 +128,7 @@ export function checkChangeText(text: string, reads: readonly string[], readName
   if (text.trim().length === 0) return 'it is empty';
   if (text.length > 300) return 'it is longer than 300 characters';
   if (/[\r\n]/.test(text)) return 'it is not one line';
-  for (const [pattern, reason] of FORBIDDEN) if (pattern.test(text)) return reason;
+  for (const [applies, reason] of FORBIDDEN) if (applies(text)) return reason;
   const tool = readNames.find((name) => !reads.includes(name) && new RegExp(`\\b${escapeRegExp(name)}\\b`).test(text));
   return tool ? `it tells the assistant to use "${tool}", which it may not read` : null;
 }
@@ -173,7 +188,7 @@ function applyModel(row: ProfileContent, change: Extract<ProfileChange, { kind: 
 function applyLesson(row: ProfileContent, text: string, options: ChangeOptions): AppliedChange {
   const same = row.lessons.some((l) => l.source === options.source || normalized(l.text) === normalized(text));
   if (same) return { ok: true, changed: false, next: { title: row.title, skill: row.skill, reads: row.reads, models: row.models, lessons: row.lessons }, dropped: [] };
-  const lesson: ProfileLesson = { text, source: options.source.slice(0, 100), adoptedAt: options.now.toISOString() };
+  const lesson: ProfileLesson = { text, source: options.source.slice(0, 100), adoptedAt: options.now.toISOString(), by: options.by };
   const all = [...row.lessons, lesson];
   const dropped = all.slice(0, Math.max(0, all.length - MAX_LESSONS)).map((l) => l.text);
   return { ok: true, changed: true, next: { title: row.title, skill: row.skill, reads: row.reads, models: row.models, lessons: all.slice(dropped.length) }, dropped };

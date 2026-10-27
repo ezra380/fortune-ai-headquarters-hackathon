@@ -445,6 +445,15 @@ export function createStore(url: string, serviceKey: string) {
       const rows = must(await db.from('session_reports').update({ reviewed_at: now.toISOString(), review_id: reviewId }).in('id', [...ids]).is('reviewed_at', null).select('id'), 'mark session reports') as { id: string }[];
       return rows.length;
     },
+    /**
+     * Closes the unread reports filed before `before` (older than the reader tool reaches, so no review can ever show them):
+     * `reviewed_at` is set and `review_id` stays empty, which is how a report nobody read is told from one a review read.
+     * Returns how many it closed.
+     */
+    async expireSessionReports(before: Date, now: Date): Promise<number> {
+      const rows = must(await db.from('session_reports').update({ reviewed_at: now.toISOString() }).lt('created_at', before.toISOString()).is('reviewed_at', null).select('id'), 'expire session reports') as { id: string }[];
+      return rows.length;
+    },
     /** The status of the task with this key, or null when there is none (the daily review checks before it queues). */
     async taskStatusByKey(key: string): Promise<string | null> {
       const row = must(await db.from('tasks').select('status').eq('idempotency_key', key).maybeSingle(), 'task') as { status: string } | null;

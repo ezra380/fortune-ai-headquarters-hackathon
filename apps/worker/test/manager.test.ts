@@ -19,7 +19,9 @@ import { memoryProfiles } from './profile-port.ts';
 // The HQ Manager end to end on the real local database and the real Meterless engines. Only the models,
 // Code Mode and the Zetaris adapter are fakes (scripted below); SMS is a dry run. The profile tables are in memory
 // (profile-port.ts): a profile version cannot be taken back from the real table, so no test writes one there.
-// Lessons and notes: the manager applies them itself. Reads and models: the owner's code does.
+// As shipped, every change waits for the owner's one-time code (MANAGER_APPLIES is all false). The mechanism that lets the
+// manager apply a lesson or a note itself is off and tested in manager-decides.test.ts; two tests here switch it on
+// (deps.managerApplies, which nothing in production sets) to show the whole loop with it.
 
 const api = haveMeterless ? localApi() : null;
 if (!api) console.warn('SKIPPED manager tests: needs local Supabase (npm run db:start) and Meterless (scripts/setup-meterless.sh)');
@@ -29,6 +31,7 @@ afterAll(async () => pool.end());
 
 const sid = () => 'SM' + randomBytes(16).toString('hex');
 const OWNER_NUMBER = '+15550100001';
+const RULE_ON = { lesson: true, skill_note: true, reads: false, model: false } as const;
 
 // ---- Fakes (fixtures.ts) --------------------------------------------------------------------------
 
@@ -54,8 +57,8 @@ let reviewCount = 0;
 const skillOf = (id: string) => `SKILL(${id}) This assistant is read-only.\n\n## You never\nChange anything.`;
 
 type Rec = { rank: number; assistant: string; kind?: string; change: string; why: string; reads?: unknown; model?: unknown };
-// Recommendation 1 is a lesson for finance: the manager applies it by itself. Recommendation 2 gives the online
-// assistant a read tool: that widens what it sees, so it waits for the owner's code.
+// Recommendation 1 is a lesson for finance. Recommendation 2 gives the online assistant a read tool. As shipped both wait
+// for the owner's code; with the rule on, the manager applies the lesson by itself and only the read tool waits.
 function makeReview(over: { summary?: string; recs?: Rec[] } = {}) {
   const tag = `${RUN_TAG}${letters(reviewCount++)}`;
   const lesson = `Give every stop-loss a lever so the first plan check passes (${tag}).`;
@@ -83,6 +86,9 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
   const sms: { to: string; body: string }[] = [];
   const profileTables = memoryProfiles();
   let deps: WorkerDeps;
+  const use = { rule: false };
+  /** The worker's dependencies as shipped, or with the manager allowed to apply lessons and skill notes (the mechanism, off). */
+  const current = (): WorkerDeps => (use.rule ? { ...deps, managerApplies: RULE_ON } : deps);
   let model: ReturnType<typeof scriptedModel>;
   let codeMode: ReturnType<typeof fakeCodeMode>;
   let ownerPhone = '';
@@ -95,7 +101,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     }
     deps = {
       // The real store, except the profile tables (in memory) and the outside session reports (this file looks at none).
-      store: { ...createStore(api!.url, api!.key), ...profileTables.port, sessionReports: async () => [] },
+      store: { ...createStore(api!.url, api!.key), ...profileTables.port, sessionReports: async () => [], expireSessionReports: async () => 0 },
       brain: await openBrain({ meterlessDir, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-manager-')), actor: 'manager-test' }),
       models: { nvidia: undefined as unknown as ModelPort, planModel: 'MOCK/plans', routerModel: 'MOCK/router' },
       guard: null,
@@ -124,6 +130,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     await pool.query(`update public.approvals set status = 'expired' where status = 'pending'`);
     await pool.query(`update public.outbox set status = 'skipped', last_error = 'reset by manager test' where status in ('pending','sending')`);
     sms.length = 0;
+    use.rule = false;
     model = scriptedModel();
     codeMode = fakeCodeMode();
     deps.models = { ...deps.models, nvidia: model.port };
@@ -134,7 +141,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
   const textIn = async (from: string, body: string) => {
     const messageSid = sid();
     await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, from, OWNER_NUMBER, body]);
-    await runUntilIdle(deps);
+    await runUntilIdle(current());
     return messageSid;
   };
   const smsTo = (phone: string) => sms.filter((m) => m.to === phone).map((m) => m.body);
@@ -189,7 +196,111 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect((await stepsOf(taskId))[0]).toMatchObject({ step: 'finance.plans', input_tokens: 300, output_tokens: 600 });
   });
 
-  it('REVIEW → digest through Code Mode → a checked review → the manager applies the lesson itself → the owner is told, and ADOPT applies what needs his code', async () => {
+  it('REVIEW → digest through Code Mode → a checked review → every change waits for the owner\'s code → ADOPT puts each in place as a version made by the owner', async () => {
+    const r = makeReview();
+    const financeBefore = profileTables.versionsOf('finance').length;
+    const onlineBefore = profileTables.versionsOf('online').length;
+    const { code, task } = await askForReview(r.json);
+    const body = lastTo(ownerPhone);
+    expect(code).toMatch(/^\d{6}$/);
+    expect(body).toContain('HQ Manager review (last 24 h): Finance handled 5 tasks and 1 failed; it used 1500 tokens in and 3000 out.');
+    expect(body).toContain(`Needs your code:\n1. [finance] lesson: ${r.lesson}\n2. [online] data access: ${r.readsLine}`);
+    expect(body).not.toContain('I changed');
+    expect(body).not.toContain('I did not apply');
+    expect(body.endsWith(`Reply ADOPT <n> ${code} to approve one (ADOPT 1 2 ${code} for all). The code works for 12 hours.`)).toBe(true);
+    expect(task).toMatchObject({ status: 'done', kind: 'scheduled', payload: { job: 'manager_review', hours: 24, requestedBy: 'demo-p-owner' } });
+
+    // Code Mode got the manager's skill, model and tools; the review writer got the digest.
+    expect(codeMode.calls).toHaveLength(1);
+    expect(codeMode.calls[0]).toMatchObject({ purpose: 'manager.digest', model: 'MOCK/manager/code', skill: skillOf('manager') });
+    expect(codeMode.calls[0]!.tools.map((t) => t.name)).toEqual(reads.manager);
+    expect(codeMode.calls[0]!.question).toContain('last 24 hours');
+    const written = model.of('manager.review');
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ model: 'MOCK/manager/review', json: true });
+    expect(written[0]!.system).toBe(`${skillOf('manager')}\n\n${REVIEW_RULES}`);
+    expect(REVIEW_RULES).not.toContain('Applied at once'); // no kind is applied without the owner's code, and the writer is not told otherwise
+    // The writer is also told what each assistant may read and which models are in use, so it can only name real ones.
+    expect(JSON.parse(written[0]!.user)).toMatchObject({
+      digest, lessonsAlreadyAdopted: expect.any(Array),
+      profiles: { readToolNames: expect.arrayContaining(['list_session_reports', 'get_online_metrics']), modelsInUse: expect.arrayContaining(['MOCK/online/code']), assistants: { online: { reads: reads.online }, finance: { reads: reads.finance } } },
+    });
+
+    // Stored: the review with its digest, the typed recommendations (all open), a report message, one adopt_change approval.
+    const stored = (await pool.query('select * from public.manager_reviews where task_id = $1', [task.id])).rows[0];
+    expect(stored).toMatchObject({ review_key: `review:${task.id}`, digest, model: 'MOCK/MOCK/manager/review' });
+    expect(stored.report_count).toBeGreaterThanOrEqual(1);
+    const recs = (await pool.query('select id, rank, assistant_id, kind, change, status, decided_by, applied_by, applied_version, detail from public.recommendations where review_id = $1 order by rank', [stored.id])).rows;
+    expect(recs).toEqual([
+      { id: recs[0].id, rank: 1, assistant_id: 'finance', kind: 'lesson', change: r.lesson, status: 'proposed', decided_by: null, applied_by: null, applied_version: null, detail: {} },
+      { id: recs[1].id, rank: 2, assistant_id: 'online', kind: 'reads', change: r.readsLine, status: 'proposed', decided_by: null, applied_by: null, applied_version: null, detail: { reads: { add: ['usage_summary'], remove: [] } } },
+    ]);
+    // Nothing has been written to a profile, or remembered as a lesson.
+    expect(profileTables.versionsOf('finance')).toHaveLength(financeBefore);
+    expect(profileTables.versionsOf('online')).toHaveLength(onlineBefore);
+    expect(deps.brain.memory('finance').lessons().map((m) => m.content)).not.toContain(r.lesson);
+    const message = (await pool.query('select id, from_assistant, to_assistant, kind, body from public.assistant_messages where id = $1', [stored.message_id])).rows[0];
+    expect(message).toMatchObject({ from_assistant: 'manager', to_assistant: 'owner', kind: 'report', body: { reviewId: stored.id } });
+    const approval = (await pool.query(`select action, status, extract(epoch from (expires_at - created_at))::int as ttl, approver_person_id from public.approvals where message_id = $1`, [message.id])).rows;
+    expect(approval).toEqual([{ action: 'adopt_change', status: 'pending', ttl: 12 * 3600, approver_person_id: 'demo-p-owner' }]);
+    const sent = (await pool.query(`select from_assistant, body from public.outbox where dedupe_key = $1`, [`review-sms:${stored.id}`])).rows;
+    expect(sent).toHaveLength(1);
+    expect(sent[0].from_assistant).toBe('owner'); // the manager has no number: the text comes from Owner HQ
+    expect(sent[0].body).not.toContain(code); // blanked once handled
+
+    // The reports of the manager task: steps, tokens, Code Mode usage. The manager applied nothing.
+    const reviewReport = await reportOf(task.id);
+    expect(reviewReport).toMatchObject({ assistant_id: 'manager', outcome: 'done', model_calls: 2, input_tokens: 800, output_tokens: 350 });
+    expect(reviewReport.steps.map((s: { step: string }) => s.step)).toEqual(['manager.digest', 'manager.review']);
+    expect(reviewReport.usage.codeMode).toMatchObject({ scripts: 1, toolCalls: 3 });
+    expect(reviewReport.suggestions).toEqual([]);
+
+    // ADOPT 1 2: the code works once; the lesson and the read tool are each a new version made by the owner.
+    const adoptSid = await textIn(ownerPhone, `ADOPT 1 2 ${code}`);
+    expect(lastTo(ownerPhone)).toBe("Adopted: 1 (finance), 2 (online). They're now in place.");
+    const after = (await pool.query('select rank, status, decided_by, applied_by, applied_version from public.recommendations where review_id = $1 order by rank', [stored.id])).rows;
+    const financeNow = profileTables.row('finance');
+    const onlineNow = profileTables.row('online');
+    expect(after).toEqual([
+      { rank: 1, status: 'adopted', decided_by: 'demo-p-owner', applied_by: 'owner', applied_version: financeNow.version },
+      { rank: 2, status: 'adopted', decided_by: 'demo-p-owner', applied_by: 'owner', applied_version: onlineNow.version },
+    ]);
+    expect(profileTables.versionsOf('finance')).toHaveLength(financeBefore + 1);
+    expect(profileTables.versionsOf('finance').at(-1)).toMatchObject({ madeBy: 'owner', change: { kind: 'lesson', recommendation: recs[0].id, review: stored.id, rank: 1 } });
+    expect(profileTables.lessons('finance').at(-1)).toMatchObject({ text: r.lesson, source: recs[0].id, by: 'owner' });
+    expect(onlineNow.reads).toEqual([...loadProfiles({}).online.reads, 'usage_summary']);
+    expect(profileTables.versionsOf('online')).toHaveLength(onlineBefore + 1);
+    expect(profileTables.versionsOf('online').at(-1)).toMatchObject({ madeBy: 'owner', change: { kind: 'reads', recommendation: recs[1].id, reads: { add: ['usage_summary'], remove: [] } } });
+    expect(deps.brain.memory('finance').lessons().map((m) => m.content)).toContain(r.lesson); // H-MEM, a cache of the database
+    expect(deps.brain.memory('manager').lessons().map((m) => m.content)).toContain(`For finance: ${r.lesson}`);
+    expect(deps.brain.memory('finance').recallDecisions('business question lookup')).toEqual([]); // a lesson is never a decision
+    expect(deps.brain.record.audit(2000).some((a) => a.summary.includes('-[adopted]->'))).toBe(true);
+    expect((await stepsOf((await taskOfText(adoptSid)).id)).map((s) => [s.step, s.outcome])).toEqual([['approval.adopt', 'ok']]);
+
+    // The same code again is refused (single use) and adopts nothing more.
+    const versionsBefore = profileTables.history.length;
+    await textIn(ownerPhone, `ADOPT 1 ${code}`);
+    expect(lastTo(ownerPhone)).toBe("That code didn't work or has expired. Nothing was adopted.");
+    expect(profileTables.history).toHaveLength(versionsBefore);
+
+    // The ADOPT task run again (a crash after the code was spent) resumes: same reply, no second version.
+    const smsBefore = sms.length;
+    expect((await handleTask(await taskOfText(adoptSid), deps)).status).toBe('done');
+    await runUntilIdle(deps);
+    expect(profileTables.history).toHaveLength(versionsBefore);
+    expect(sms.length).toBe(smsBefore);
+
+    // The next review tells the writer which changes are already in force.
+    model.script('manager.review', makeReview().json);
+    await textIn(ownerPhone, 'REVIEW');
+    const next = JSON.parse(model.of('manager.review').at(-1)!.user) as { lessonsAlreadyAdopted: { assistant: string; text: string }[] };
+    expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'finance', text: r.lesson });
+    expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'online', text: r.readsLine });
+  });
+
+  it('with the rule on: the manager applies the lesson itself, the owner is told, and ADOPT applies what still needs his code', async () => {
+    use.rule = true;
+    profileTables.row('online').reads = [...loadProfiles({}).online.reads]; // the test before adopted this read for online already
     const r = makeReview();
     const financeBefore = profileTables.versionsOf('finance').length;
     const onlineBefore = profileTables.versionsOf('online').length;
@@ -235,7 +346,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     const made = profileTables.versionsOf('finance').at(-1)!;
     expect(made).toMatchObject({ madeBy: 'manager', version: financeNow.version, change: { kind: 'lesson', recommendation: recs[0].id, review: stored.id, rank: 1 } });
     expect(made.reason).toMatch(/^The HQ Manager applied a lesson: /);
-    expect(profileTables.lessons('finance').at(-1)).toMatchObject({ text: r.lesson, source: recs[0].id });
+    expect(profileTables.lessons('finance').at(-1)).toMatchObject({ text: r.lesson, source: recs[0].id, by: 'manager' });
     expect(deps.brain.memory('finance').lessons().map((m) => m.content)).toContain(r.lesson); // H-MEM, a cache of the database
     expect(deps.brain.memory('manager').lessons().map((m) => m.content)).toContain(`For finance: ${r.lesson}`);
     const message = (await pool.query('select id, from_assistant, to_assistant, kind, body from public.assistant_messages where id = $1', [stored.message_id])).rows[0];
@@ -279,8 +390,8 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     // The ADOPT task run again (a crash after the code was spent) resumes: same reply, no second version.
     const versionsBefore = profileTables.history.length;
     const smsBefore = sms.length;
-    expect((await handleTask(await taskOfText(adoptSid), deps)).status).toBe('done');
-    await runUntilIdle(deps);
+    expect((await handleTask(await taskOfText(adoptSid), current())).status).toBe('done');
+    await runUntilIdle(current());
     expect(profileTables.history).toHaveLength(versionsBefore);
     expect(sms.length).toBe(smsBefore);
 
@@ -294,12 +405,12 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
 
   it('rejects a review whose number is not in the digest, twice, and tells the owner plainly', async () => {
     const { task } = await askForReview(badReview(), badReview());
-    expect(lastTo(ownerPhone)).toBe("The review didn't pass its number check, so I'm not sending it.");
+    expect(lastTo(ownerPhone)).toBe("The review didn't pass its checks, so I'm not sending it.");
     expect(smsTo(ownerPhone).filter((b) => b.includes('HQ Manager review'))).toEqual([]);
     expect(model.of('manager.review')).toHaveLength(2); // one correction round, then a plain failure
     expect(JSON.parse(model.of('manager.review')[1]!.user).previousAttemptRejectedBecause).toContain('summary: "8" is not a number in the data');
     expect(task).toMatchObject({ status: 'failed' });
-    expect(task.last_error).toContain('did not pass its number check');
+    expect(task.last_error).toContain('did not pass its checks');
     expect((await pool.query('select count(*)::int as n from public.manager_reviews where task_id = $1', [task.id])).rows[0].n).toBe(0);
     const steps = await stepsOf(task.id);
     expect(steps.map((s) => [s.step, s.outcome])).toEqual([['manager.digest', 'ok'], ['manager.review', 'refused']]);
@@ -312,7 +423,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
   it('rejects a review that makes up a small count just as it rejects a large one', async () => {
     const small = makeReview({ summary: 'Finance had 3 failures.' }).json; // the digest has no 3
     const { task } = await askForReview(small, small);
-    expect(lastTo(ownerPhone)).toBe("The review didn't pass its number check, so I'm not sending it.");
+    expect(lastTo(ownerPhone)).toBe("The review didn't pass its checks, so I'm not sending it.");
     expect(smsTo(ownerPhone).filter((b) => b.includes('HQ Manager review'))).toEqual([]);
     expect(JSON.parse(model.of('manager.review')[1]!.user).previousAttemptRejectedBecause).toContain('summary: "3" is not a number in the data');
     expect(task).toMatchObject({ status: 'failed' });
@@ -327,12 +438,13 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(report.suggestions).toEqual([{ kind: 'prompt', about: 'manager', text: 'The review writer needed a correction round. First objection: summary: "8" is not a number in the data' }]);
   });
 
-  it('refuses a review that repeats a lesson the manager already applied (or the owner adopted)', async () => {
+  it('refuses a review that repeats a lesson the owner already adopted', async () => {
     const first = makeReview();
-    await askForReview(first.json); // the manager applies rank 1 by itself
+    const { code } = await askForReview(first.json);
+    await textIn(ownerPhone, `ADOPT 1 ${code}`); // the owner adopts rank 1
     const repeat = makeReview({ recs: [{ rank: 1, assistant: 'finance', kind: 'lesson', change: first.lesson.toUpperCase(), why: 'Finance used 1500 tokens in.' }] }).json;
     await askForReview(repeat, repeat);
-    expect(lastTo(ownerPhone)).toBe("The review didn't pass its number check, so I'm not sending it.");
+    expect(lastTo(ownerPhone)).toBe("The review didn't pass its checks, so I'm not sending it.");
     expect(model.of('manager.review')).toHaveLength(3); // the first review, then the repeat and its correction round
     expect(JSON.parse(model.of('manager.review').at(-1)!.user).previousAttemptRejectedBecause).toContain('recommendation 1 repeats a lesson the owner already adopted');
   });
@@ -445,25 +557,26 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     await textIn(ownerPhone, `CONFIRM ${adopt}`);
     expect(lastTo(ownerPhone)).toBe('That code is for adopting a review recommendation: reply ADOPT <1-3> <code>. Nothing was recorded.');
 
-    await textIn(ownerPhone, `ADOPT 2 ${adopt}`); // neither code was spent
-    expect(lastTo(ownerPhone)).toBe("Adopted: 2 (online). They're now in place.");
+    await textIn(ownerPhone, `ADOPT 1 2 ${adopt}`); // neither code was spent
+    expect(lastTo(ownerPhone)).toBe("Adopted: 1 (finance), 2 (online). They're now in place.");
     await textIn(ownerPhone, `SEND 1 ${send}`);
     expect(lastTo(ownerPhone)).toContain('Sent plan 1');
 
-    // The lesson the manager applied (no code needed) reaches the plan writer as ownerLessons.
+    // The lesson the owner adopted reaches the plan writer as ownerLessons.
     await textIn(ownerPhone, 'Ask the finance assistant for three safer plans for next month.');
     const lastPlanCall = model.of('finance.plans').at(-1)!;
     expect(JSON.parse(lastPlanCall.user).ownerLessons).toContain(r.lesson);
   });
 
-  it('says which ranks were not adopted, and which the manager had already applied', async () => {
+  it('says which ranks were not adopted, and (with the rule on) which the manager had already applied', async () => {
     const { code } = await askForReview();
     await textIn(ownerPhone, `ADOPT 2,3 ${code}`);
     expect(lastTo(ownerPhone)).toBe("Adopted: 2 (online). Not adopted: 3 (not an open recommendation in this review). They're now in place.");
     const again = await askForReview();
     await textIn(ownerPhone, `ADOPT 3 ${again.code}`);
     expect(lastTo(ownerPhone)).toBe('Nothing was adopted. Not adopted: 3 (not an open recommendation in this review).');
-    // Rank 1 is a lesson the manager applied without a code: the owner's code does not need to, and does not, redo it.
+    // With the rule on, rank 1 is a lesson the manager applied without a code: the owner's code does not need to, and does not, redo it.
+    use.rule = true;
     const third = await askForReview();
     const versions = profileTables.history.length;
     await textIn(ownerPhone, `ADOPT 1 2 ${third.code}`);

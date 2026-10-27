@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AssistantId } from '@fahq/contracts';
-import { READ_TOOL_NAMES, doorSkill, loadProfiles, profileFromDoor, type DoorTool } from '../src/index.ts';
+import { MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, READ_TOOL_NAMES, doorSkill, loadProfiles, profileFromDoor, type DoorTool } from '../src/index.ts';
 
 // What an outside tool is given at a door: the stored profile (checked by the worker's rules) and a skill text
 // that names only the tools the door really offers. No database here: the door's answer is built by hand.
@@ -109,13 +109,25 @@ describe('doorSkill: the skill text a door serves', () => {
 
   it('adds the standing lessons as the worker does, leaving out one that names a tool the door lacks', () => {
     const lessons = [
-      { text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z' },
-      { text: 'Always start from `get_online_metrics`.', source: 'rec-2', adoptedAt: '2026-10-21T10:00:00Z' },
+      { text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z', by: 'owner' as const },
+      { text: 'Always start from `get_online_metrics`.', source: 'rec-2', adoptedAt: '2026-10-21T10:00:00Z', by: 'owner' as const },
     ];
     const text = doorSkill({ skill: files.finance.skill, lessons }, { tools: [tool('get_finance_metrics')], canReport: true, readNames: READ_TOOL_NAMES });
     expect(text).toContain('## Standing lessons');
     expect(text).toContain('- Say the period with every number.');
     expect(text).not.toContain('get_online_metrics');
+  });
+
+  it('shows a lesson the HQ Manager applied by itself under the manager\'s heading at a door too, never as the owner\'s word', () => {
+    const lessons = [
+      { text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z', by: 'owner' as const },
+      { text: 'Round to the nearest hundred.', source: 'rec-2', adoptedAt: '2026-10-21T10:00:00Z', by: 'manager' as const },
+    ];
+    const text = doorSkill({ skill: files.finance.skill, lessons }, { tools: [tool('get_finance_metrics')], canReport: true, readNames: READ_TOOL_NAMES });
+    expect(text).toContain(`${OWNER_LESSONS_HEADING}\n- Say the period with every number.`);
+    expect(text).toContain(`${MANAGER_LESSONS_HEADING}\n- Round to the nearest hundred.`);
+    expect(text.indexOf('Round to the nearest hundred.')).toBeGreaterThan(text.indexOf(MANAGER_LESSONS_HEADING));
+    expect(text.slice(text.indexOf(OWNER_LESSONS_HEADING), text.indexOf(MANAGER_LESSONS_HEADING))).not.toContain('Round to the nearest hundred.');
   });
 
   it('does not change the profile it is given', () => {
@@ -127,7 +139,7 @@ describe('doorSkill: the skill text a door serves', () => {
 
 describe('profileFromDoor: the stored profile a door serves', () => {
   it('turns the answer into the assistant\'s profile, keeping what the files fix', () => {
-    const lessons = [{ text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z' }];
+    const lessons = [{ text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z', by: 'owner' }];
     const p = profileFromDoor(doorAnswer('finance', { title: 'Finance Desk', version: 7, reads: ['recall_my_decisions'], lessons }));
     expect(p).toMatchObject({ id: 'finance', title: 'Finance Desk', version: 7, source: 'database', reads: ['recall_my_decisions'], memory: 'finance', serves: 'finance_owner', lessons });
     expect(p.writes).toEqual(files.finance.writes);

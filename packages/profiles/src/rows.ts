@@ -10,6 +10,11 @@ export const ProfileLesson = z.object({
   /** What the lesson came from, e.g. a recommendation id. */
   source: z.string().min(1).max(100),
   adoptedAt: Timestamp,
+  /**
+   * Who put it in the profile: the owner (with his one-time code) or the HQ Manager (by itself). A lesson with no
+   * record of that reads as the manager's, the less trusted of the two, and is shown to a model as such (source.ts).
+   */
+  by: z.enum(['manager', 'owner']).default('manager'),
 });
 export type ProfileLesson = z.infer<typeof ProfileLesson>;
 

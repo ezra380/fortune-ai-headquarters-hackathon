@@ -61,27 +61,64 @@ export class AssistantMemory {
     });
   }
 
-  /** A standing lesson the owner adopted. One memory per recommendation (a retried task finds it again). */
-  rememberLesson(input: { recommendationId: string; text: string; adoptedBy: string; reviewId: string; runId: string }): MemoryRecordLike {
+  /**
+   * A standing lesson. One memory per recommendation (a retried task finds it again). `fromProfile` says the lesson
+   * lives in the assistant's stored profile: this memory is then only a copy of it, and retireProfileLessons takes
+   * it back when the profile no longer holds the lesson. A lesson without the flag is never taken back.
+   */
+  rememberLesson(input: { recommendationId: string; text: string; adoptedBy: string; reviewId: string; runId: string; fromProfile?: boolean }): MemoryRecordLike {
     const tag = `recommendation:${input.recommendationId}`;
-    const existing = this.hmem.store.all().find((m) => m.tags.includes('lesson') && m.tags.includes(tag));
+    // A lesson that was taken back is not found: remembering it again (the profile has it once more) makes a new memory.
+    const taken = this.takenBackLessons();
+    const existing = this.hmem.store.all().find((m) => m.tags.includes('lesson') && m.tags.includes(tag) && !m.supersededBy && !taken.has(m.id));
     if (existing) return existing;
     return this.hmem.add({
       content: input.text.slice(0, 2000),
       type: 'general',
       layer: 'long_term',
       confidence: 0.9,
-      tags: ['lesson', 'adopted', tag],
+      tags: ['lesson', 'adopted', tag, ...(input.fromProfile ? [PROFILE_LESSON] : [])],
       source: `fahq/${this.assistant}/lesson/${input.runId}`,
       provenance: { origin: 'manual', learnedAt: this.now(), label: `Adopted by ${input.adoptedBy}`, refs: [input.recommendationId, input.reviewId] },
     });
   }
 
-  /** Adopted lessons that nothing superseded, newest first. */
+  /** The ids of the lesson memories a "lesson taken back" note replaces. (H-MEM links a replacement; it does not mark the old record.) */
+  private takenBackLessons(): Set<string> {
+    return new Set(this.hmem.store.all().filter((m) => m.tags.includes(LESSON_TAKEN_BACK) && m.supersedes).map((m) => m.supersedes!));
+  }
+
+  /**
+   * Takes back the copies of profile lessons whose recommendation is not in `keep` any more (a version was put back, or
+   * the profile let the oldest lesson go). Each is replaced by a note that says so, so lessons() and everything that
+   * reads it stop showing it; the lesson stays in the memory's history. Returns how many it took back.
+   */
+  retireProfileLessons(keep: ReadonlySet<string>, input: { reason: string; runId: string }): number {
+    const taken = this.takenBackLessons();
+    const gone = this.hmem.store.all().filter((m) => m.tags.includes('lesson') && m.tags.includes(PROFILE_LESSON) && !m.supersededBy && !taken.has(m.id))
+      .map((m) => ({ memory: m, recommendation: m.tags.find((t) => t.startsWith('recommendation:')) ?? '' }))
+      .filter((l) => l.recommendation !== '' && !keep.has(l.recommendation.slice('recommendation:'.length)));
+    for (const { memory, recommendation } of gone) {
+      this.hmem.add({
+        content: `Lesson taken back: ${memory.content}`.slice(0, 2000),
+        type: 'general',
+        layer: 'long_term',
+        confidence: 0.9,
+        tags: [LESSON_TAKEN_BACK, recommendation],
+        source: `fahq/${this.assistant}/lesson-retired/${input.runId}`,
+        provenance: { origin: 'manual', learnedAt: this.now(), label: input.reason, refs: [memory.id] },
+        supersedes: memory.id,
+      });
+    }
+    return gone.length;
+  }
+
+  /** Adopted lessons that nothing superseded and that were not taken back, newest first. */
   lessons(limit = 10): MemoryRecordLike[] {
+    const taken = this.takenBackLessons();
     return this.hmem.store
       .all()
-      .filter((m) => m.tags.includes('lesson') && m.tags.includes('adopted') && !m.supersededBy)
+      .filter((m) => m.tags.includes('lesson') && m.tags.includes('adopted') && !m.supersededBy && !taken.has(m.id))
       .reverse() // insertion order is oldest first; the sort below is stable, so ties keep newest first
       .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
       .slice(0, limit);
@@ -131,6 +168,11 @@ export class AssistantMemory {
       });
   }
 }
+
+/** Tags a lesson memory that is a copy of a lesson in a stored profile. */
+const PROFILE_LESSON = 'profile';
+/** Tags the note that replaces a lesson memory the stored profile no longer holds. */
+const LESSON_TAKEN_BACK = 'lesson-retired';
 
 const BOILERPLATE = new Set([
   'the', 'and', 'for', 'with', 'to', 'of', 'on', 'in', 'by', 'at', 'our', 'your', 'a', 'an', 'plan', 'plans',

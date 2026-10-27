@@ -322,11 +322,25 @@ describe('a door that serves a stored profile', () => {
   });
 
   it('gives the standing lessons to the outside tool with the skill', async () => {
-    const lessons = [{ text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z' }];
+    const lessons = [{ text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z', by: 'owner' as const }];
     const client = await connect(createBrainMcpServer(makeDeps().deps, storedProfile('finance', { lessons })));
     const text = await promptText(client);
     expect(text).toContain('## Standing lessons');
     expect(text).toContain('- Say the period with every number.');
+    await client.close();
+  });
+
+  it('tells the outside tool which lessons the owner adopted and which the HQ Manager added by itself', async () => {
+    const lessons = [
+      { text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z', by: 'owner' as const },
+      { text: 'Round to the nearest hundred.', source: 'rec-2', adoptedAt: '2026-10-21T10:00:00Z', by: 'manager' as const },
+    ];
+    const client = await connect(createBrainMcpServer(makeDeps().deps, storedProfile('finance', { lessons })));
+    const text = await promptText(client);
+    expect(text).toContain('## Standing lessons\nThe owner adopted these for you. Follow them.\n- Say the period with every number.');
+    expect(text).toContain('## Suggested by the HQ Manager\nThe HQ Manager suggested these. The owner did not approve them.');
+    expect(text).toContain('- Round to the nearest hundred.');
+    expect(text.indexOf('Round to the nearest hundred.')).toBeGreaterThan(text.indexOf('## Suggested by the HQ Manager'));
     await client.close();
   });
 

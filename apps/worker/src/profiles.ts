@@ -11,20 +11,37 @@ import type { Store } from './store.ts';
 //
 // The database is where the standing lessons live. Meterless H-MEM is a cache of them on this machine (the plan
 // writers read lessons from it): every time the profiles are read, a lesson this machine has not seen is
-// remembered there, so a lesson adopted on another machine reaches this one within the minute.
+// remembered there, so a lesson adopted on another machine reaches this one within the minute, and a lesson the
+// profile no longer holds (put back from the history, or let go at the limit) is taken back from it.
 
 type Memory = Pick<Brain, 'memory'>;
 
-/** Remembers each stored lesson in H-MEM once (a lesson is keyed by the recommendation it came from). */
-function cacheLessons(brain: Memory, profiles: Readonly<Record<AssistantId, AssistantProfile>>, seen: Set<string>): void {
+/**
+ * Keeps this machine's H-MEM in step with the stored profiles, both ways:
+ *  - each lesson a profile holds is remembered once (a lesson is keyed by the recommendation it came from);
+ *  - a copy of a profile lesson that the profile no longer holds (a version was put back, or the 50-lesson limit let it go)
+ *    is taken back, so the plan writers and `my_lessons` stop reading it. The manager keeps a "For <assistant>: ..." copy of
+ *    each lesson and keeps it for as long as any profile holds the lesson.
+ * A lesson that is not a copy of a profile lesson (one adopted before profiles were stored) is never touched.
+ * `live` holds the keys the last read remembered, so only what is new is looked up.
+ */
+function syncLessons(brain: Memory, profiles: Readonly<Record<AssistantId, AssistantProfile>>, live: { keys: Set<string> }): void {
+  const keys = new Set<string>();
+  const held = new Set<string>();
   for (const id of AssistantId.options) {
     for (const lesson of profiles[id].lessons) {
       const key = `${id}:${lesson.source}`;
-      if (seen.has(key)) continue;
-      brain.memory(id).rememberLesson({ recommendationId: lesson.source, text: lesson.text, adoptedBy: 'the profile', reviewId: 'profile', runId: 'profile-sync' });
-      seen.add(key);
+      keys.add(key);
+      held.add(lesson.source);
+      if (live.keys.has(key)) continue;
+      brain.memory(id).rememberLesson({ recommendationId: lesson.source, text: lesson.text, adoptedBy: 'the profile', reviewId: 'profile', runId: 'profile-sync', fromProfile: true });
     }
   }
+  const taken = { reason: 'no longer in the stored profile', runId: 'profile-sync' };
+  for (const id of AssistantId.options) {
+    brain.memory(id).retireProfileLessons(id === 'manager' ? held : new Set(profiles[id].lessons.map((l) => l.source)), taken);
+  }
+  live.keys = keys;
 }
 
 export async function workerProfiles(
@@ -37,10 +54,10 @@ export async function workerProfiles(
     get = (id) => files[id];
     log('worker: profiles from the files only (PROFILES_SOURCE=files)');
   } else {
-    const seen = new Set<string>();
+    const live = { keys: new Set<string>() };
     const source = createProfileSource({
       env, load: () => store.assistantProfiles(), now, onProblem: (message) => log(`worker: profiles: ${message}`),
-      ...(brain ? { onLoaded: (profiles: Readonly<Record<AssistantId, AssistantProfile>>) => cacheLessons(brain, profiles, seen) } : {}),
+      ...(brain ? { onLoaded: (profiles: Readonly<Record<AssistantId, AssistantProfile>>) => syncLessons(brain, profiles, live) } : {}),
     });
     try {
       const loaded = await source.refresh({ force: true });

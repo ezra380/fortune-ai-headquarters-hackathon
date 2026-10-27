@@ -74,9 +74,10 @@ describe('the review the manager writes', () => {
 });
 
 describe('who applies a change', () => {
-  it('says so for every kind: lessons and skill notes the manager, data access and the model the owner', () => {
+  it('says so for every kind, and today no kind is applied without the one-time code of the owner', () => {
     expect(Object.keys(MANAGER_APPLIES).sort()).toEqual([...ChangeKind.options].sort());
-    expect(MANAGER_APPLIES).toEqual({ lesson: true, skill_note: true, reads: false, model: false });
+    // Turning one on is Ezra's decision, in writing (docs/manager.md, "Who decides what changes"): this test is the tripwire.
+    expect(MANAGER_APPLIES).toEqual({ lesson: false, skill_note: false, reads: false, model: false });
   });
 });
 

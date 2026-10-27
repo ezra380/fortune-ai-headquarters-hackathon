@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantId } from '@fahq/contracts';
-import { READ_TOOL_NAMES, createProfileSource, loadProfiles, parseProfileRows, skillWithLessons } from '../src/index.ts';
+import { MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, READ_TOOL_NAMES, createProfileSource, loadProfiles, parseProfileRows, skillWithLessons } from '../src/index.ts';
 
 // The profile source with a scripted "database": rows go in as the database returns them, and the clock is ours.
 
 const files = loadProfiles({});
-const lesson = { text: 'Say which business a number is about.', source: 'rec-1', adoptedAt: '2026-10-27T09:00:00Z' };
+const lesson = { text: 'Say which business a number is about.', source: 'rec-1', adoptedAt: '2026-10-27T09:00:00Z', by: 'owner' as const };
 
 function rowFor(id: AssistantId, over: Record<string, unknown> = {}) {
   const f = files[id];
@@ -54,6 +54,14 @@ describe('the profile source', () => {
 
     expect(source.profile('owner')).toEqual(files.owner);
     expect(source.profile('owner')).toMatchObject({ source: 'files', version: null, lessons: [] });
+  });
+
+  it('reads a stored lesson with no record of who applied it as the manager\'s, the less trusted of the two', async () => {
+    const { by: _by, ...bare } = lesson;
+    const { source } = setup([rowFor('finance', { lessons: [bare, { ...bare, source: 'rec-2', by: 'owner' }] })]);
+    await source.refresh();
+    expect(source.profile('finance').lessons.map((l) => [l.source, l.by])).toEqual([['rec-1', 'manager'], ['rec-2', 'owner']]);
+    expect(parseProfileRows([rowFor('finance', { lessons: [{ ...bare, by: 'someone' }] })], READ_TOOL_NAMES).problems[0]).toContain('is not valid (lessons.0.by');
   });
 
   it('keeps the settings the database does not hold, and ignores a job the assistant does not have', async () => {
@@ -115,6 +123,51 @@ describe('the profile source', () => {
     expect(state.loads).toBe(2);
     await source.refresh({ force: true });
     expect(state.loads).toBe(3);
+  });
+
+  it('a forced read waits for a read already under way and reads again, so a change just written is never missed', async () => {
+    // A read that began before the change was saved holds the old rows. The caller that forces a read has just saved
+    // something and must get it back, not the answer of the read that was already running.
+    const gates: (() => void)[] = [];
+    let rows: unknown[] = [rowFor('finance', { title: 'Before' })];
+    let loads = 0;
+    const source = createProfileSource({
+      env: {}, now: () => new Date('2026-10-27T12:00:00Z'), onProblem: () => undefined,
+      load: () => { loads += 1; const held = rows; return new Promise<unknown[]>((resolve) => gates.push(() => resolve(held))); },
+    });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const background = source.refresh();
+    rows = [rowFor('finance', { title: 'After', version: 4 })];
+    const forced = source.refresh({ force: true });
+    const alsoForced = source.refresh({ force: true });
+    expect(loads).toBe(1);
+    gates[0]!(); // the read that was under way finishes, with the old rows
+    await background;
+    expect(source.profile('finance').title).toBe('Before');
+    await settle();
+    expect(loads).toBe(2); // one more read, shared by both forced callers
+    gates[1]!();
+    await Promise.all([forced, alsoForced]);
+    expect(source.profile('finance')).toMatchObject({ title: 'After', version: 4 });
+    expect(loads).toBe(2);
+  });
+
+  it('a forced read still reads again when the read under way fails', async () => {
+    const attempts: ((rows: unknown[] | Error) => void)[] = [];
+    const source = createProfileSource({
+      env: {}, now: () => new Date('2026-10-27T12:00:00Z'), onProblem: () => undefined,
+      load: () => new Promise<unknown[]>((resolve, reject) => attempts.push((r) => (r instanceof Error ? reject(r) : resolve(r)))),
+    });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const background = source.refresh();
+    const failing = expect(background).rejects.toThrow('could not be read (down)');
+    const forced = source.refresh({ force: true });
+    attempts[0]!(new Error('down'));
+    await failing;
+    await settle();
+    attempts[1]!([rowFor('finance', { title: 'Back' })]);
+    await forced;
+    expect(source.profile('finance').title).toBe('Back');
   });
 
   it('serves the last profile at once when the cache is old, and a change reaches it within the minute', async () => {
@@ -218,14 +271,54 @@ describe('skillWithLessons', () => {
     expect(skillWithLessons(files.finance)).toBe(files.finance.skill);
   });
 
+  const entry = (n: number, by: 'owner' | 'manager') => ({ text: `Lesson ${String.fromCharCode(97 + n)} by the ${by}`, source: `rec-${n}`, adoptedAt: '2026-10-27T09:00:00Z', by });
+
   it('adds the newest ten lessons after the skill', () => {
-    const many = Array.from({ length: 12 }, (_, i) => ({ text: `Lesson ${String.fromCharCode(97 + i)}`, source: `rec-${i}`, adoptedAt: '2026-10-27T09:00:00Z' }));
+    const many = Array.from({ length: 12 }, (_, i) => entry(i, 'owner'));
     const text = skillWithLessons({ skill: files.finance.skill, lessons: many });
     expect(text.startsWith(files.finance.skill)).toBe(true);
     expect(text).toContain('## Standing lessons');
     expect(text).not.toContain('Lesson a');
     expect(text).not.toContain('Lesson b');
     expect(text).toContain('- Lesson c');
-    expect(text.endsWith('- Lesson l')).toBe(true);
+    expect(text.endsWith('- Lesson l by the owner')).toBe(true);
+  });
+
+  it('shows what the owner adopted as his word: he adopted it, follow it', () => {
+    const text = skillWithLessons({ skill: files.finance.skill, lessons: [entry(0, 'owner')] });
+    expect(text).toBe(`${files.finance.skill}\n\n${OWNER_LESSONS_HEADING}\n- Lesson a by the owner`);
+    expect(OWNER_LESSONS_HEADING).toBe('## Standing lessons\nThe owner adopted these for you. Follow them.');
+    expect(text).not.toContain(MANAGER_LESSONS_HEADING);
+  });
+
+  it('shows what the HQ Manager applied by itself under its own heading, as a suggestion that ranks below the skill and the owner', () => {
+    const text = skillWithLessons({ skill: files.finance.skill, lessons: [entry(0, 'manager')] });
+    expect(text).toBe(`${files.finance.skill}\n\n${MANAGER_LESSONS_HEADING}\n- Lesson a by the manager`);
+    expect(MANAGER_LESSONS_HEADING).toContain('The owner did not approve them');
+    expect(MANAGER_LESSONS_HEADING).toContain("Your skill and the owner's instructions come first.");
+    // Nothing the manager applied is said to be the owner's word.
+    expect(text).not.toContain('The owner adopted these for you');
+    expect(text).not.toContain('## Standing lessons');
+  });
+
+  it('keeps the two kinds apart when they are mixed, the owner\'s first, and counts the newest ten across both', () => {
+    const mixed = [entry(0, 'owner'), entry(1, 'manager'), entry(2, 'owner'), entry(3, 'manager'), ...Array.from({ length: 8 }, (_, i) => entry(4 + i, i % 2 === 0 ? 'owner' : 'manager'))];
+    const text = skillWithLessons({ skill: files.finance.skill, lessons: mixed });
+    const ownerAt = text.indexOf(OWNER_LESSONS_HEADING);
+    const managerAt = text.indexOf(MANAGER_LESSONS_HEADING);
+    expect(ownerAt).toBeGreaterThan(0);
+    expect(managerAt).toBeGreaterThan(ownerAt);
+    expect(text.slice(ownerAt, managerAt)).not.toContain('by the manager');
+    expect(text.slice(managerAt)).not.toContain('by the owner');
+    expect(text).not.toContain('Lesson a '); // 12 lessons: the two oldest are not shown, whoever applied them
+    expect(text).not.toContain('Lesson b ');
+    expect((text.match(/^- Lesson /gm) ?? []).length).toBe(10);
+  });
+
+  it('counts a lesson with no record of who applied it as the manager\'s', () => {
+    const { by: _by, ...bare } = entry(0, 'owner');
+    const text = skillWithLessons({ skill: files.finance.skill, lessons: [bare as never] });
+    expect(text).toContain(MANAGER_LESSONS_HEADING);
+    expect(text).not.toContain(OWNER_LESSONS_HEADING);
   });
 });

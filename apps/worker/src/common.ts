@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import type { AssistantId, CodeModeRunner, DataPort, DeliveryPort, ModelPort, ReadTool } from '@fahq/contracts';
+import type { AssistantId, ChangeKind, CodeModeRunner, DataPort, DeliveryPort, ModelPort, ReadTool } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { createReadTools, pick } from './read-tools.ts';
 import type { PersonRow, Store, TaskRow } from './store.ts';
@@ -25,6 +25,12 @@ export type WorkerDeps = {
     /** Reads the stored profiles again now (a change was just written), so the next prompt carries it. Absent on the files. */
     refresh?(): Promise<void>;
   };
+  /**
+   * Which kinds of change the HQ Manager may apply by itself. Absent = MANAGER_APPLIES in @fahq/contracts, which is
+   * all false: every change waits for the owner's one-time code. Nothing in production sets this; the tests do, to
+   * prove the mechanism that stays dormant until Ezra approves it.
+   */
+  managerApplies?: Readonly<Record<ChangeKind, boolean>>;
   now: () => Date;
   /** Names the claim loop that holds a task (runConcurrently adds `#<n>` for each loop). */
   worker: string;

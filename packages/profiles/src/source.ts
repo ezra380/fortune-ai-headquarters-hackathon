@@ -64,6 +64,7 @@ export function buildProfileSource(options: ProfileSourceOptions): ProfileSource
   let checkedAt: Date | null = null;
   let lastError: string | null = null;
   let inFlight: Promise<ProfileSnapshot> | null = null;
+  let followUp: Promise<ProfileSnapshot> | null = null;
   let announced = new Set<string>();
 
   const isFresh = () => checkedAt !== null && options.now().getTime() - checkedAt.getTime() < ttlMs;
@@ -105,10 +106,21 @@ export function buildProfileSource(options: ProfileSourceOptions): ProfileSource
     return snapshot;
   }
 
+  const start = (): Promise<ProfileSnapshot> => {
+    const started: Promise<ProfileSnapshot> = read().finally(() => { if (inFlight === started) inFlight = null; });
+    inFlight = started;
+    return started;
+  };
+
   function refresh(opts: { force?: boolean } = {}): Promise<ProfileSnapshot> {
     if (!opts.force && isFresh()) return Promise.resolve(snapshot);
-    inFlight ??= read().finally(() => { inFlight = null; });
-    return inFlight;
+    if (!inFlight) return start();
+    if (!opts.force) return inFlight;
+    // A forced read means "a change was just written". A read already under way may have begun before that write and
+    // would hand back the old rows, so a forced call waits for it and then reads once more. Callers that arrive while
+    // that second read is still waiting share it.
+    followUp ??= inFlight.then(() => undefined, () => undefined).then(() => { followUp = null; return start(); });
+    return followUp;
   }
 
   return {
@@ -121,12 +133,23 @@ export function buildProfileSource(options: ProfileSourceOptions): ProfileSource
   };
 }
 
+/** What a model is told about the lessons the owner adopted with his code. */
+export const OWNER_LESSONS_HEADING = '## Standing lessons\nThe owner adopted these for you. Follow them.';
+/** What a model is told about the lessons the HQ Manager added by itself: not the owner's word, and below his rules. */
+export const MANAGER_LESSONS_HEADING = '## Suggested by the HQ Manager\nThe HQ Manager suggested these. The owner did not approve them. Your skill and the owner\'s instructions come first.';
+
 /**
- * The skill text a model is given: the profile's skill, then its standing lessons when it has any (the
- * newest ten). Lessons are adopted by a person's code, so they are as trusted as the skill itself.
+ * The skill text a model is given: the profile's skill, then its standing lessons when it has any (the newest ten
+ * in all). A lesson the owner adopted with his code is shown as his; a lesson the HQ Manager applied by itself is
+ * shown under its own heading, as a suggestion that ranks below the skill (a lesson with no record of who applied
+ * it counts as the manager's). Nothing a model wrote is shown with the owner's authority.
  */
 export function skillWithLessons(profile: Pick<AssistantProfile, 'skill' | 'lessons'>): string {
   if (profile.lessons.length === 0) return profile.skill;
-  const shown = profile.lessons.slice(-MAX_LESSONS_IN_SKILL).map((l) => `- ${l.text}`);
-  return `${profile.skill}\n\n## Standing lessons\nThe owner adopted these for you. Follow them.\n${shown.join('\n')}`;
+  const shown = profile.lessons.slice(-MAX_LESSONS_IN_SKILL);
+  const section = (heading: string, by: 'owner' | 'manager') => {
+    const lines = shown.filter((l) => (l.by ?? 'manager') === by).map((l) => `- ${l.text}`);
+    return lines.length > 0 ? [`${heading}\n${lines.join('\n')}`] : [];
+  };
+  return [profile.skill, ...section(OWNER_LESSONS_HEADING, 'owner'), ...section(MANAGER_LESSONS_HEADING, 'manager')].join('\n\n');
 }

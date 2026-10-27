@@ -63,6 +63,8 @@ export interface MemoryRecordLike {
   confidence: number;
   source: string;
   supersededBy?: string;
+  /** The memory this one replaces, as it was given when it was added (H-MEM only links it; it does not mark the old one). */
+  supersedes?: string;
   /** When the memory was written (milliseconds); H-MEM sets it. */
   timestamp?: number;
 }

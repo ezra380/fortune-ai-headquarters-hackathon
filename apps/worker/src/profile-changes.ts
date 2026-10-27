@@ -3,10 +3,11 @@ import { KIND_LABEL, ProfileRow, READ_TOOL_NAMES, applyProfileChange, changeOf, 
 import type { WorkerDeps } from './common.ts';
 import type { PersonRow, RecommendationRow } from './store.ts';
 
-// Putting one recommendation into force in the assistant's stored profile. The HQ Manager applies lessons and
-// skill notes by itself; the owner's code applies a change to the read tools or the model (the caller decides
-// who, by kind: MANAGER_APPLIES). Either way the change is a new profile version (save_assistant_profile) and the
-// recommendation is marked in force, and a retried task finds out what an earlier run already did:
+// Putting one recommendation into force in the assistant's stored profile. Today the owner's code applies every kind
+// (ADOPT). The HQ Manager can apply a kind by itself only where MANAGER_APPLIES says so, which is nowhere until Ezra
+// approves it; the caller decides who applies, by kind. Either way the change is a new profile version
+// (save_assistant_profile) that records who made it, and the recommendation is marked in force. A retried task finds
+// out what an earlier run already did:
 //  - the version a recommendation made is looked up in the history before anything is written;
 //  - a write is guarded by the version the profile was read at, so a second writer is told and reads again.
 
@@ -79,7 +80,7 @@ export function objectionToChange(deps: Pick<WorkerDeps, 'profiles'>, rec: Typed
   const change = changeFor({ kind: rec.kind, change: rec.change, detail: { ...(rec.reads ? { reads: rec.reads } : {}), ...(rec.model ? { model: rec.model } : {}) } });
   if (typeof change === 'string') return change;
   const result = applyProfileChange(currentContent(deps, rec.assistant), change, {
-    readNames: READ_TOOL_NAMES, knownModels: modelsInUse(deps), source: 'review-check', now,
+    readNames: READ_TOOL_NAMES, knownModels: modelsInUse(deps), source: 'review-check', by: 'owner', now,
   });
   if (!result.ok) return result.reason;
   return result.changed ? null : 'the assistant already has this';
@@ -122,7 +123,7 @@ export async function applyRecommendation(deps: WorkerDeps, rec: RecommendationR
     }
 
     const now = deps.now();
-    const result = applyProfileChange(row.data, change, { readNames: READ_TOOL_NAMES, knownModels: modelsInUse(deps), source: rec.id, now });
+    const result = applyProfileChange(row.data, change, { readNames: READ_TOOL_NAMES, knownModels: modelsInUse(deps), source: rec.id, by: actor.by, now });
     if (!result.ok) return refuse(result.reason);
     if (!result.changed) {
       await deps.store.putInForce(rec.id, { by: actor.by, personId: person, version: null, now });

@@ -47,10 +47,25 @@ describe('the door client sends', () => {
     expect(await client(again.fetchFn).fileReport(report)).toEqual({ id: ID, duplicate: true });
   });
 
-  it('works with the local stack\'s plain http address', async () => {
-    const { fetchFn, calls } = fakeFetch(() => json({}));
-    await client(fetchFn, { url: 'http://127.0.0.1:54321' }).profile();
-    expect(calls[0]!.url).toBe('http://127.0.0.1:54321/rest/v1/rpc/door_profile');
+  it('works with the local stack\'s plain http address, on this machine only', async () => {
+    for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+      const { fetchFn, calls } = fakeFetch(() => json({}));
+      await client(fetchFn, { url: `http://${host}:54321` }).profile();
+      expect(calls[0]!.url, host).toBe(`http://${host}:54321/rest/v1/rpc/door_profile`);
+    }
+  });
+
+  it('never sends the token over plain http to another machine', () => {
+    const never = fakeFetch(() => json({}));
+    for (const url of [
+      'http://abc.supabase.co', 'http://203.0.113.7:54321', 'http://db.internal', 'http://localhost.evil.example', 'http://127.0.0.1.evil.example',
+      'http://user@evil.example', 'http://[2001:db8::1]:54321', 'http://0.0.0.0:54321',
+    ]) {
+      expect(() => client(never.fetchFn, { url }), url).toThrow(/http:\/\/ is allowed only for localhost, 127\.0\.0\.1 and \[::1\]/);
+    }
+    expect(() => client(never.fetchFn, { url: 'https://abc.supabase.co' })).not.toThrow();
+    expect(() => client(never.fetchFn, { url: 'https://localhost:54321' })).not.toThrow();
+    expect(never.calls).toHaveLength(0);
   });
 });
 

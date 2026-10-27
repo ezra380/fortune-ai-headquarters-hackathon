@@ -55,7 +55,11 @@ export function createDoorClient(config: DoorClientConfig): DoorClient {
   } catch {
     throw new DoorError('SUPABASE_URL is not a web address.');
   }
-  if (base.protocol !== 'https:' && base.protocol !== 'http:') throw new DoorError('SUPABASE_URL must start with https:// (or http:// for the local stack).');
+  // The token travels in the request body: unencrypted only to this machine (the local stack), never to another host.
+  const onThisMachine = base.hostname === 'localhost' || base.hostname === '127.0.0.1' || base.hostname === '[::1]';
+  if (base.protocol !== 'https:' && !(base.protocol === 'http:' && onThisMachine)) {
+    throw new DoorError('SUPABASE_URL must start with https:// (http:// is allowed only for localhost, 127.0.0.1 and [::1], the local stack).');
+  }
   if (!config.anonKey.trim()) throw new DoorError('SUPABASE_ANON_KEY is empty.');
   if (isServiceKey(config.anonKey)) throw new DoorError('SUPABASE_ANON_KEY is a service key. A door uses the public anon key only.');
   if (!DOOR_TOKEN_SHAPE.test(config.token)) throw new DoorError('The door token is not in the shape the database accepts (32 to 128 letters, digits, - or _).');

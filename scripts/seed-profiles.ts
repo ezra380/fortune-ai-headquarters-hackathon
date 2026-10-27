@@ -2,7 +2,8 @@
 // public.assistant_profiles, one version row made by "seed" for each profile it writes. Run it as often as you like.
 //   npx tsx scripts/seed-profiles.ts             stores the profiles that have no row yet; every other row is left as it is
 //   npx tsx scripts/seed-profiles.ts --force     replaces title, skill, reads and models with the files' as a new version
-//                                                (lessons a person adopted are kept)
+//                                                (lessons a person adopted, the manager's notes, and the read tools and
+//                                                models the owner approved with his code are kept; it says which)
 //   --db <url>   the Postgres to write to. Default: SUPABASE_DB_URL, else the local stack (127.0.0.1:54322).
 // The database is never taken from .env.local, so a cloud address in there cannot be written to by accident.
 import fs from 'node:fs';
@@ -29,7 +30,9 @@ try {
   const results = await seedProfiles(client, process.env, { force });
   await client.query('commit');
   for (const r of results) {
-    const note = r.action === 'kept' && r.differsFromFiles ? '; differs from the files (--force puts the files back)' : '';
+    const note = r.action === 'kept' && r.differsFromFiles
+      ? '; differs from the files (--force puts the files back)'
+      : r.keptFromOwner ? `; kept what the owner approved: ${r.keptFromOwner.join(', ')}` : '';
     console.log(`${r.assistant.padEnd(8)} ${r.action} (version ${r.version})${note}`);
   }
 } catch (error) {

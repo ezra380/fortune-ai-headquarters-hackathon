@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { AssistantId } from '@fahq/contracts';
+import { AssistantId, maskPhonesAndCodes } from '@fahq/contracts';
+import { REDACT_SAMPLES } from '../../packages/contracts/test/redact-samples.ts';
 import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, loadProfiles, managerNotes, newDoorToken, parseProfileRows, restoreProfileVersion, seedProfiles, tokenHash, withManagerNotes } from '@fahq/profiles';
 
 // Profiles in the database, the two doors an outside tool may call, and what the public (anon) role can reach.
@@ -18,7 +19,11 @@ import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, lo
 
 const url = process.env.SUPABASE_DB_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 const isLocal = /@(127\.0\.0\.1|localhost|\[::1\]):/.test(url);
-const MIGRATION = path.resolve(import.meta.dirname, '../migrations/20261027100000_profiles.sql');
+// The migrations that make the profile tables and doors, in order (the second one replaces two helper functions).
+const MIGRATIONS = ['20261027100000_profiles.sql', '20261027100200_profiles_review.sql'].map((name) => path.resolve(import.meta.dirname, '../migrations', name));
+const runMigrations = async (db: pg.Pool) => {
+  for (const file of MIGRATIONS) await db.query(fs.readFileSync(file, 'utf8'));
+};
 
 const pool = new pg.Pool({ connectionString: url, max: 6 });
 let ready = false;
@@ -177,8 +182,8 @@ describe('door_file_report (called with the public anon key, through the Data AP
     if (!ready || !keys) skip();
     const token = await newToken('salon');
     const reply = await file(token, base({
-      steps: [{ step: 'read_metrics', outcome: 'ok', detail: 'salon revenue for September' }],
-      suggestions: [{ kind: 'prompt', text: 'Say which period a number is for.' }],
+      steps: [{ step: 'read_metrics' }],
+      suggestions: [{ text: 'Say which period a number is for.' }],
       lessons: [{ text: 'Ask which month before answering.' }],
     }));
     expect(reply.status).toBe(200);
@@ -186,8 +191,8 @@ describe('door_file_report (called with the public anon key, through the Data AP
     const row = (await pool.query('select * from public.session_reports where id = $1', [reply.body.id])).rows[0];
     expect(row).toMatchObject({
       token_id: await tokenRowId(token), assistant_id: 'salon', tool: 'claude-code', summary: 'Checked the finance numbers.', reviewed_at: null,
-      steps: [{ step: 'read_metrics', outcome: 'ok', detail: 'salon revenue for September' }],
-      suggestions: [{ kind: 'prompt', text: 'Say which period a number is for.' }],
+      steps: [{ step: 'read_metrics' }],
+      suggestions: [{ text: 'Say which period a number is for.' }],
       lessons: [{ text: 'Ask which month before answering.' }],
     });
   });
@@ -197,7 +202,7 @@ describe('door_file_report (called with the public anon key, through the Data AP
     const reply = await file(await newToken('finance'), {
       tool: 'cursor +15551234567',
       summary: 'Called +15551234567, (917) 555-0123, 917-555-0123 and 9175550123; the code was 123456 and SEND 2 482913. Cost $120000, 1,234,567 tokens, 12345 and 1234567.',
-      steps: [{ step: 'texted 917.555.0123', detail: 'code: 654321' }],
+      steps: [{ step: 'texted 917.555.0123 code: 654321' }],
       suggestions: [{ text: 'Never repeat 111222 to anyone.' }],
       lessons: [{ text: 'Mask +1 555 123 4567 and 999888.' }],
     });
@@ -205,9 +210,35 @@ describe('door_file_report (called with the public anon key, through the Data AP
     const row = (await pool.query('select tool, summary, steps, suggestions, lessons from public.session_reports where id = $1', [reply.body.id])).rows[0];
     expect(row.tool).toBe('cursor [phone]');
     expect(row.summary).toBe('Called [phone], [phone], [phone] and [phone]; the code was [code] and SEND 2 [code]. Cost $120000, 1,234,567 tokens, 12345 and 1234567.');
-    expect(row.steps).toEqual([{ step: 'texted [phone]', detail: 'code: [code]' }]);
+    expect(row.steps).toEqual([{ step: 'texted [phone] code: [code]' }]);
     expect(row.suggestions).toEqual([{ text: 'Never repeat [code] to anyone.' }]);
     expect(row.lessons).toEqual([{ text: 'Mask [phone] and [code].' }]);
+  });
+
+  it('masks a phone number written without its brackets or dash, and a code written in two groups, in a report an outside tool files', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const reply = await file(await newToken('online'), {
+      tool: 'codex',
+      summary: 'Rang (718)555-1234, then 718 5551234 and call 718-5551234; the code was 482-913, then 482 913.',
+      steps: [{ step: '1 718 555 1234' }],
+      suggestions: [{ text: 'Ask for 718.555.1234 again.' }],
+      lessons: [{ text: 'Never keep 7185551234.' }],
+    });
+    expect(reply.status).toBe(200);
+    const row = (await pool.query('select summary, steps, suggestions, lessons from public.session_reports where id = $1', [reply.body.id])).rows[0];
+    expect(row.summary).toBe('Rang [phone], then [phone] and call [phone]; the code was [code], then [code].');
+    expect(row.steps).toEqual([{ step: '[phone]' }]);
+    expect(row.suggestions).toEqual([{ text: 'Ask for [phone] again.' }]);
+    expect(row.lessons).toEqual([{ text: 'Never keep [phone].' }]);
+  });
+
+  it('masks exactly what the lesson rules and the read tools mask: one list of strings through the database and through @fahq/contracts', async ({ skip }) => {
+    if (!ready) skip();
+    for (const [input, expected] of REDACT_SAMPLES) {
+      const { rows } = await pool.query('select public.redact_text($1) as masked', [input]);
+      expect(rows[0].masked, `the database on ${JSON.stringify(input)}`).toBe(expected);
+      expect(maskPhonesAndCodes(input), `@fahq/contracts on ${JSON.stringify(input)}`).toBe(expected);
+    }
   });
 
   it('stores a retried report once (same token, same key) and returns the first one', async ({ skip }) => {
@@ -242,7 +273,11 @@ describe('door_file_report (called with the public anon key, through the Data AP
     ['a lesson with no text', base({ lessons: [{ note: 'x' }] }), /lessons needs a "text"/],
     ['lessons that are not a list', base({ lessons: 'be kind' }), /lessons must be a list/],
     ['more than 32 KB', base({ steps: Array.from({ length: 30 }, () => ({ step: 's', detail: 'd'.repeat(1500) })) }), /larger than 32 KB/],
-    ['nesting deeper than six levels', base({ steps: [{ step: 's', detail: { a: { b: { c: { d: { e: { f: 'deep' } } } } } } }] }), /nested too deeply/],
+    // An item holds its one field and nothing else: another key would be stored, unmasked if it were a number.
+    ['an extra key in a step', base({ steps: [{ step: 's', detail: 'x' }] }), /steps has a "step" and nothing else/],
+    ['an extra key in a suggestion', base({ suggestions: [{ text: 's', kind: 'prompt' }] }), /suggestions has a "text" and nothing else/],
+    ['a phone number written as a number in a lesson', base({ lessons: [{ text: 's', phone: 7185551234 }] }), /lessons has a "text" and nothing else/],
+    ['an extra key in the second of two steps', base({ steps: [{ step: 'a' }, { step: 'b', detail: { deep: { deeper: 1 } } }] }), /steps has a "step" and nothing else/],
   ])('refuses %s with a plain sentence and stores nothing', async (_name, report, message) => {
     if (!ready || !keys) return;
     const token = await newToken('finance');
@@ -432,7 +467,7 @@ describe('profile writes (a throwaway database built from the real migration fil
         create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
         create table public.assistants (id public.assistant_id primary key);
         insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
-      await scratch.query(fs.readFileSync(MIGRATION, 'utf8'));
+      await runMigrations(scratch);
     } catch (error) {
       console.warn(`SKIPPED the profile write tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
       scratchName = '';
@@ -535,6 +570,25 @@ describe('profile writes (a throwaway database built from the real migration fil
     const { rows } = await scratch.query('select public.redact_json($1::jsonb) as v', [JSON.stringify(input)]);
     expect(rows[0].v).toEqual({ 'call [phone]': [3, 'b [code]', null, true, { '[phone]': 1.5, keep: 'ok 12345' }], list: ['a', 'b', 'c'] });
     expect((await scratch.query(`select public.redact_json('"plain"') as v, public.redact_json('[]') as e, public.redact_json('{}') as o`)).rows[0]).toEqual({ v: 'plain', e: [], o: {} });
+    // Nesting deeper than six levels is refused (no door item can nest at all any more, but the function still guards itself).
+    await expect(scratch.query(`select public.redact_json('{"a":{"b":{"c":{"d":{"e":{"f":{"g":"deep"}}}}}}}'::jsonb)`)).rejects.toThrow('nested too deeply');
+  });
+
+  it('refuses a list item with a key but its own field, and accepts one with only its field', async ({ skip }) => {
+    if (!scratchName) skip();
+    const check = (list: unknown) => scratch.query(`select public.door_check_list($1::jsonb, 'steps', 30, 'step', 80)`, [JSON.stringify(list)]);
+    await expect(check([{ step: 'a' }, { step: 'b' }])).resolves.toBeDefined();
+    await expect(check([])).resolves.toBeDefined();
+    await expect(check([{ step: 'a', detail: 'x' }])).rejects.toThrow('Every item in the report\'s steps has a "step" and nothing else.');
+    await expect(check([{ step: 'a', step2: 'x' }])).rejects.toThrow('has a "step" and nothing else');
+    await expect(check([{ step: 'a' }, 'b'])).rejects.toThrow('needs a "step" of 1 to 80 characters'); // not an object: the older check still comes first
+  });
+
+  it('masks a phone number or code the same in the scratch database made from the migration files as on the stack', async ({ skip }) => {
+    if (!scratchName) skip();
+    for (const [input, expected] of REDACT_SAMPLES) {
+      expect((await scratch.query('select public.redact_text($1) as masked', [input])).rows[0].masked, JSON.stringify(input)).toBe(expected);
+    }
   });
 
   it('keeps the history append-only on a database that has committed versions', async ({ skip }) => {
@@ -567,7 +621,7 @@ describe('seeding profiles (a second throwaway database)', () => {
         create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
         create table public.assistants (id public.assistant_id primary key);
         insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
-      await scratch.query(fs.readFileSync(MIGRATION, 'utf8'));
+      await runMigrations(scratch);
     } catch (error) {
       console.warn(`SKIPPED the seed tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
       scratchName = '';
@@ -827,5 +881,59 @@ describe('seeding profiles (a second throwaway database)', () => {
     expect(missing.stderr).toContain('the finance profile has no version 9999. Nothing was written.');
     expect(run(['nobody', '1']).status).toBe(2);
     expect(run(['finance']).status).toBe(2);
+  }, 120_000);
+
+  it('--force keeps the read tools and the model of each job whose latest change the owner made with his code, and puts the files back everywhere else', async ({ skip }) => {
+    if (!scratchName) skip();
+    const ownerRow = async () => (await scratch.query(`select version, title, skill, reads, models, lessons from public.assistant_profiles where assistant_id = 'owner'`)).rows[0];
+    const saveOwner = (expected: number, over: { title: string; reads: string[]; models: unknown; by: string; reason: string }, row: { skill: string; lessons: unknown }) =>
+      scratch.query(
+        `select public.save_assistant_profile('owner', $1::integer, $2, $3, $4::text[], $5::jsonb, $6::jsonb, $7, $8, '{"kind":"test"}') as v`,
+        [expected, over.title, row.skill, over.reads, JSON.stringify(over.models), JSON.stringify(row.lessons), over.by, over.reason],
+      ).then((r) => r.rows[0].v as number);
+
+    const start = await ownerRow();
+    // The owner approves a change of read tools and of one model with his code (a version made by 'owner').
+    const reads = [...start.reads.filter((name: string) => name !== 'get_timeline'), 'my_lessons'];
+    const approved = { ...start.models, answer: { ...start.models.answer, model: 'owner/approved-answer-model' } };
+    const v1 = await saveOwner(start.version, { title: start.title, reads, models: approved, by: 'owner', reason: 'adopted a data access' }, start);
+    // Then the manager changes the title and another model by itself: not the owner's decision.
+    const managed = { ...approved, code: { ...approved.code, model: 'manager/changed-code-model' } };
+    const v2 = await saveOwner(v1, { title: 'Owner HQ (edited)', reads, models: managed, by: 'manager', reason: 'a note' }, start);
+    expect(v2).toBeGreaterThan(v1);
+
+    const results = await seedProfiles(scratch, {}, { force: true });
+    const owner = results.find((r) => r.assistant === 'owner')!;
+    expect(owner).toMatchObject({ action: 'reseeded', differsFromFiles: true, keptFromOwner: ['reads', 'model answer'] });
+    const after = await ownerRow();
+    expect(after.reads).toEqual(reads); // the owner's read tools survive the reseed
+    expect(after.models.answer.model).toBe('owner/approved-answer-model');
+    expect(after.models.code).toEqual(files.owner.models.code); // the manager's model does not: it was never the owner's word
+    expect(after.models.route).toEqual(files.owner.models.route);
+    expect(after.title).toBe(files.owner.title);
+    expect(after.skill).toBe(files.owner.skill);
+    // The version says what was kept, and nothing else is affected.
+    const last = (await scratch.query(`select made_by, change from public.assistant_profile_versions where assistant_id = 'owner' and version = $1`, [after.version])).rows[0];
+    expect(last).toEqual({ made_by: 'seed', change: { kind: 'reseed', from: v2, keptFromOwner: ['reads', 'model answer'] } });
+    expect(results.filter((r) => r.assistant !== 'owner').every((r) => r.keptFromOwner === undefined)).toBe(true);
+
+    // The reseed itself does not make the seed the last to touch them: a second reseed keeps them again.
+    expect((await seedProfiles(scratch, {}, { force: true })).find((r) => r.assistant === 'owner')).toMatchObject({ keptFromOwner: ['reads', 'model answer'] });
+    expect((await ownerRow()).reads).toEqual(reads);
+    // The history has the owner's version and the files' version both, so either can be put back.
+    const history = (await scratch.query(`select version, made_by from public.assistant_profile_versions where assistant_id = 'owner' and version in ($1, $2)`, [v1, v2])).rows;
+    expect(history.map((h) => h.made_by).sort()).toEqual(['manager', 'owner']);
+  });
+
+  it('runs --force as seed-profiles.ts and says which choices of the owner it kept', async ({ skip }) => {
+    if (!scratchName) skip();
+    const target = new URL(url);
+    target.pathname = `/${scratchName}`;
+    const repo = path.resolve(import.meta.dirname, '../..');
+    const run = spawnSync('npx', ['tsx', 'scripts/seed-profiles.ts', '--force', '--db', target.toString()], { cwd: repo, encoding: 'utf8', timeout: 60_000 });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toMatch(/^owner {4}reseeded \(version \d+\); kept what the owner approved: reads, model answer$/m);
+    expect(run.stdout).toMatch(/^finance {2}reseeded \(version \d+\)$/m);
+    expect(run.stderr).not.toContain(target.password);
   }, 120_000);
 });

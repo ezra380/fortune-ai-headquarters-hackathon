@@ -284,11 +284,14 @@ export const ChangeKind = z.enum(['lesson', 'skill_note', 'reads', 'model']);
 export type ChangeKind = z.infer<typeof ChangeKind>;
 
 /**
- * Who applies a kind. The program reads this table, never the model: the HQ Manager applies a lesson or a skill note
- * itself (a new profile version, reversible from the history); a change to data access or to the model widens what an
- * assistant can see or changes what it costs, so it waits for the owner's one-time code.
+ * Who applies a kind, when the HQ Manager is allowed to apply anything by itself. The program reads this table, never
+ * the model. It is all false: nothing changes an assistant's profile without a person's one-time code, so every kind
+ * waits for the owner's ADOPT. (The manager once applied lessons and skill notes at once; the independent review of
+ * 2026-10-27 found that an approval path with no code, fed by outside tools' reports, was a decision only Ezra can make.
+ * The mechanism is still in the worker, tested, and off. To turn it on, Ezra approves it in writing and a person
+ * changes this table; the review lists what must be added first, see docs/manager.md, "Who decides what changes".)
  */
-export const MANAGER_APPLIES: Record<ChangeKind, boolean> = { lesson: true, skill_note: true, reads: false, model: false };
+export const MANAGER_APPLIES: Record<ChangeKind, boolean> = { lesson: false, skill_note: false, reads: false, model: false };
 
 const ReadToolNames = z.array(z.string().regex(/^[a-z][a-z_]{1,59}$/)).max(5).default([]);
 /** Read tools to add to and remove from an assistant. Whether a name is a real tool is checked against the profile rules. */
