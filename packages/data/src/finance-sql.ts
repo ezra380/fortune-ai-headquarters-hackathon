@@ -10,6 +10,23 @@ import { PERIODS, PRODUCT_LINES, SALON_SERVICES, type Period, type SyntheticBusi
 export const CONTAINER = 'fortune_hq';
 export const FINANCE_VIEW = `${CONTAINER}.finance_metrics`;
 
+// The Virtual Data Mart over the governed view: the same three columns under their own names, no copy.
+// A mart table is queried as <mart>.<table> (a flat two-part name, without the container prefix).
+export const MART = 'fortune_demo_finance_mart';
+export const MART_TABLE = 'finance_metrics';
+export const MART_VIEW = `${MART}.${MART_TABLE}`;
+/** The view's columns in order; ADD DATAMART TABLE needs every source column to be given a virtual name. */
+export const FINANCE_VIEW_COLUMNS = ['period', 'metric_id', 'value'] as const;
+
+/** The three Virtual Data Mart statements (create, add the table, drop). One statement per call. */
+export function martSql(): { create: string; addTable: string; drop: string } {
+  return {
+    create: `CREATE DATAMART ${MART} DESCRIBE BY 'Fortune demo finance mart, synthetic'`,
+    addTable: `ADD DATAMART TABLE ${MART_TABLE} INTO ${MART} FROM ${FINANCE_VIEW} VSCHEMA (${FINANCE_VIEW_COLUMNS.map((c) => `${c} ${c}`).join(', ')})`,
+    drop: `DROP DATAMART ${MART}`,
+  };
+}
+
 type Row = Record<string, unknown>;
 type Field = string | { sql: string; js: (r: Row) => number };
 
@@ -153,6 +170,12 @@ export function financeViewBody(): string {
 export function financeQuery(period: Period): string {
   if (!(period in PERIODS)) throw new Error(`unknown period ${period}`);
   return `SELECT metric_id, value FROM ${FINANCE_VIEW} WHERE period = '${period}'`;
+}
+
+/** The same question asked of the Virtual Data Mart table instead of the view. */
+export function martQuery(period: Period): string {
+  if (!(period in PERIODS)) throw new Error(`unknown period ${period}`);
+  return `SELECT metric_id, value FROM ${MART_VIEW} WHERE period = '${period}'`;
 }
 
 // ---- Oracle -------------------------------------------------------------------------------

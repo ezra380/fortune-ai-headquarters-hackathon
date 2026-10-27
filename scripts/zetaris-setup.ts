@@ -4,11 +4,14 @@
 //        npx tsx scripts/zetaris-setup.ts --verify-only
 // Three Lightning databases stand for three separately owned systems (salon bookings, the online
 // store, marketing), each a REST source served by packages/data's synthetic source server. Zetaris
-// reaches that server at host.docker.internal. Credentials come from .env.local and are never printed.
+// reaches that server at host.docker.internal. The governed view fortune_hq.finance_metrics is also
+// published as a Virtual Data Mart (fortune_demo_finance_mart.finance_metrics, no copy of the data).
+// Credentials come from .env.local and are never printed.
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  CONTAINER, FINANCE_VIEW, METRIC_BY_ID, computeFinanceMetricsLocally, financeQuery, financeViewBody,
+  CONTAINER, FINANCE_VIEW, MART, MART_TABLE, MART_VIEW, METRIC_BY_ID, computeFinanceMetricsLocally, financeQuery, financeViewBody,
+  martQuery, martSql,
 } from '../packages/data/src/finance-sql.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from '../packages/data/src/source-server.ts';
 import { PERIODS, generateBusiness, type Period } from '../packages/data/src/synthetic.ts';
@@ -67,9 +70,24 @@ async function drop(label: string, sql: string) {
   }
 }
 
+/** Creates the data mart and its one table when they are not there yet (SHOW first, so a re-run changes nothing). */
+async function ensureMart() {
+  const sql = martSql();
+  const marts = await client.run('SHOW DATAMARTS', 200);
+  if (marts.some((row) => row.some((cell) => cell.toLowerCase() === MART))) console.log(`exists   mart ${MART}`);
+  else await create(`mart ${MART}`, sql.create);
+  const tables = await client.run(`SHOW DATAMART TABLES ${MART}`, 200);
+  if (tables.some((row) => row.some((cell) => cell.toLowerCase() === MART_TABLE || cell.toLowerCase() === MART_VIEW))) {
+    console.log(`exists   ${MART_VIEW}`);
+  } else {
+    await create(MART_VIEW, sql.addTable);
+  }
+}
+
 try {
   if (!args.has('--verify-only')) {
     if (args.has('--recreate')) {
+      await drop(`mart ${MART}`, martSql().drop);
       await drop(FINANCE_VIEW, `DROP VIEW ${FINANCE_VIEW}`);
       for (const v of VIEWS) await drop(`${CONTAINER}.${v.name}`, `DROP VIEW ${CONTAINER}.${v.name}`);
       for (const d of DATABASES) for (const t of d.tables) await drop(`${d.db.toLowerCase()}.${t.name}`, `DROP LIGHTNING DATABASE TABLE ${d.db.toLowerCase()}.${t.name}`);
@@ -91,31 +109,38 @@ try {
       );
     }
     await create(FINANCE_VIEW, `CREATE SCHEMASTORE VIEW finance_metrics WITH CONTAINER ${CONTAINER} AS ${financeViewBody()}`);
+    await ensureMart();
   }
 
-  // Proof: the federated Zetaris answer equals an independent computation over the same rows.
+  // Proof: the federated Zetaris answer equals an independent computation over the same rows,
+  // asked of the governed view and again of the Virtual Data Mart table built on it.
   const business = generateBusiness();
-  let failures = 0;
-  for (const period of Object.keys(PERIODS) as Period[]) {
-    const t = Date.now();
-    const rows = await client.run(financeQuery(period), 500);
-    const got = new Map(rows.map(([id, v]) => [id ?? '', Number(v)]));
-    const want = computeFinanceMetricsLocally(business, period);
-    const problems: string[] = [];
-    for (const [id, w] of want) {
-      const g = got.get(id);
-      const unit = METRIC_BY_ID.get(id)?.unit;
-      const tolerance = unit === 'ratio' ? 0.00011 : unit === 'usd' ? 0.011 : 0;
-      if (g === undefined) problems.push(`${id}: missing from Zetaris (expected ${w})`);
-      else if (Math.abs(g - w) > tolerance) problems.push(`${id}: Zetaris ${g}, expected ${w}`);
+  async function prove(label: string, queryFor: (period: Period) => string, detail: boolean): Promise<number> {
+    let failures = 0;
+    for (const period of Object.keys(PERIODS) as Period[]) {
+      const t = Date.now();
+      const rows = await client.run(queryFor(period), 500);
+      const got = new Map(rows.map(([id, v]) => [id ?? '', Number(v)]));
+      const want = computeFinanceMetricsLocally(business, period);
+      const problems: string[] = [];
+      for (const [id, w] of want) {
+        const g = got.get(id);
+        const unit = METRIC_BY_ID.get(id)?.unit;
+        const tolerance = unit === 'ratio' ? 0.00011 : unit === 'usd' ? 0.011 : 0;
+        if (g === undefined) problems.push(`${id}: missing from Zetaris (expected ${w})`);
+        else if (Math.abs(g - w) > tolerance) problems.push(`${id}: Zetaris ${g}, expected ${w}`);
+      }
+      for (const id of got.keys()) if (!want.has(id)) problems.push(`${id}: returned by Zetaris but not expected`);
+      failures += problems.length;
+      console.log(`\n${period}: ${got.size} of ${want.size} metrics from ${label} in ${Date.now() - t} ms; ${problems.length ? `${problems.length} MISMATCHES` : 'all match the independent computation'}`);
+      for (const p of problems) console.log(`  ✗ ${p}`);
+      const show = ['m:online.revenue.total', 'm:online.ads.google.roas', 'm:online.dq.rejected_orders', 'm:salon.revenue.total', 'm:salon.dq.rejected_appointments'];
+      if (detail) for (const id of show) if (got.has(id)) console.log(`  ${id.padEnd(36)} ${got.get(id)}`);
     }
-    for (const id of got.keys()) if (!want.has(id)) problems.push(`${id}: returned by Zetaris but not expected`);
-    failures += problems.length;
-    console.log(`\n${period}: ${got.size} metrics from ${FINANCE_VIEW} in ${Date.now() - t} ms; ${problems.length ? `${problems.length} MISMATCHES` : 'all match the independent computation'}`);
-    for (const p of problems) console.log(`  ✗ ${p}`);
-    const show = ['m:online.revenue.total', 'm:online.ads.google.roas', 'm:online.dq.rejected_orders', 'm:salon.revenue.total', 'm:salon.dq.rejected_appointments'];
-    for (const id of show) if (got.has(id)) console.log(`  ${id.padEnd(36)} ${got.get(id)}`);
+    return failures;
   }
+  let failures = await prove(FINANCE_VIEW, financeQuery, true);
+  failures += await prove(`the data mart (${MART_VIEW})`, martQuery, false);
   if (failures) {
     console.error(`\nzetaris-setup: ${failures} mismatches`);
     process.exitCode = 1;

@@ -2,7 +2,9 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Metric } from '@fahq/contracts';
 import { createZetarisDataPort } from '../src/index.ts';
-import { METRICS, computeFinanceMetricsLocally, financeQuery, financeViewBody } from '../src/finance-sql.ts';
+import {
+  FINANCE_VIEW, FINANCE_VIEW_COLUMNS, MART, MART_TABLE, MART_VIEW, METRICS, computeFinanceMetricsLocally, financeQuery, financeViewBody, martQuery, martSql,
+} from '../src/finance-sql.ts';
 import { createSourceServer } from '../src/source-server.ts';
 import { generateBusiness } from '../src/synthetic.ts';
 import { createZetarisClient, zetarisConfigFromEnv } from '../src/zetaris-client.ts';
@@ -103,6 +105,46 @@ describe('finance view', () => {
     expect(sept.get('m:online.revenue.total')).toBeCloseTo(expected, 2);
     const lines = ['fortune', 'mazali', 'tuni', 'accessories'].map((l) => sept.get(`m:online.revenue.${l}`) ?? 0);
     expect(lines.reduce((a, c) => a + c, 0)).toBeCloseTo(expected, 1);
+  });
+});
+
+describe('Virtual Data Mart', () => {
+  it('is named under fortune_demo and has one table over the governed view, without copying data', () => {
+    expect(MART).toBe('fortune_demo_finance_mart');
+    expect(MART_VIEW).toBe('fortune_demo_finance_mart.finance_metrics');
+    const sql = martSql();
+    expect(sql.create).toBe("CREATE DATAMART fortune_demo_finance_mart DESCRIBE BY 'Fortune demo finance mart, synthetic'");
+    expect(sql.addTable).toBe(
+      'ADD DATAMART TABLE finance_metrics INTO fortune_demo_finance_mart FROM fortune_hq.finance_metrics VSCHEMA (period period, metric_id metric_id, value value)',
+    );
+    expect(sql.drop).toBe('DROP DATAMART fortune_demo_finance_mart');
+    expect(sql.addTable).toContain(`FROM ${FINANCE_VIEW} `);
+    expect(sql.addTable).toContain(`TABLE ${MART_TABLE} INTO ${MART}`);
+  });
+
+  it('maps every column of the view, and each statement is one statement for the Zetaris client', () => {
+    expect([...FINANCE_VIEW_COLUMNS]).toEqual(['period', 'metric_id', 'value']);
+    for (const column of FINANCE_VIEW_COLUMNS) expect(martSql().addTable).toContain(`${column} ${column}`);
+    for (const statement of Object.values(martSql())) {
+      expect(statement).not.toContain(';');
+      expect(statement.trim()).toBe(statement);
+    }
+  });
+
+  it('asks the mart table the same question as the view, with a flat two-part name', () => {
+    expect(martQuery('2026-09')).toBe("SELECT metric_id, value FROM fortune_demo_finance_mart.finance_metrics WHERE period = '2026-09'");
+    expect(martQuery('2026-09').replace(MART_VIEW, FINANCE_VIEW)).toBe(financeQuery('2026-09'));
+    expect(() => martQuery('2026-13' as never)).toThrow('unknown period');
+  });
+
+  it('is read through the same Zetaris client as the view: one statement, rows as strings', async () => {
+    const oracle = computeFinanceMetricsLocally(generateBusiness(), '2026-09');
+    const z = fakeZetaris((sql) => {
+      expect(sql).toBe(martQuery('2026-09'));
+      return { body: { data: [...oracle].map(([id, v]) => [id, v]) } };
+    });
+    const rows = await createZetarisClient({ ...zetarisConfigFromEnv(env), fetch: z.fetchFn }).run(martQuery('2026-09'), 500);
+    expect(rows).toHaveLength(oracle.size);
   });
 });
 
