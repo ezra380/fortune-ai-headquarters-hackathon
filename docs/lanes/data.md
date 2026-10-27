@@ -78,7 +78,7 @@ lanes' tables and concurrent runs), not from this branch. `departments` and `man
 - Zetaris now holds version 2's objects (listed in `docs/data.md`) and an empty container
   `fortune_demo_probe` (no SQL can drop a container). Version 1's objects were never named or touched.
 
-## Slice 2 of 4: divisions in Zetaris (2026-10-27, 08:04–08:35 ET)
+## Slice 2 of 4: divisions in Zetaris (2026-10-27, 08:04–08:30 ET)
 
 ### What works (with the tests that prove it)
 
