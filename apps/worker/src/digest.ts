@@ -10,9 +10,9 @@ import type { MessageRow, PersonRow, TaskRow } from './store.ts';
 // which its brief already checked (every number in it traces to that division's data).
 //   queued → when all three divisions have reported (the third brief's delivery, or the 08:30 clock finding all three in);
 //            a BRIEF text queues its own digest for that run. The 08:30 clock never sends a digest ahead of briefs that are
-//            still being worked on: it waits for them, and only when one has stopped for good, or has not come by 10:30,
-//            does it queue a PARTIAL digest (digest:<date>:partial, "no report yet" for the missing). The complete digest
-//            still follows when the last report arrives.
+//            still being worked on: it waits for them, and only when one has stopped for good, or two hours have passed
+//            since they were queued, does it queue a PARTIAL digest (digest:<date>:partial, "no report yet" for the
+//            missing). The complete digest still follows when the last report arrives.
 //   built  → from the latest status line of the day for each division (mailbox reports to `owner`)
 //   sent   → one text, keyed by the digest, and the digest itself kept as a mailbox row so a retry sends the same words
 

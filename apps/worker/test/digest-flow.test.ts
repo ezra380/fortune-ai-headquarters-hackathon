@@ -386,7 +386,19 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, ...normalLines));
   });
 
-  it('a brief that is still not in at 10:30 does not hold the digest for ever: a partial digest goes out, and the complete one follows when the last report arrives', async () => {
+  it('a worker that starts after 10:30 still holds the digest for the briefs it has just queued, and sends only the complete one', async () => {
+    const d = freshDay();
+    clock.at = etInstant(d, '10:45');
+    const marks = new Set<string>();
+    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await tasksLike(`digest:${d}%`)).toEqual([]); // the clock is past 10:30, but the briefs were queued just now
+    for (const division of ['salon', 'finance', 'online'] as const) await runBrief(division, d);
+    expect((await tasksLike(`digest:${d}%`)).map((t) => t.idempotency_key)).toEqual([`digest:${d}`]);
+    expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
+    expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, ...normalLines));
+  });
+
+  it('a brief that is still not in two hours after the briefs were queued does not hold the digest for ever: a partial digest goes out, and the complete one follows when the last report arrives', async () => {
     const d = freshDay();
     clock.at = etInstant(d, '08:30');
     const marks = new Set<string>();

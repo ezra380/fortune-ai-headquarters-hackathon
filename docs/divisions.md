@@ -37,17 +37,21 @@ a status, a headline, up to four findings and up to three actions the head may a
 ### When a division needs something from another
 
 Sometimes a division cannot write its brief from its own numbers alone. Then its assistant sends a plain question to another
-division's assistant (at most two questions, never to itself). The other assistant answers from **its own data, with its own
+division's assistant (at most two questions, never to itself). A program drops a question that has medical or hair-loss
+wording, a phone number or a six-digit code before it is sent. The other assistant answers from **its own data, with its own
 tools and its own instructions**: the asking division never reads the other's data itself. The answer, or the plain reason it
 could not be given ("Code Mode is not connected on this machine"), is kept in the mailbox with who asked, who answered and
-when. The asker may use the answer in its brief, and the numbers in it are checked like any other.
+when. Only the answer's **metric values** are kept, each with the id that says which business it belongs to; a number with no
+id, or a number no tool returned (a total that adds the salon to the online store, say), makes the program refuse the whole
+answer and say so. The asker may use what is kept in its brief, and those numbers are checked like any other.
 
 ### Approving by code
 
 Each action in a brief is a suggestion. The head's text carries one **one-time code**. She replies `APPROVE 1 3 <code>` to
 approve actions 1 and 3 (any ranks, once each). The code works once, only for her, for twelve hours. A plain "yes" decides
-nothing. Approving records her decision in the division's memory, the company record and the HQ Manager's mailbox; it changes
-nothing else. Carrying the action out is hers.
+nothing. If she names an action the brief does not have, nothing is recorded and **the code is not used up**: she is told which
+action is missing and can send the right command with the same code. Approving records her decision in the division's memory,
+the company record and the HQ Manager's mailbox; it changes nothing else. Carrying the action out is hers.
 
 ### The CEO digest
 
@@ -58,9 +62,12 @@ The owner can also text `STATUS` to see the digest as it stands, or `BRIEF` to a
 
 ### The schedule
 
-New York time, every day: **8:00** the three briefs are queued; **8:30** the digest is queued with whatever has reported (it
-is also queued the moment the third brief is in, so normally it goes out as soon as the last division reports). If the worker
-was down at the time, a missed job is queued when it comes back, but only within four hours of its time.
+New York time, every day: **8:00** the three briefs are queued; the digest is queued the moment the third brief is in, so
+normally it goes out as soon as the last division reports. The **8:30** clock never sends the digest ahead of a brief that is
+still being worked on: it waits (and asks again every minute). If a missing brief has stopped for good, or two hours have
+passed since the briefs were queued and one is still not in, it queues a **partial** digest ("no report yet" for the missing ones) so the owner hears what is in; the
+complete digest still follows as a second text when the last report arrives. If the worker was down at the time, a missed job
+is queued when it comes back, but only within four hours of its time.
 
 ### Where to look
 
@@ -68,13 +75,21 @@ The console's first tab, **Divisions** (owner only, read only): the CEO digest, 
 where each action stands (approved, waiting for a code, code expired, not approved), the questions it asked and was asked, and
 whether they were answered. See [The console's Divisions view](#the-consoles-divisions-view).
 
-### What can never happen
+### What the program refuses, and the test that keeps each one true
 
-- An assistant changes something. They read and advise; people decide by one-time code and carry the action out.
-- A number reaches a person that does not trace to data.
-- The salon's numbers and the online store's are merged, or put side by side in one sentence.
-- Medical or hair-loss information is read, written or shown.
-- A model sees a phone number or a code.
+| Rule | What enforces it | Test |
+|---|---|---|
+| An assistant changes something. They read and advise; people decide by one-time code and carry the action out. | the assistants' tools are read tools; APPROVE only records the decision | `read-tools.test.ts`; `brief-flow.test.ts` "APPROVE <rank> <code> records the head's decision once" |
+| A number reaches a person that does not trace to data. | `numberTrace` on every field of a brief; from another division only metric values with an id count; the digest has no number of its own | `brief.test.ts` "refuses a number that is not in the data, in any field", "refuses a number from a reply that carries no metric id"; `brief-flow.test.ts` "a reply carrying a number no tool returned"; `digest.test.ts` "has no number of its own" |
+| The salon's numbers and the online store's are merged, or put side by side in one sentence. | a reply keeps only metric ids of the business that answered (finance, both); no sentence holds a salon number and an online number | `brief.test.ts` "keeps to the business that answered", "refuses a sentence that puts a salon number next to an online number", "uses the business of the metric inside a reply"; `brief-flow.test.ts` "a reply keeps only the metric ids and values of the business that answered" |
+| Medical or hair-loss information is read, written or shown. | a question with such wording is dropped before it is posted; a reply keeps ids and numbers, no words; the brief's words are checked | `brief.test.ts` "drops a question with medical or hair-loss wording…", "refuses medical and hair-loss words"; `brief-flow.test.ts` "a question with medical wording, a phone number or a code is never posted" |
+| A model sees a phone number or a code. | what a model is given is built from the metrics, the attention list, the replies' metric values and the division's lessons; a question holding a phone number or a six-digit run is dropped | `brief-flow.test.ts` "writes the finance head a brief…" (no phone number or code in any model input), the question tests above; `read-tools.test.ts` "never returns a phone number or a code" |
+| A one-time code is used up by a command that cannot work. | the command is checked against the brief before the code is spent (`peek_approval_code`) | `brief-flow.test.ts` "APPROVE for an action the brief does not have records nothing and does not spend the code"; `digest-flow.test.ts` "a rank the brief does not have is named and nothing is recorded"; `db.test.ts` "peek_approval_code" |
+| The digest goes ahead of the briefs. | the 08:30 job waits while any of the day's briefs is open (for two hours at most) | `digest-flow.test.ts` "a worker that starts late finds the briefs and the digest due at once…"; `digest.test.ts` "the 08:30 digest" |
+
+What these checks cannot do: tell a customer's name from any other word (a question or a brief with a name in it is not
+caught), judge meaning (the medical check is a list of words), or attribute a number that two businesses both hold to either
+one. Those stay with the people who read the brief.
 
 ---
 
@@ -90,7 +105,8 @@ The rest of this page is the reference: what the code does, step by step, and th
           head gets one text: status, headline, findings, actions, a one-time code
           CEO division gets one status line from each division (a mailbox report to `owner`)
           the third status line queues the digest
-08:30 ET  scheduler queues the digest too (same key), with whatever reports are in
+08:30 ET  scheduler: all three in, the digest is queued (same key); a brief still being worked on, it waits;
+          a brief stopped for good, or 10:30 come, a PARTIAL digest is queued (the complete one still follows)
           Owner HQ texts the owner the digest: one line per division, 480 characters at most
 head      replies APPROVE 1 3 <code>: the decisions are recorded; the head carries the actions out
 ```
@@ -106,25 +122,30 @@ Once a day each of Finance, Online and Salon writes its head a brief, as a `sche
    that fired); otherwise the finance read cut by business (finance sees all, salon and online only their own, and no
    rule fires). Not connected, unreadable or empty is a failed task with a plain reason and a `brief.data` receipt.
 2. **Needs.** One model call (the division's `code` model, reasoning on) may ask OTHER divisions up to two plain questions,
-   only when its own numbers cannot answer something that matters. Questions to itself or to `hq` are dropped. The answer
-   is stored as a note in the mailbox (`needs:<key>`), so a retry never asks again. A model that cannot be reached stops
+   only when its own numbers cannot answer something that matters. Questions to itself or to `hq` are dropped, and so is
+   any question with medical or hair-loss wording, a phone number or a six-digit code (`parseNeeds`; the receipt counts
+   them and the note names the reason, never the words). The answer is stored as a note in the mailbox (`needs:<key>`), so a retry never asks again. A model that cannot be reached stops
    the task (it is tried again); an answer that cannot be read means no questions, and the receipt says so.
 3. **Requests.** Each question is a typed mailbox row from the asking assistant to the target
    (`kind: 'request'`, `body.type: 'data_request'`, key `datareq:<key>:<target>`) and is recorded in the World Model
    (`brain.record.request`). The target answers with its OWN profile: one Code Mode lookup with its own skill, its own
    `code` model and its own read tools. The asking division never reads the other's tools. The reply is a mailbox row
    (`kind: 'report'`, `body.type: 'data_reply'`, `replyTo` the request, key `datareply:<request id>`) carrying the lookup's
-   result as `facts`, or `ok: false` with the plain reason (Code Mode not connected, the script failed, the result was too
-   large to check). A stored reply is reused, never looked up twice.
+   **metric values** as `facts` (a list of `{ id, value, unit? }`, `replyMetrics`), or `ok: false` with the plain reason (Code
+   Mode not connected, the script failed, the result was too large to check, the result held a number no tool returned, the
+   result held no metric value tied to an id). Only ids of a business count (`m:salon.*`, `m:online.*`), and only those the
+   answering division may hold: a salon answer carries salon ids, an online answer online ids, finance either. Every other
+   number and word in the result is dropped, so a number always names its business. A stored reply is reused, never looked up
+   twice; one stored before replies were reduced is reduced when it is read.
 4. **The brief.** One call to the plan model (reasoning on) with the metrics, the attention list, the replies' facts, the
    program-set status and the division's adopted lessons. It returns a `DivisionBrief` (`packages/contracts`): a headline
    (up to 160 characters), up to 4 findings (text up to 300, `cites` metric ids), up to 3 actions (rank 1 to 3, title,
    why, steps, `cites`) and a `ceoLine` (up to 140, one plain sentence for the CEO). A program checks it
    (`checkBrief`):
    - the schema and different action ranks;
-   - every cited id exists, in the division's metrics or inside a reply's facts;
-   - every number traces (`numberTrace`) to the metrics, the attention list or a reply's facts, and the words zero, one,
-     two, three and larger number words are refused;
+   - every cited id exists, in the division's metrics or among a reply's metric values;
+   - every number traces (`numberTrace`) to the metrics, the attention list or a reply's metric values (a number in a reply
+     without an id is nobody's), and the words zero, one, two, three and larger number words are refused;
    - no sentence puts a number that only a salon metric has next to one that only an online metric has;
    - no medical or hair-loss words.
 
@@ -134,6 +155,7 @@ Once a day each of Finance, Online and Salon writes its head a brief, as a `sche
    `rule`, and the text to the head says it too.
 5. **Status.** `normal`, `watch` or `act`, set by the program from the attention rules (`statusOf`: any `act` rule makes
    `act`, else any `watch` rule makes `watch`). A model never sets it, and a status it adds is dropped by the schema.
+   The actions are renumbered 1, 2, 3 in order (a model's 1 and 3 become 1 and 2), so the ranks the head is told to use exist.
 6. **Stored once.** `division_briefs` (`brief_key` unique; the key must name the division and the day, so the database
    holds one scheduled brief per division per day, and one more run for each BRIEF text).
 
@@ -157,15 +179,17 @@ separated by spaces or commas, then the 6-digit code. `APPROVE 2 482913`, `APPRO
 are commands; `APPROVE 1 1 482913`, `APPROVE 4 482913` and `APPROVE 1 2` are refused by rule, with the hint, and never
 reach a model.
 
-It spends the brief's code once, for the actions named in that one text. For each action the brief has:
+It spends the brief's code once, for the actions named in that one text. First it looks at the code without spending it
+(`peek_approval_code`, which changes nothing and counts no failed attempt) and checks every rank named against the brief: if
+the brief lacks any of them, nothing is recorded and the code stays usable. Only then is the code spent. For each action:
 - the division remembers the head's decision (`rememberDecision`, one memory per action);
 - the World Model gets the action as an item of its own (`record.proposal` with its title and the metrics it cited, then
   `record.decision`, so "why" can be answered for it: `explainProposal("<brief row id>:<rank>")`);
 - the HQ Manager gets a `decision` row (`body.type: 'action_decision'`, key `action-decision:<brief row id>:<rank>`).
 
 The head is told: "Recorded: you approved action 1 (Hold Google spend) and action 3 (Check Mazali stock). They're yours to
-carry out." A rank the brief does not have is named ("Not recorded: action 3, which this brief does not have."); if none of
-the ranks exist nothing is recorded. The assistant changes nothing. A code presented with another command word stays usable
+carry out." A rank the brief does not have is named and refuses the whole command ("This brief has no action 3. Nothing was
+recorded, and your code still works."). The assistant changes nothing. A code presented with another command word stays usable
 and the reply says which command it is for. Only the person the code was issued to can spend it.
 
 ## BRIEF
@@ -201,11 +225,14 @@ Online: no report yet.
   out, never cut), the shortest keep all they need and the long ones share what is left.
 - It reads the newest `division_status` report of the day for each division from the mailbox.
 
-**When it is written.** A scheduled task for Owner HQ, `{ job: 'ceo_digest', date, request? }`, key `digest:<date>` (or
-`digest:<date>:<id of the BRIEF text>`). It is queued when the third division's brief is delivered (that delivery sees all
-three status lines of its run), and by the scheduler at 08:30 ET with whatever is in. Both ask for the same key, so there is
-one digest a day. The words are stored once (`digestdoc:<key>`) and the text is keyed (`digest-sms:<key>`): a task that runs
-again sends the same words and never a second text. A report that arrives after the digest went out is not added to it.
+**When it is written.** A scheduled task for Owner HQ, `{ job: 'ceo_digest', date, request?, partial? }`, key `digest:<date>`
+(or `digest:<date>:<id of the BRIEF text>`). It is queued when the third division's brief is delivered (that delivery sees all
+three status lines of its run), and the 08:30 clock queues the same key when it finds all three in, so there is one complete
+digest a day. The clock never queues a digest ahead of briefs still being worked on (see the daily clock); when it has to go
+without a report it queues the **partial** digest, key `digest:<date>:partial`, with "no report yet" for the missing lines, and
+the complete one still follows when the last report arrives (two texts that day, the second saying all three). The words are
+stored once (`digestdoc:<key>`) and the text is keyed (`digest-sms:<key>`): a task that runs again sends the same words and
+never a second text. A report that arrives after a digest went out is not added to it.
 
 **STATUS.** The owner texting `STATUS` gets the digest built right now from the reports that are in (so a late report
 shows). A division head's `STATUS` is unchanged: "Open items for your assistant: N."
@@ -219,10 +246,16 @@ shows). A division head's `STATUS` is unchanged: "Open items for your assistant:
 | Time | Job | Queues |
 |---|---|---|
 | 08:00 | `division-briefs` | `brief:finance:<date>`, `brief:salon:<date>`, `brief:online:<date>` |
-| 08:30 | `ceo-digest` | `digest:<date>` |
+| 08:30 | `ceo-digest` | `digest:<date>` when all three reports are in, `digest:<date>:partial` when not (see below) |
 
-- It only queues (idempotent by key); the claim loops do the work. A receipt `scheduler.enqueue` records each job queued or
-  failed. A job that fails is tried again at the next minute.
+- It only queues (idempotent by key); the claim loops do the work. A receipt `scheduler.enqueue` records each job queued,
+  failed or waiting. A job that fails is tried again at the next minute.
+- A job may answer "waiting" with a plain reason (`enqueue` returns `{ waiting }`): it is not counted as queued, is asked again
+  at every tick, and its wait is reported once a day. The digest job waits while any of the day's three briefs
+  (`brief:<division>:<date>`) is queued, running or waiting, for at most two hours after they were queued
+  (`DIGEST_WAITS_MINUTES`; counted from the briefs' queue time, so a worker started at 10:45 still waits). A worker started at
+  09:00 finds both jobs due at once, and the digest follows the briefs instead of racing them. Once nothing is open, or the two
+  hours are up, with a report missing, it queues the partial digest. (The job itself is due only until four hours after 08:30.)
 - A job that was due while the worker was down is queued when the worker comes back, but only within four hours of its time:
   a worker started in the evening does not send the morning's briefs.
 - `FAHQ_SCHEDULE=off` turns the clock off; briefs and the digest are then only asked for by text. The clock runs only in the
@@ -241,7 +274,7 @@ shows). A division head's `STATUS` is unchanged: "Open items for your assistant:
 | the brief's mailbox row / the CEO line | `briefdoc:<key>` / `status:<key>` |
 | the text, with its code / the printout | `brief-sms:<brief id>` / `brief-print:<brief id>` |
 | an approved action | `action-decision:<briefdoc id>:<rank>` |
-| the digest task / its words / its text | `digest:<date>[:<request id>]` / `digestdoc:<key>` / `digest-sms:<key>` |
+| the digest task / its words / its text | `digest:<date>[:<request id>]` or `digest:<date>:partial` / `digestdoc:<key>` / `digest-sms:<key>` |
 
 A task that runs again after the brief was stored goes straight to delivery. One that stopped earlier reuses the stored
 needs and replies. `issue_approval` refuses to queue the same text twice, so the first code stays the only one.
@@ -256,7 +289,7 @@ needs and replies. `issue_approval` refuses to queue the same text twice, so the
 
 `enqueueBrief(deps, division, 'YYYY-MM-DD')` queues the day's scheduled brief (a second call for the same day changes
 nothing); with a third argument, a UUID, it queues that run of the day. `enqueueDigest(deps, date)` does the same for the
-digest.
+digest, `enqueuePartialDigest(deps, date)` for the partial one, and `enqueueDayDigest(deps, date)` is the 08:30 job (it chooses).
 
 
 ## The console's Divisions view

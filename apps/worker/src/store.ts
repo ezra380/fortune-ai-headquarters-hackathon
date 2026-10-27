@@ -347,11 +347,14 @@ export function createStore(url: string, serviceKey: string) {
       return must(await db.from('assistant_messages').select('*').eq('to_assistant', 'owner').eq('kind', 'report')
         .eq('body->>type', 'division_status').eq('body->>date', date).order('created_at', { ascending: false }).limit(200), 'division statuses') as MessageRow[];
     },
-    /** How many of the tasks with these keys are still queued, running or waiting (a task that is done, failed or cancelled is not open). */
-    async openTasksByKey(keys: readonly string[]): Promise<number> {
-      const r = await db.from('tasks').select('id', { count: 'exact', head: true }).in('idempotency_key', [...keys]).in('status', ['queued', 'running', 'waiting']);
-      if (r.error) throw new Error(`count tasks failed (${r.error.code ?? 'db'})`);
-      return r.count ?? 0;
+    /**
+     * The tasks with these keys that are still queued, running or waiting (a task that is done, failed or cancelled is not open):
+     * how many, and when the earliest of them was queued (its run_after, which the clock that queued it set).
+     */
+    async openTasksByKey(keys: readonly string[]): Promise<{ open: number; since: Date | null }> {
+      const rows = must(await db.from('tasks').select('run_after').in('idempotency_key', [...keys]).in('status', ['queued', 'running', 'waiting']), 'open tasks') as { run_after: string }[];
+      const times = rows.map((r) => Date.parse(r.run_after)).filter((t) => Number.isFinite(t));
+      return { open: rows.length, since: times.length > 0 ? new Date(Math.min(...times)) : null };
     },
     /** Open work per assistant. Counts only: never a code, a hash or a message body. */
     async openItems(now: Date): Promise<OpenItems[]> {

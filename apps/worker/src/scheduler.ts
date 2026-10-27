@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { briefKey, enqueueBrief } from './brief.ts';
+import { allReported, briefKey, enqueueBrief } from './brief.ts';
 import { errorText, receipt, type WorkerDeps } from './common.ts';
 import { ROUND_DEPARTMENTS } from './departments.ts';
-import { digestLines, easternClock, enqueueDigest, enqueuePartialDigest } from './digest.ts';
+import { easternClock, enqueueDigest, enqueuePartialDigest } from './digest.ts';
 
 // The daily clock. Once a day, in New York time, the worker queues the day's work for the assistants:
 //   08:00  the three division briefs        08:30  the CEO digest
@@ -13,7 +13,7 @@ import { digestLines, easternClock, enqueueDigest, enqueuePartialDigest } from '
 // The digest is not queued ahead of briefs that are still being worked on (a worker started at 09:00 finds both jobs due at
 // once, and a digest takes milliseconds where a brief takes minutes): the job answers "waiting" and is asked again at every
 // tick. It goes when all three reports are in (the third brief queues it too, under the same key), or as a PARTIAL digest when
-// the missing briefs have stopped for good or 10:30 has come.
+// the missing briefs have stopped for good or have been open for two hours.
 
 export type ScheduledJob = {
   /** Shown in the receipt. */
@@ -24,19 +24,19 @@ export type ScheduledJob = {
   enqueue(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string): Promise<void | { waiting: string }>;
 };
 
-/** The digest waits for the day's briefs until this time, two hours after its slot; after it, the digest goes with whatever is in. */
-export const DIGEST_WAITS_UNTIL = '10:30';
+/** The digest waits for the day's briefs for at most this long after they were queued; after it, the digest goes with whatever is in. */
+export const DIGEST_WAITS_MINUTES = 120;
 
 /**
  * The 08:30 job. All three reports in: the day's complete digest (the third brief queued it already; same key). Some
- * missing: wait while any of the day's briefs is queued, running or waiting and it is before 10:30; otherwise queue the
- * partial digest, because nothing more is coming (or no longer in time) and the owner should hear what is in.
+ * missing: wait while any of the day's briefs is queued, running or waiting, but no longer than `waitsMinutes` after they
+ * were queued; otherwise queue the partial digest, because nothing more is coming (or no longer in time) and the owner
+ * should hear what is in. The wait is counted from when the briefs were queued, so a worker started late still waits.
  */
-export async function enqueueDayDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string, waitsUntil: string = DIGEST_WAITS_UNTIL): Promise<void | { waiting: string }> {
-  const lines = digestLines(await deps.store.divisionStatusMessages(date));
-  if (lines.every((line) => line.state !== 'missing')) return enqueueDigest(deps, date);
-  const open = await deps.store.openTasksByKey(ROUND_DEPARTMENTS.map((division) => briefKey(division, date)));
-  if (open > 0 && easternClock(deps.now()).minutes < minutesOf(waitsUntil)) return { waiting: `${open} of the day's briefs are still being worked on` };
+export async function enqueueDayDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string, waitsMinutes: number = DIGEST_WAITS_MINUTES): Promise<void | { waiting: string }> {
+  if (await allReported(deps, date)) return enqueueDigest(deps, date);
+  const { open, since } = await deps.store.openTasksByKey(ROUND_DEPARTMENTS.map((division) => briefKey(division, date)));
+  if (open > 0 && since && deps.now().getTime() < since.getTime() + waitsMinutes * 60_000) return { waiting: `${open} of the day's briefs are still being worked on` };
   return enqueuePartialDigest(deps, date);
 }
 

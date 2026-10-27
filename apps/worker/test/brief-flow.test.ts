@@ -24,13 +24,24 @@ const pool = new pg.Pool({ connectionString: dbUrl, max: 3 });
 afterAll(async () => pool.end());
 
 const HEAD: Record<BriefDivision, string> = { finance: 'demo-p-finance-owner', online: 'demo-p-online-staff', salon: 'demo-p-head-stylist' };
-const used = new Set<string>();
+// Days in the 2100s that this test has not used, and that no earlier run left a brief or a task on (the database keeps them).
+let freeDays: string[] = [];
 const freshDate = () => {
-  for (;;) {
-    const day = new Date(Date.UTC(2100, 0, 1) + randomInt(0, 36_500) * 86_400_000).toISOString().slice(0, 10);
-    if (!used.has(day)) return used.add(day) && day;
-  }
+  const day = freeDays.pop();
+  if (!day) throw new Error('no free day is left for this test');
+  return day;
 };
+async function pickFreeDays(count: number): Promise<string[]> {
+  const taken = new Set((await pool.query(
+    `select to_char(brief_date, 'YYYY-MM-DD') as day from public.division_briefs where brief_date between '2100-01-01' and '2199-12-31'
+     union select substring(idempotency_key from '[0-9]{4}-[0-9]{2}-[0-9]{2}') from public.tasks where idempotency_key like 'brief:%:21__-__-__%'`)).rows.map((r) => r.day as string));
+  const days = new Set<string>();
+  while (days.size < count) {
+    const day = new Date(Date.UTC(2100, 0, 1) + randomInt(0, 36_500) * 86_400_000).toISOString().slice(0, 10);
+    if (!taken.has(day)) days.add(day);
+  }
+  return [...days];
+}
 
 // ---- What the models would say --------------------------------------------------------------------------
 
@@ -85,6 +96,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
   let codeMode: ReturnType<typeof fakeCodeMode>;
 
   beforeAll(async () => {
+    freeDays = await pickFreeDays(300);
     const real = createStore(api!.url, api!.key);
     const data: DataPort = {
       ...dataMock,
@@ -188,6 +200,8 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect(writer).toMatchObject({ model: 'MOCK/plans', json: true, thinking: true, system: `SKILL(finance)\n\n${BRIEF_RULES}` });
     const given = JSON.parse(writer!.user);
     expect(given).toMatchObject({ division: 'finance', status: 'watch', period: '2026-09', replies: [], ownerLessons: [], attention: attention.finance });
+    // Nothing a model is given holds a phone number or a code.
+    expect(model.calls.map((c) => `${c.system}\n${c.user}`).join('\n')).not.toMatch(/\+1\d{10}|(?<!\d)\d{6}(?!\d)/);
     expect(given.metrics.map((m: { id: string }) => m.id)).toEqual(mockMetrics.map((m) => m.id));
     expect(codeMode.calls).toHaveLength(0);
 

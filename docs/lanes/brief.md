@@ -36,7 +36,8 @@ Base: `hq/foundation` at `bb29578`. Design: [../divisions.md](../divisions.md).
 - the numbers cannot be read: failed task, failed receipt, no brief. Wrong assistant, unknown division, bad date.
 - `enqueueBrief` queues once; the database refuses a brief key that does not match its division and day.
 - `APPROVE`: records the decision once, a plain "yes" decides nothing, a code with the wrong command word stays usable,
-  a rank the brief lacks records nothing, only the head the code was issued to can use it.
+  a rank the brief lacks records nothing (that was true of the records only: the code was spent too, which the review found; fixed,
+  see "Review fixes"), only the head the code was issued to can use it.
 
 I checked that these tests fail without the guards: reusing the stored brief, the needs note and the reply; treating a
 placeholder number as live; trusting a model status; reading the asker's tools instead of the target's.
@@ -111,8 +112,9 @@ Design: [../divisions.md](../divisions.md).
 - the same BRIEF and the same digest handled twice at once: three runs, one text, one row.
 - a head's BRIEF asks for her own brief only and queues no digest; a second BRIEF the same day is a new brief with its own
   code, and the owner's STATUS shows the later status; a person who is neither owner nor head starts nothing.
-- the 08:30 clock queues the three briefs and the digest once (a second clock queues nothing more); the digest with only the
-  salon in says "no report yet" for the others; the later reports neither queue nor send a second digest; STATUS shows them.
+- [replaced in the review fixes: the digest now waits for the briefs] the 08:30 clock queues the three briefs and the digest
+  once (a second clock queues nothing more); the digest with only the salon in says "no report yet" for the others; the later
+  reports neither queue nor send a second digest; STATUS shows them.
 - the third scheduled report queues the day's digest and the 08:30 clock finds it there.
 - no live number for the owner assistant: no text, a refused `digest.send` receipt; STATUS still answers. A division head's
   STATUS is still the open-items count.
@@ -120,8 +122,8 @@ Design: [../divisions.md](../divisions.md).
 - the database accepts a brief key with the asking text's id and refuses any other ending.
 - `APPROVE 1 3 <code>`: both actions in the division's memory (one memory each), the World Model (each action is an item
   with its title, cited metrics and the head's approval) and the HQ Manager's mailbox; action 2 untouched; the spent code
-  does nothing; two texts with the same code at once record once; a rank the brief lacks is named and not recorded; none of
-  the ranks existing records nothing; the text tells the head that several actions can be approved with one code.
+  does nothing; two texts with the same code at once record once; [replaced in the review fixes: a rank the brief lacks now refuses
+  the whole command and keeps the code usable]; the text tells the head that several actions can be approved with one code.
 
 I checked that these tests fail without the guards: the digest queued by the third report, one memory per brief instead
 of per action, the owner's STATUS, BRIEF runs keyed by the text, the digest never shortened, the late-job limit, APPROVE
@@ -241,3 +243,141 @@ and not-approved actions, answered, unanswered and could-not-answer questions, a
 - **Full suite on 2026-10-27 (08:52 ET), other lanes testing too:** `npm run typecheck` is clean; `npm test` 662 passed, 2 failed.
   The two failures are the same `supabase/tests/db.test.ts` "public (anon) role" tests as in slices 1 and 2 (this database's
   `anon` role has no table grants), not from this lane.
+
+## Review fixes (2026-10-27, after an independent review)
+
+Eight findings, four of them major. All are fixed except where said below. Every fix has a test that I saw fail on the code
+before the fix (the flow tests were run first on the unfixed code and failed for the reasons below; the unit tests were
+checked by taking each guard out again: the trace on raw reply facts, the renumbering and the question screen each made one or
+two tests fail).
+
+### 1. A wrong action number no longer spends the code (major)
+
+- **Cause.** `approveAction` spent the code (`use_approval_code`) and only then looked at the brief, so `APPROVE 3 <code>` on a
+  two-action brief answered "no action 3" but left the approval signed. My earlier note "a rank the brief lacks records
+  nothing" was true of the records only.
+- **Fix.** New migration `20261027100120_division_brief_peek.sql`: `peek_approval_code(phone, code, action, now)`, a read-only
+  look at a pending code (same match as `use_approval_code`: the person's phone, pending, not expired, the hash of the
+  approval's id with the code). It changes nothing and counts no failed attempt. `approveAction` peeks, finds the brief the
+  code hangs from, and refuses a command naming a rank the brief lacks BEFORE spending: "This brief has no action 3. Nothing was
+  recorded, and your code still works." A command with one good and one missing rank is refused whole (nothing half done).
+  A wrong code still falls through to the spend and is counted as before. If the peek misses and the spend then finds a rank
+  missing (the code taken a moment earlier), the code is spent, nothing is recorded, the head is told so and the task fails
+  with a receipt; that branch is a safety net the peek makes unreachable in practice.
+- **Tests.** `brief-flow.test.ts`: "APPROVE for an action the brief does not have records nothing and does not spend the
+  code..." (also `APPROVE 1 3`), "a wrong code is still counted, and a wrong action number does not count against the right
+  one", "a spent code that finds the brief lacking an action records nothing and says so", "looks at a code without spending
+  it..."; `digest-flow.test.ts`: "a rank the brief does not have is named and nothing is recorded, not even the ranks it
+  has...", "APPROVE 2 3 for a brief with one action..."; `supabase/tests/db.test.ts`: "peek_approval_code" (2 tests).
+
+### 2. Another division's reply can no longer carry an untraced or untagged number (major)
+
+- **Cause.** Any Code Mode result became reply facts; a number no tool returned was only counted in the receipt, and
+  `numberTrace` counted every number in the facts as given. A finance script returning a salon plus online sum, or a salon
+  reply `{ appointments: 310 }` with no id, passed the trace and the salon/online check.
+- **Fix.** `replyMetrics(facts, from)` keeps only `{ id, value, unit? }` for ids `m:salon.*` / `m:online.*`, only for the business
+  that answered (salon: salon ids, online: online ids, finance: both; `combined` never; at most 40; the three shapes the lane
+  already read). Every other number and word is dropped. `answerDataRequest` refuses the whole answer, with a plain reason and a
+  `refused` receipt, when `untracedResultNumbers` finds a number no tool returned, or when no metric value with an id is left.
+  The reply is stored reduced; `replyOf` reduces a stored reply again when it is read (so a reply stored before this fix, or one
+  posted by anything else, is held to the same rule). `checkBrief` takes the cited ids, the trace source and the business of each
+  reply number only from `replyMetrics`, so the label text of a metric ("30 days") no longer counts as a given number either.
+  The three division skills and the lookup question now tell the answering model to return the tools' metrics as `{ id, value,
+  unit }` and not to add anything up.
+- **Where I did something different from the finding's wording.** The finding suggested treating every number in a salon or
+  online reply as that division's business. I made it stricter: a number with no id is not accepted as data at all (it is
+  neither traced nor attributed), which also refuses the case the finding's wording would have attributed.
+- **Tests.** `brief.test.ts`: "replyMetrics" (4), "another division's numbers count only as metric values with an id" (3);
+  `brief-flow.test.ts`: "a reply carrying a number no tool returned...", "a reply whose numbers carry no metric id is
+  refused...", "a reply keeps only the metric ids and values of the business that answered..."; the existing cross-division
+  test now expects the reduced facts.
+
+### 3. The digest can no longer go ahead of the briefs (major)
+
+- **Cause.** A worker started between 08:30 and 12:00 found both jobs due in one tick and queued the digest next to three
+  briefs that take minutes; the digest then went with "no report yet" and, because the third brief queues the same key, the
+  full digest never followed. (My digest-flow test encoded that as expected.)
+- **Fix.** `ScheduledJob.enqueue` may answer `{ waiting }` (a job that is not ready: it is not marked queued, is asked again
+  every tick, and reports its wait once a day in a `scheduler.enqueue` receipt). The 08:30 job is now `enqueueDayDigest`: all
+  three scheduled reports in -> `digest:<date>` (same key as the third brief's); some missing and any of the day's three briefs
+  still queued, running or waiting -> wait, for at most two hours after they were queued (`DIGEST_WAITS_MINUTES`, counted from
+  the briefs' `run_after`, so a worker started at 10:45 still waits); otherwise -> a PARTIAL digest, `digest:<date>:partial`
+  (payload `partial: true`), with "no report yet" for the missing. The complete digest still follows as a second text when the
+  last report arrives. New store method `openTasksByKey(keys)` (count and earliest queue time); `allReported` in `brief.ts` is
+  the one place that says whether the three scheduled reports are in (the third brief uses it too).
+- **I did not use the finding's option (a)** (the digest task throws a retryable error while briefs run): a task has three
+  attempts 30 seconds apart, so it would be failed long before a brief finished.
+- **Tests.** `digest-flow.test.ts`: "at 08:30 ... the digest waits for them...", "a worker that starts late finds the briefs
+  and the digest due at once..." (the owner gets the digest only after the three reports are in), "a worker that starts after
+  10:30 still holds the digest...", "a brief that is still not in two hours after the briefs were queued..." (partial, then
+  the complete one), "when the briefs that are not in have stopped for good... the partial digest does not wait";
+  `digest.test.ts`: "a job that is not ready..." (1), "the 08:30 digest" (8), the partial key.
+
+### 4. Questions are screened before they are posted (major)
+
+- **Cause.** The prompt said a program checked rule 4 (no phone numbers, codes, names or medical/hair-loss words) but
+  `parseNeeds` only checked the schema, the division and the count.
+- **Fix.** `parseNeeds` drops a question with medical or hair-loss wording (the same word list the brief uses), a US phone
+  number (ten digits with or without a country code and any of the usual separators, so an ISO date is not one) or a run of
+  exactly six digits (a code), and returns `dropped` (the reasons, never the words). A dropped question is never posted: no
+  mailbox row, no World Model record, no lookup. The `brief.needs` receipt says how many were dropped and why; the needs note
+  keeps the reasons. The stored note goes through the same rules when reused.
+- **Not caught:** a customer's name (a program cannot tell a name from another word). Stated in `divisions.md`.
+- **Tests.** `brief.test.ts`: three `parseNeeds` tests; `brief-flow.test.ts`: "a question with medical wording, a phone number
+  or a code is never posted...", "a question that passes the rules is still posted when another one is dropped".
+
+### 5 to 8. The minor findings
+
+- **Gapped ranks.** `checkBrief` renumbers the actions 1, 2, 3 in order when it accepts a brief (a repeated rank is still an
+  objection), and the text's example is built from the brief's own ranks. Tests: `brief.test.ts` "renumbers the actions...",
+  `brief-flow.test.ts` "a brief whose actions are ranked 1 and 3 is stored as 1 and 2...".
+- **BRIEF's day.** `requestBriefs` uses the day the text arrived (`receivedAt`, the same helper `approveAction` uses), so a
+  retry after midnight asks for the same runs. Test: `digest-flow.test.ts` "a BRIEF text handled again after midnight...".
+- **Tests for the new behaviour.** `division_briefs` is in the anon loop of `db.test.ts`, and a new test shows the public
+  role no brief and no way to look at a code ("no rows or no access at all"). The anon loop itself is still red on this
+  local database, as before (below), because its first table (`work_reports`) is refused first; the new test passes on both
+  kinds of database. The refused-rank, scheduler late-start, question and untagged-number tests are listed above.
+- **Claims in the docs.** `divisions.md` now has a table of what the program refuses with the test that keeps each line
+  true, and says what the checks cannot do. The old claims in slices 1 and 2 above are annotated.
+
+### Twins searched (Law 4)
+
+- **Spend before checking, `manager.ts` `adoptChanges` (not my file, NOT fixed).** `ADOPT 3 <code>` on a review with two
+  recommendations spends the code, adopts nothing and says "Nothing was adopted". It is the same bug as finding 1. The fix is
+  the same shape: `store.peekApprovalCode({ action: 'adopt_change', ... })`, check the ranks against the review's open
+  recommendations, then spend. `forwardPlan` (SEND) cannot hit it (a proposal always holds plans 1 to 3), `decidePlan` has no rank.
+- **Untraced numbers from a Code Mode result, `manager.ts` (`askQuestion`, the review digest).** They only count untraced
+  numbers in the receipt. A head's questions go to her own assistant on her own tools, so the wall holds there by the tools;
+  the owner may see both businesses. Not changed.
+- **Model text posted unscreened.** The only model-chosen text posted between assistants in this lane was the question
+  (fixed); the brief's own words were already screened.
+- **The day taken from `now`.** `currentDigest` (STATUS) means "now" by design; no other place in the lane derives a key's day
+  from the clock instead of from the text.
+
+### What is not done
+
+- A customer's name in a question or a brief is not caught (stated above).
+- The digest wait polls the database once a minute (two small reads) while a brief is open; cheap, but not free.
+- A worker that starts after about 10:30 and whose briefs then get stuck sends no partial digest (the digest job is due only
+  until four hours after 08:30); the work reports and receipts show the stuck brief.
+- `manager.ts` `adoptChanges` (above), and its known gap with `approve_action` codes, are for the manager lane.
+- BRIEF has no rate limit, as before.
+
+### What the merge must know
+
+- **Third migration** `supabase/migrations/20261027100120_division_brief_peek.sql`: one new function, `peek_approval_code`
+  (execute for `service_role` only). Additive; applied once to the shared local database with a small node script, after
+  `20261027100110`. It touches no existing function, so it does not collide with another lane's re-creation of
+  `issue_approval` / `use_approval_code`.
+- **Outside the lane's own files:** `apps/worker/src/store.ts` (two new methods: `peekApprovalCode`, `openTasksByKey`),
+  `packages/profiles/skills/{finance,online,salon}/SKILL.md` (one bullet of "Your brief" changed: how to answer another
+  division), `supabase/tests/db.test.ts` (shared with the manager lane: `division_briefs` in its anon loop, a new anon test
+  and a `peek_approval_code` describe; keep all of it).
+- **For the manager lane's job in `SCHEDULE`:** `ScheduledJob.enqueue` may now return `{ waiting: string }`; a job that
+  returns nothing behaves exactly as before.
+- **`brief-flow.test.ts` days:** it now picks its days from those no earlier run left a brief or task on (it reads the
+  database first), instead of hoping a random day is free; an earlier run had once collided.
+- **Full suite on 2026-10-27 (09:31 ET), other lanes testing too:** `npm run typecheck` is clean; `npm test` 700 passed, 2 failed. The four
+  brief test files pass (brief 41, digest 34, brief-flow 31, digest-flow 20); the only failures are the same two
+  `supabase/tests/db.test.ts` "public (anon) role" tests as in every slice (this database's `anon` role has no table
+  grants).
