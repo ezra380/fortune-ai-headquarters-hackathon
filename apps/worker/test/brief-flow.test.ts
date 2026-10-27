@@ -211,7 +211,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     const code = codeIn(sms);
     expect(code).toMatch(/^\d{6}$/);
     expect(sms).toBe([
-      `Finance brief for ${row.day} (status WATCH)`, financeBrief.headline,
+      `George: Finance brief for ${row.day} (status WATCH)`, financeBrief.headline,
       'Findings:', `- ${financeBrief.findings[0]!.text}`, `- ${financeBrief.findings[1]!.text}`,
       'Actions:', `Action 1: Hold Google spend - ${financeBrief.actions[0]!.why}`,
       `Reply APPROVE <1-3> ${code} to approve an action. The code expires in 12 hours.`,

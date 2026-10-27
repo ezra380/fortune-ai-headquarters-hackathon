@@ -139,19 +139,19 @@ describe('the company\'s clock (New York time)', () => {
 describe('the daily schedule', () => {
   const at = (iso: string) => new Date(iso);
   const names = (iso: string, jobs?: readonly ScheduledJob[]) => dueJobs(at(iso), jobs).map((d) => d.job.name);
-  // The briefs' two jobs; the manager's review has its own tests below.
-  const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review');
+  // The briefs' two jobs; the manager's review has its own tests below, and the 07:00 workers theirs (workers.test.ts).
+  const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review' && j.name !== 'division-workers' && j.name !== 'weekly-reports');
 
   it('holds the three briefs at 08:00 and the digest at 08:30, New York time', () => {
     expect(BRIEF_JOBS.map((j) => [j.name, j.at])).toEqual([['division-briefs', '08:00'], ['ceo-digest', '08:30']]);
   });
 
   it('queues nothing before 08:00, the briefs from 08:00, the digest from 08:30', () => {
-    expect(names('2026-10-27T11:59:00Z')).toEqual([]); // 07:59 EDT
-    expect(names('2026-10-27T12:00:00Z')).toEqual(['division-briefs']);
-    expect(names('2026-10-27T12:29:00Z')).toEqual(['division-briefs']);
-    expect(names('2026-10-27T12:30:00Z')).toEqual(['division-briefs', 'ceo-digest']);
-    expect(names('2026-11-02T13:00:00Z')).toEqual(['division-briefs']); // 08:00 EST: the same wall-clock time after the clocks change
+    expect(names('2026-10-27T11:59:00Z', BRIEF_JOBS)).toEqual([]); // 07:59 EDT
+    expect(names('2026-10-27T12:00:00Z', BRIEF_JOBS)).toEqual(['division-briefs']);
+    expect(names('2026-10-27T12:29:00Z', BRIEF_JOBS)).toEqual(['division-briefs']);
+    expect(names('2026-10-27T12:30:00Z', BRIEF_JOBS)).toEqual(['division-briefs', 'ceo-digest']);
+    expect(names('2026-11-02T13:00:00Z', BRIEF_JOBS)).toEqual(['division-briefs']); // 08:00 EST: the same wall-clock time after the clocks change
   });
 
   it('still queues a job a worker missed, but only within a few hours of its time', () => {
@@ -164,7 +164,7 @@ describe('the daily schedule', () => {
   });
 
   it('is the day in New York, so the evening before is not the next morning\'s day', () => {
-    expect(dueJobs(at('2026-10-27T12:00:00Z')).map((d) => d.date)).toEqual(['2026-10-27']);
+    expect(dueJobs(at('2026-10-27T12:00:00Z'), BRIEF_JOBS).map((d) => d.date)).toEqual(['2026-10-27']);
   });
 
   it('tells a lane\'s own job apart: a job added to the table is due at its time', () => {
@@ -175,7 +175,7 @@ describe('the daily schedule', () => {
 
   // Merge wave 1, item a: the HQ Manager's daily review (queueDailyReview, docs/manager.md) runs on the brief lane's clock.
   it("holds the HQ Manager's daily review at 09:00, after the briefs and the digest", () => {
-    expect(SCHEDULE.map((j) => [j.name, j.at])).toEqual([['division-briefs', '08:00'], ['ceo-digest', '08:30'], ['manager-review', '09:00']]);
+    expect(SCHEDULE.map((j) => [j.name, j.at])).toEqual([['division-workers', '07:00'], ['weekly-reports', '07:30'], ['division-briefs', '08:00'], ['ceo-digest', '08:30'], ['manager-review', '09:00']]);
     expect(names('2026-10-27T12:59:00Z', SCHEDULE.filter((j) => j.name === 'manager-review'))).toEqual([]); // 08:59 EDT
     expect(names('2026-10-27T13:00:00Z', SCHEDULE.filter((j) => j.name === 'manager-review'))).toEqual(['manager-review']);
   });

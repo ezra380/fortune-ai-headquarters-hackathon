@@ -11,9 +11,10 @@ import { easternClock } from '../src/digest.ts';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { SCHEDULE, runDueJobs } from '../src/scheduler.ts';
 
-// The brief lane's two jobs. The HQ Manager's 09:00 review has its own tests (digest.test.ts); left in, it would queue
-// review tasks into the shared database at every clock time from 09:00.
-const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review');
+// The brief lane's two jobs. The HQ Manager's 09:00 review, the 07:00 workers and the Monday 07:30 weekly reports have
+// their own tests (digest.test.ts, workers.test.ts, weekly.test.ts); left in, they would queue their tasks into the shared
+// database at every clock time after theirs.
+const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review' && j.name !== 'division-workers' && j.name !== 'weekly-reports');
 import { createStore, type TaskRow } from '../src/store.ts';
 import { dataMock, fakeCodeMode, mockMetrics, scriptedModel } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
@@ -541,7 +542,8 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     const first = deps.brain.record.explainProposal(`${doc.id}:1`);
     expect(first.proposal).toMatchObject({ titles: ['Hold Google spend'], dataSource: row.data_source });
     expect(first.cites).toEqual(['m:online.ads.google.roas']);
-    expect(first.decisions).toMatchObject([{ by: 'Demo Finance Owner', action: 'approved', planRank: 1 }]);
+    const financeName = (await rows('select name from public.people where id = $1', [PERSON.finance]))[0].name; // the seed's stand-in, or a demo's name
+    expect(first.decisions).toMatchObject([{ by: financeName, action: 'approved', planRank: 1 }]);
     expect(deps.brain.record.explainProposal(`${doc.id}:3`).decisions).toMatchObject([{ action: 'approved', planRank: 3 }]);
     expect(deps.brain.record.explainProposal(`${doc.id}:2`).proposal).toBeNull();
     expect((await stepsOf(approved.task.id)).map((s) => [s.step, s.outcome, s.detail])).toEqual([

@@ -3,7 +3,7 @@ import { DivisionBrief, type Attention, type DataPort, type Receipt } from '@fah
 import { parseCommand } from '../src/commands.ts';
 import type { WorkerDeps } from '../src/common.ts';
 import {
-  briefKey, briefSms, checkBrief, divisionData, fallbackBrief, isLiveNumber, mixedBusinessSentences, parseNeeds, replyMetrics, statusOf, type Reply,
+  briefKey, briefSms, checkBrief, divisionData, fallbackBrief, isLiveNumber, mixedBusinessSentences, parseNeeds, replyMetrics, replySources, statusOf, type Reply,
 } from '../src/brief.ts';
 import { numberTrace } from '../src/reports.ts';
 import type { DivisionBriefRow } from '../src/store.ts';
@@ -258,6 +258,21 @@ describe('replyMetrics: the only numbers another division can hand over', () => 
   });
 });
 
+describe('replySources: where the answering division read each number', () => {
+  const salonMart = { view: 'fortune_demo_v2_salon_mart', queryHash: 'c'.repeat(64) };
+  const rowsView = { view: 'fortune_demo_rows', queryHash: 'e'.repeat(64) };
+  it("is the view and query hash of the tool output that names the metric's id, never the asker's", () => {
+    const metrics = [{ id: 'm:salon.clients.frequent.count', value: 42 }, { id: 'm:salon.repairs.late.count', value: 6 }, { id: 'm:salon.repairs.avg_days', value: 9.5 }];
+    const outputs = [
+      { tool: 'get_repair_tickets', output: { ...rowsView, dataDate: '2026-10-26', totals: { count: 6 }, rows: [] } }, // its total has no id: a script's label is not a source
+      { tool: 'get_salon_metrics', output: { ...salonMart, metrics: { 'm:salon.clients.frequent.count': { value: 42, unit: 'count' } } } },
+      { tool: 'get_metric_series', output: { metricId: 'm:salon.repairs.avg_days', points: [{ period: '2026-09', value: 9.5 }], view: 'fortune_demo_v2_salon_mart', queryHash: 'not a hash' } },
+    ];
+    expect(replySources(metrics, outputs)).toEqual({ 'm:salon.clients.frequent.count': salonMart });
+    expect(replySources(metrics, [{ tool: 'get_metrics', output: metrics }])).toEqual({}); // an output that says nothing of where it read
+  });
+});
+
 describe('fallbackBrief: written by rules from the attention list and the metrics\' own labels and values', () => {
   const attention: Attention[] = [
     { metricId: 'm:salon.appointments.count', level: 'watch', rule: 'bookings below plan' },
@@ -306,7 +321,7 @@ describe('the text to the head', () => {
   it('carries the status, headline, findings and actions, then the tail', () => {
     const sms = briefSms(row(goodBrief as DivisionBrief), 'Finance', tail);
     expect(sms).toBe([
-      'Finance brief for 2026-10-27 (status WATCH)',
+      'George: Finance brief for 2026-10-27 (status WATCH)',
       goodBrief.headline,
       'Findings:',
       `- ${goodBrief.findings[0]!.text}`,
@@ -319,7 +334,15 @@ describe('the text to the head', () => {
 
   it('says so when a program wrote the brief', () => {
     const sms = briefSms(row(fallbackBrief('Finance', { metrics: mockMetrics, attention: [] }, 'normal'), { written_by: 'rule', status: 'normal' }), 'Finance', 'Nothing needs your approval today.');
-    expect(sms.split('\n')[0]).toBe('Finance brief for 2026-10-27 (status NORMAL) - written by rules: the usual write-up did not pass its number check');
+    expect(sms.split('\n')[0]).toBe('George: Finance brief for 2026-10-27 (status NORMAL) - written by rules: the usual write-up did not pass its number check');
+  });
+
+  it('starts with the name of the division\'s manager, whoever the head is', () => {
+    const first = (division: DivisionBriefRow['division'], label: string) =>
+      briefSms(row(goodBrief as DivisionBrief, { division }), label, tail).split('\n')[0];
+    expect(first('finance', 'Finance')).toBe('George: Finance brief for 2026-10-27 (status WATCH)');
+    expect(first('online', 'Online')).toBe('Georgette: Online brief for 2026-10-27 (status WATCH)');
+    expect(first('salon', 'Salon')).toBe('Cindy: Salon brief for 2026-10-27 (status WATCH)');
   });
 
   it('shortens to fit one message and never loses the tail', () => {

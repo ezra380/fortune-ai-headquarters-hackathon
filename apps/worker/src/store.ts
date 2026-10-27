@@ -1,5 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
-import type { AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagerReview, Receipt, Recommendation, RecommendationDetail, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
+import { workerDivision } from '@fahq/contracts';
+import type {
+  AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagedDivision, ManagerReview, Receipt, Recommendation, RecommendationDetail, ReportStatus, Suggestion,
+  WeeklyReport, WorkerId, WorkerReport, WorkReport, WorkStep,
+} from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
 // happen once goes through a unique key (dedupe_key, idempotency_key) or a conditional update.
@@ -521,7 +525,93 @@ export function createStore(url: string, serviceKey: string) {
       const row = must(await db.from('tasks').select('status').eq('idempotency_key', key).maybeSingle(), 'task') as { status: string } | null;
       return row?.status ?? null;
     },
+
+    // ---- worker and weekly reports (W1) ------------------------------------------------------------
+
+    /** Inserts a worker's report once per key (a retried task finds its own report again) and reads it back. */
+    async saveWorkerReport(r: { key: string; report: WorkerReport; taskId: string | null }): Promise<WorkerReportRow> {
+      must(await db.from('worker_reports').upsert({
+        worker_id: r.report.workerId, division: workerDivision(r.report.workerId), report_key: r.key, report_date: r.report.day, period: r.report.period,
+        status: r.report.status, written_by: r.report.writtenBy, report: r.report, data_source: r.report.dataSource, task_id: r.taskId,
+      }, { onConflict: 'report_key', ignoreDuplicates: true }), 'save worker report');
+      return must(await db.from('worker_reports').select('*').eq('report_key', r.key).single(), 'read worker report') as WorkerReportRow;
+    },
+    /** The report a worker's task already wrote, if any: a retried task reuses it instead of asking the model again. */
+    async workerReportByKey(key: string): Promise<WorkerReportRow | null> {
+      return must(await db.from('worker_reports').select('*').eq('report_key', key).maybeSingle(), 'read worker report') as WorkerReportRow | null;
+    },
+    /** A worker's newest report written for a day from `from` to `to` (YYYY-MM-DD, both included), or null when it has none. */
+    async latestWorkerReport(workerId: WorkerId, from: string, to: string): Promise<WorkerReportRow | null> {
+      return must(await db.from('worker_reports').select('*').eq('worker_id', workerId).gte('report_date', from).lte('report_date', to)
+        .order('report_date', { ascending: false }).order('created_at', { ascending: false }).limit(1).maybeSingle(), 'latest worker report') as WorkerReportRow | null;
+    },
+    /** Inserts a division's weekly report once per key (a retried task finds its own report again) and reads it back. */
+    async saveWeeklyReport(r: { key: string; report: WeeklyReport; taskId: string | null }): Promise<WeeklyReportRow> {
+      must(await db.from('weekly_reports').upsert({
+        division: r.report.division, report_key: r.key, week_of: r.report.weekOf, period: r.report.period, status: r.report.status,
+        written_by: r.report.writtenBy, report: r.report, ceo_line: r.report.ceoLine, data_source: r.report.dataSource, task_id: r.taskId,
+      }, { onConflict: 'report_key', ignoreDuplicates: true }), 'save weekly report');
+      return must(await db.from('weekly_reports').select('*').eq('report_key', r.key).single(), 'read weekly report') as WeeklyReportRow;
+    },
+    /** The weekly report a task already wrote, if any: a retried task goes straight to delivery. */
+    async weeklyReportByKey(key: string): Promise<WeeklyReportRow | null> {
+      return must(await db.from('weekly_reports').select('*').eq('report_key', key).maybeSingle(), 'read weekly report') as WeeklyReportRow | null;
+    },
+    async weeklyReport(id: string): Promise<WeeklyReportRow> {
+      return must(await db.from('weekly_reports').select('*').eq('id', id).single(), 'read weekly report') as WeeklyReportRow;
+    },
+    /** The weekly status lines of a day (the managers' CEO lines to Owner HQ), newest first: what the weekly digest is built from. */
+    async weeklyStatusMessages(date: string): Promise<MessageRow[]> {
+      return must(await db.from('assistant_messages').select('*').eq('to_assistant', 'owner').eq('kind', 'report')
+        .eq('body->>type', 'weekly_status').eq('body->>date', date).order('created_at', { ascending: false }).limit(200), 'weekly statuses') as MessageRow[];
+    },
+    /** Records the message the head approves against, once: a report that already has one keeps it. */
+    async setWeeklyReportMessage(id: string, messageId: string) {
+      must(await db.from('weekly_reports').update({ message_id: messageId }).eq('id', id).is('message_id', null), 'weekly report message');
+    },
+    /** Queues an email (outbox channel 'email'), once per dedupe key. The delivery lane sends it, only to HQ_REPORT_TO. */
+    async addEmailOutbox(o: { toPersonId: string; from: AssistantId; body: string; attachmentRef: string; dedupeKey: string }) {
+      must(await db.from('outbox').upsert(
+        { channel: 'email', to_person_id: o.toPersonId, from_assistant: o.from, body: o.body.slice(0, 1600), attachment_ref: o.attachmentRef, dedupe_key: o.dedupeKey },
+        { onConflict: 'dedupe_key', ignoreDuplicates: true },
+      ), 'email outbox');
+    },
   };
 }
 
 export type Store = ReturnType<typeof createStore>;
+
+// ---- worker and weekly reports (W1) ------------------------------------------------------------------
+
+/** One worker's report of one day. `status` is set by the program; `written_by` is 'rule' when the model's words did not pass their check. */
+export type WorkerReportRow = {
+  id: string;
+  worker_id: WorkerId;
+  division: ManagedDivision;
+  report_key: string;
+  report_date: string;
+  period: string;
+  status: ReportStatus;
+  written_by: 'model' | 'rule';
+  report: WorkerReport;
+  data_source: string | null;
+  task_id: string | null;
+  created_at: string;
+};
+
+/** One division's weekly report. `message_id` is the mailbox row the head's code hangs from, once the report is delivered. */
+export type WeeklyReportRow = {
+  id: string;
+  division: ManagedDivision;
+  report_key: string;
+  week_of: string;
+  period: string;
+  status: ReportStatus;
+  written_by: 'model' | 'rule';
+  report: WeeklyReport;
+  ceo_line: string;
+  data_source: string | null;
+  message_id: string | null;
+  task_id: string | null;
+  created_at: string;
+};
