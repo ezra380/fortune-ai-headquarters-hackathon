@@ -187,13 +187,27 @@ describe('traceNumbers: other ways of writing a number', () => {
 describe('traceNumbers: row ids are names, not amounts', () => {
   const rowFacts = { rows: [{ invoice: 'SUP-2199', amountUsd: 400 }, { repair: 'demo-rt-01234', feeUsd: 85 }] };
 
-  it('skips only the digits that close a row id (SUP-2201, demo-rt-01234), never a figure after a word and a hyphen', () => {
-    expect(traceNumbers('Invoice SUP-2201 is overdue by $400.', rowFacts)).toEqual([]);
-    expect(traceNumbers('Repair demo-rt-01234 (and demo-s-3) costs $85.', rowFacts)).toEqual([]);
+  it('skips only the digits that close a row id (SUP-2199, demo-rt-01234), never a figure after a word and a hyphen', () => {
+    expect(traceNumbers('Invoice SUP-2199 is overdue by $400.', rowFacts)).toEqual([]);
+    expect(traceNumbers('Invoice sup-2199 is overdue by $400.', rowFacts)).toEqual([]); // the id is matched without regard to case
+    expect(traceNumbers('Repair demo-rt-01234 costs $85.', rowFacts)).toEqual([]);
     expect(traceNumbers('A high-35% margin and ROAS-9.5x.', rowFacts)).toEqual(['"35%" is not in the facts', '"9.5x" is not in the facts']);
     expect(traceNumbers('A sub-$5,000 test for the top-100 buyers.', rowFacts)).toEqual(['"$5,000" is not in the facts', '"100" is not in the facts']);
     expect(traceNumbers("SUP-2201's balance is $400.", rowFacts)).toEqual(['"2201" is not in the facts']); // glued: not an id
     expect(mentions('Invoice SUP-2201 is open.', 2201)).toBe(false);
+  });
+
+  // Second-key review of merge wave 1: skipping the digits let any id-shaped name pass, so a model could name an
+  // invoice or a repair that does not exist. A row id must be one the facts hold, as a number must.
+  it('refuses a row id the facts do not hold, as it refuses a number', () => {
+    expect(traceNumbers('Invoice SUP-2201 is overdue by $400.', rowFacts)).toEqual(['"SUP-2201" is not in the facts']);
+    expect(traceNumbers('Invoice SUP-9999 is overdue by $400.', { rows: [{ invoice: 'SUP-2201', amountUsd: 400 }] })).toEqual(['"SUP-9999" is not in the facts']);
+    expect(traceNumbers('Repair demo-rt-01234 (and demo-s-3) costs $85.', rowFacts)).toEqual(['"demo-s-3" is not in the facts']);
+    // A fact's string that only contains the id, or the id among other words, holds it; a key does not.
+    expect(traceNumbers('Ticket demo-rt-01234 is late.', { note: 'Late: demo-rt-01234, 9 days.' })).toEqual([]);
+    expect(traceNumbers('Ticket demo-rt-01234 is late.', { 'demo-rt-01234': 'late' })).toEqual(['"demo-rt-01234" is not in the facts']);
+    // A longer or shorter id is another row.
+    expect(traceNumbers('Invoice SUP-219 is open.', rowFacts)).toEqual(['"SUP-219" is not in the facts']);
   });
 });
 

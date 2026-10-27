@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WorkReport, isRowId, type AssistantId, type Receipt, type Suggestion, type WorkStep } from '@fahq/contracts';
+import { WorkReport, isRowId, rowIdsIn, type AssistantId, type Receipt, type Suggestion, type WorkStep } from '@fahq/contracts';
 
 // End-of-work reports and the checks the HQ Manager relies on. Everything here is plain code:
 //  - buildWorkReport turns a finished task's receipts into a WorkReport. Its suggestions come from
@@ -215,7 +215,7 @@ export function summarizeUsage(rows: readonly UsageRow[], since: Date): { since:
 //    right after letters (gpt4, v2), after a dot that follows a letter or digit (v1.2), after an underscore;
 //    after a word and a hyphen only when they sit inside a name (nemotron-3-ultra, lightning-30b) or close a
 //    row id (SUP-2201, demo-rt-01234; isRowId in @fahq/contracts, the plan checker's rule). "high-35%",
-//    "ROAS-9.5x" and "the top-100 buyers" are read.
+//    "ROAS-9.5x" and "the top-100 buyers" are read. The row id itself must be in a string of the data (any case).
 //  - What matches: a given number rounded to 0, 1 or 2 decimals equals the written one (112.4 may be written
 //    112); a percentage may also match the given number times 100 (0.0512 as 5.12%). A number written with
 //    a minus sign must match a negative number in the data. One written without may describe a drop
@@ -274,18 +274,35 @@ export function numbersWritten(input: string): { found: TracedNumber[]; words: s
   return { found: [...digitsIn(text), ...spoken], words: [...text.matchAll(BIG_WORDS)].map((w) => w[0]) };
 }
 
-/** Every number in a JSON value: numbers, and the digits written inside its strings. Signed. */
-export function numbersGiven(source: unknown): number[] {
-  const out = new Set<number>();
+/** Calls `visit` with every number and every (normalized) string inside a JSON value, to a depth of 12. */
+function eachGiven(source: unknown, visit: (v: number | string) => void): void {
   const walk = (v: unknown, depth: number) => {
     if (depth > 12) return;
-    if (typeof v === 'number' && Number.isFinite(v)) out.add(v);
-    else if (typeof v === 'string') for (const n of digitsIn(normalize(v))) out.add(n.value);
+    if (typeof v === 'number' && Number.isFinite(v)) visit(v);
+    else if (typeof v === 'string') visit(normalize(v));
     else if (Array.isArray(v)) for (const x of v) walk(x, depth + 1);
     else if (v && typeof v === 'object') for (const x of Object.values(v)) walk(x, depth + 1);
   };
   walk(source, 0);
+}
+
+/** Every number in a JSON value: numbers, and the digits written inside its strings. Signed. */
+export function numbersGiven(source: unknown): number[] {
+  const out = new Set<number>();
+  eachGiven(source, (v) => {
+    if (typeof v === 'number') out.add(v);
+    else for (const n of digitsIn(v)) out.add(n.value);
+  });
   return [...out];
+}
+
+/** The row ids written in the strings of a JSON value, lowercased (an id is the same row in any case). */
+function rowIdsGiven(source: unknown): Set<string> {
+  const out = new Set<string>();
+  eachGiven(source, (v) => {
+    if (typeof v === 'string') for (const id of rowIdsIn(v)) out.add(id.toLowerCase());
+  });
+  return out;
 }
 
 const roundTo = (x: number, k: number) => Math.round(x * 10 ** k) / 10 ** k;
@@ -299,9 +316,13 @@ function inData(given: readonly number[], n: TracedNumber): boolean {
   });
 }
 
-/** Objections (plain sentences) for every number or number-word in `texts` that `source` does not contain. */
+/**
+ * Objections (plain sentences) for every number or number-word in `texts` that `source` does not contain, and for every
+ * row id (SUP-2201, demo-rt-01234) that no string in `source` holds: its digits are a name, but the name must be given.
+ */
 export function numberTrace(texts: readonly (readonly [label: string, text: string])[], source: unknown): string[] {
   const given = numbersGiven(source);
+  const ids = rowIdsGiven(source);
   const objections: string[] = [];
   for (const [label, text] of texts) {
     const { found, words } = numbersWritten(text);
@@ -309,6 +330,7 @@ export function numberTrace(texts: readonly (readonly [label: string, text: stri
     for (const n of found) {
       if (!inData(given, n)) objections.push(`${label}: "${n.raw}" is not a number in the data`);
     }
+    for (const id of rowIdsIn(normalize(text))) if (!ids.has(id.toLowerCase())) objections.push(`${label}: "${id}" is not in the data`);
   }
   return objections;
 }

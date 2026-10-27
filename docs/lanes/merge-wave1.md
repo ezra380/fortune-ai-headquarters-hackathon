@@ -102,7 +102,8 @@ and on a database built from the files, and keeps its meaning (anon sees no row 
   they close a row id or sit inside a name (`nemotron-3-ultra`, `lightning-30b`, which the existing tests pin as names);
   "high-35%", "ROAS-9.5x", "the top-100 buyers" are read. `answer.ts` `figuresIn`: bare digits that close a row id
   ("SUP-2201") are skipped. Tests: `units.test.ts` "reads a figure written after a word and a hyphen, and skips only a
-  row id or a name such as nemotron-3-ultra"; `answer.test.ts` "skips only the digits that close a row id …".
+  row id or a name such as nemotron-3-ultra"; `answer.test.ts` "skips only the digits that close a row id …". This let
+  any id-shaped name pass untraced; fixed in the second-key review below (the id itself must be given).
 - **c. Provider text out of failure details.** New `apps/worker/src/data-read.ts` `readData`: a failed read gives
   "Business data could not be read (ZETARIS_READ)." and logs `worker.zetaris_read_failed` with phones, codes and emails
   masked. Used by the read tools (replaces their own copy), the plan round (`rounds.ts`), the plan writer
@@ -112,13 +113,15 @@ and on a database built from the files, and keeps its meaning (anon sees no row 
   task error); `brief.test.ts` "says so, with a failed receipt, …"; `brief-flow.test.ts` "fails plainly, with a receipt,
   when the numbers cannot be read …".
 - **d. ADOPT checks before it spends.** `adoptChanges` peeks (`peek_approval_code`, action `adopt_change`), finds the
-  review, and refuses a command naming a rank the review lacks before the code is spent: "This review has no
-  recommendation 3. Nothing was adopted, and your code still works." A wrong code still falls through to the spend and
-  is counted. An `approve_action` code under ADOPT now names APPROVE (`BRIEF_CODE_FOR`). The old post-spend handling
-  (adopt what exists, name the rest) stays as the safety net for a code taken in the moment between peek and spend.
-  Tests: `manager.test.ts` "says which ranks were not adopted, …" (now: refused whole, then the same code adopts rank
-  2); `brief-flow.test.ts` "a plain yes decides nothing, and a code used with the wrong command word stays usable"
-  (ADOPT case).
+  review, and refuses a command naming a rank that is not open in the review before the code is spent: "This review has
+  no open recommendation 3. Nothing was adopted, and your code still works." A wrong code still falls through to the
+  spend and is counted. An `approve_action` code under ADOPT now names APPROVE (`BRIEF_CODE_FOR`). After the spend, ADOPT
+  and APPROVE record nothing when a rank is missing or the code spent is not the one looked at (see "Second-key review"
+  below; the first version of this item adopted the ranks that existed and wrongly called that a safety net for a code
+  taken between peek and spend, a case in which the spend itself refuses). Tests: `manager.test.ts` "says which ranks
+  were not adopted, …" (refused whole, then the same code adopts rank 2) and "ADOPT is applied whole or not at all";
+  `brief-flow.test.ts` "a plain yes decides nothing, and a code used with the wrong command word stays usable" (ADOPT
+  case).
 - **e. FINANCE_PERIOD default.** `financePeriod` keeps the data lane's refusal and falls back to `2026-10-mtd` when the
   port serves it (design 4g), else to the latest period the port serves. `.env.example` no longer sets `2026-09`.
   Tests: `units.test.ts` "defaults to 2026-10-mtd when the data serves it, else to the latest period it serves; …" and
@@ -150,10 +153,76 @@ The stored rows now carry the new End of work, Your brief, `list_session_reports
 - README's HQ Manager row still said the manager applies lessons and notes itself (fixed).
 - `brain-mcp.ts` `logDetail` masks phone numbers with its own pattern, not `maskPhonesAndCodes` (a log only; left).
 
+## Second-key review (2026-10-27 afternoon)
+
+An independent review of this merge found two majors and four minors. All six were taken; none was judged wrong.
+Every test named below was seen failing on the unfixed code (7 unit tests, 5 database tests), except one marked as a
+pin. No migration; the stored profiles still pass the new wall (no reseed).
+
+1. **Major: an invented row id passed every trace (item b).** `rowIdsIn(text)`, beside `isRowId` in `@fahq/contracts`,
+   lists the ids a text names (exactly those whose digits `isRowId` skips). `answer.ts` `traceNumbers` objects
+   `"SUP-9999" is not in the facts` unless a string of the facts holds the id (any case; a key does not count).
+   `reports.ts` `numberTrace` does the same against the data (`is not in the data`): the manager's review and answers,
+   the division brief and Owner HQ's synthesis all go through it. `checkPlans` refuses every row id in a plan, memory
+   notes included (`is not in the data: a plan cites metrics, never a row`). Tests: `answer.test.ts` "refuses a row id the
+   facts do not hold, as it refuses a number" (the old line 191 now names an id the facts hold); `units.test.ts` "refuses a
+   row id that is not in the data, and passes one that is" (the old line 374 case, now refused); `validate.test.ts`
+   "refuses a row id in a plan …" (replaces design 4e's "lets an action name a row by its id") and "rowIdsIn names exactly
+   the ids …". Judgment: the id must be in the facts, not only in the question, so "SUP-9999 is not in the data" is
+   refused too and the person gets the plain facts after the correction round (fails closed). Twins: `rg
+   "isRowId|rowIdsIn"` finds the three, all fixed; `untracedResultNumbers` (answer.ts) is a hint shown next to the
+   script, never a gate, and still lists numbers only (left).
+2. **Major: the salon/online wall missed the division reads.** `READ_SCOPE` (salon, online, both or none, for each of the
+   22 read tools) and `MONEY_READS` live in `packages/profiles/src/rows.ts`, keyed by `ReadToolName`, so a tool added to
+   `READ_TOOL_NAMES` does not compile without a scope. `checkProfileRow` derives the wall from them: the salon reads only
+   salon or none tools, the online store only online or none, the manager no money tool; a name without a scope is
+   walled. Not in `index.ts` as the review suggested: `rows.ts` enforces the wall and `index.ts` imports `rows.ts`, so
+   `rows.ts` takes the names as a type only (no run-time import cycle). None means no business data, or only the
+   caller's own: `my_lessons`, `recall_my_decisions`; `get_timeline`, `usage_summary`, `open_items` (ids, times and
+   counts); `get_metric_series` and `list_session_reports` (wall themselves by caller). `get_budget_room` is online (the
+   online ad budgets) and money. Beyond the review's minimum, the salon and the online store also lose `recall_decisions`,
+   `list_lessons`, `list_work_reports`, `latest_proposal` and `explain_proposal` (both); no shipped profile reads them.
+   Left as shipped: the manager reads `explain_proposal`, which returns cited metric values; finance and the owner have
+   no wall. Tests: `changes.test.ts` "walls every division read by its scope …" (every assistant against every tool,
+   and the review's cases through `applyProfileChange`) and "declares a scope for every read tool, and for nothing
+   else".
+3. **Minor, open question 3 (ADOPT after the spend): decided as the review proposed.** ADOPT now matches APPROVE: a
+   command is applied whole or not at all. A rank missing after the spend adopts nothing, writes a failed receipt, answers
+   "This review has no recommendation N, and the code was already used up, so nothing was adopted. Text REVIEW for a new
+   review and code." and fails the task. The spend is bound to the look in both commands: when the look found a code and
+   the spend used another message, nothing is recorded ("Your code was used up, but not for the review it was checked
+   against, …"). The message ids are compared; `peek_approval_code` is unchanged (no migration). Tests: `manager.test.ts`
+   "adopts nothing when a spent code finds a rank missing …" and "adopts nothing when the code spent is not the one the
+   look checked"; `brief-flow.test.ts` "records nothing when the code spent is not the one the look checked". APPROVE's
+   missing-rank case already recorded nothing and keeps its test.
+4. **Minor: a closed rank passed the look.** The look refuses a rank whose status is not `proposed` unless the manager
+   already applied it: "This review has no open recommendation N. Nothing was adopted, and your code still works." The
+   comment on `adoptChanges` now names its test. Test: `manager.test.ts` "refuses a rank the program closed before the
+   code is spent, …"; the replies in "says which ranks were not adopted" now say "no open recommendation", and
+   `manager-decides.test.ts` "closes a recommendation the stored profile will not take …" (which pinned the old
+   "Not applied" after the spend) now expects the refusal before it.
+5. **Minor: the safety-net claim.** Item d reworded. The `brief.ts` comment that said "if the code was taken a moment
+   earlier" now names what reaches the branch: a replayed task or a hash collision (a code taken between look and spend
+   makes the spend refuse).
+6. **Minor: uncited small counts (data lane 4d).** `checkPlan` builds the phrase map from every count metric the catalog
+   names among the metrics passed, cited or not. Judgment: when the best phrase fits a cited and an uncited count ("16
+   repairs" with open repairs cited, late repairs not), the cited one is meant, so a plan that passed on its cited count
+   still passes; between uncited counts of different values the plan must name which. Memory notes still get no
+   small-count check (they belong to no plan). Tests: `validate.test.ts` "holds a small number to the uncited count its
+   words name" and, a pin that passed before the fix too, "lets a bare noun mean the count the plan cites …".
+
+Proof: before the fixes, the four unit files ran 7 failed of 221 and the two database files 5 failed of 61, each the
+new or changed test named above. After them `npm run typecheck` is clean and the full `npm test` on the shared stack,
+under the test lock, ran 1230 of 1230 (65 files, about 124 s); the first full run found one more test that pinned the
+old ADOPT reply (`manager-decides.test.ts`, item 4). A probe of `rowIdsIn` on 100,000-character hostile strings (hyphen
+runs, one long segment, many starts) took 3 ms or less, and a full-width `ＳＵＰ－９９９９` is read and refused as
+`SUP-9999`.
+
 ## Still not done (from the lanes, still true after the merge)
 
-- **Law 10:** no independent second-key review of the data lane's slice 4 and review fixes, of the profiles lane's
-  review fixes, or of anything in this merge (conflict resolutions, items a–e). Law 12: this merge is 140 files and
+- **Law 10:** the second-key review above read this merge (and the data lane's rule 4d); its fix-ups need their own
+  re-review. No independent review yet of the data lane's other slice 4 and review fixes or of the profiles lane's
+  review fixes beyond what it touched. Law 12: this merge is 140 files and
   about 20,000 added lines; Ezra's OK on size (or a split) is still needed, and Class 1 parts (migrations, approval
   codes) need his approval before any merge to a live branch.
 - Data: rounds read `getFinanceMetrics` once, unsliced (about 20 s live under version 2); per-division mart reads in
@@ -169,8 +238,8 @@ The stored rows now carry the new End of work, Your brief, `list_session_reports
 - Profiles: the manager applying a lesson or note by itself stays off until Ezra approves it in writing and the two
   "at minimum" conditions are built; one successful `saveProfile` through PostgREST on the shared stack is not proven;
   lessons adopted before profiles were stored are not copied into rows; doors are stdio only and read the profile once
-  at start; no door-token revoke script; numbers inside a JSON report are not masked; `list_work_reports` is not in
-  `NEVER_READS`.
+  at start; no door-token revoke script; numbers inside a JSON report are not masked. (`list_work_reports` is now walled
+  from the salon and the online store by its scope; see the second-key review.)
 - Nightshift: `MODEL_PROVIDER=meterless` is unit-tested only; not run live in this merge.
 - Cloud: none of the new migrations applied; the console's Divisions tab says "could not be read (42P01)" there
   until they are.

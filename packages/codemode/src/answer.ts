@@ -1,4 +1,4 @@
-import { isRowId, type ModelPort } from '@fahq/contracts';
+import { isRowId, rowIdsIn, type ModelPort } from '@fahq/contracts';
 
 // The reply step after a Code Mode script: a model turns the script's small facts into a few plain
 // sentences, and a program then checks that every number in the reply came from those facts.
@@ -128,14 +128,20 @@ function numbersWithPaths(facts: unknown, path: string, out: Located[] = [], dep
 
 const factNumbers = (facts: unknown) => numbersWithPaths(facts, '').map((n) => n.value);
 
-/** The years named anywhere in some text or data (as dates inside strings, such as "2026-09"). */
-function yearsIn(data: unknown, out = new Set<number>(), depth = 0): Set<number> {
+/** Every string value anywhere in some text or data (not its keys). */
+function stringsIn(data: unknown, out: string[] = [], depth = 0): string[] {
   if (depth > 20) return out;
-  if (typeof data === 'string') for (const m of data.matchAll(YEAR_IN_TEXT)) out.add(Number(m[0]));
-  else if (Array.isArray(data)) for (const item of data) yearsIn(item, out, depth + 1);
-  else if (data && typeof data === 'object') for (const item of Object.values(data)) yearsIn(item, out, depth + 1);
+  if (typeof data === 'string') out.push(data);
+  else if (Array.isArray(data)) for (const item of data) stringsIn(item, out, depth + 1);
+  else if (data && typeof data === 'object') for (const item of Object.values(data)) stringsIn(item, out, depth + 1);
   return out;
 }
+
+/** The years named anywhere in some text or data (as dates inside strings, such as "2026-09"). */
+const yearsIn = (data: unknown) => new Set(stringsIn(data).flatMap((s) => [...s.matchAll(YEAR_IN_TEXT)].map((m) => Number(m[0]))));
+
+/** The row ids the facts' strings hold, lowercased (an id is the same row in any case). */
+const rowIdsGiven = (facts: unknown) => new Set(stringsIn(facts).flatMap((s) => rowIdsIn(prepare(s))).map((id) => id.toLowerCase()));
 
 /** True when `f` is `fact` rounded to the figure's own precision (sign ignored). */
 function matches(f: Figure, fact: number): boolean {
@@ -164,7 +170,8 @@ function isDateYear(before: string, year: number, named: ReadonlySet<number>): b
  *
  * Not claims: list numbers ("1." at the start of a line, after any punctuation), digits inside words
  * ("2nd", "4pm", "30min"), the digits that close a row id ("SUP-2201", "demo-rt-01234"; isRowId in
- * @fahq/contracts, so "high-35%" and "ROAS-9.5x" are still read), calendar dates (2026-09, 2026-09-15),
+ * @fahq/contracts, so "high-35%" and "ROAS-9.5x" are still read; the id itself must be in a string of the facts,
+ * in any case, or it is objected to), calendar dates (2026-09, 2026-09-15),
  * and a four-digit year in a real date context: right after a month or a quarter ("September 2026",
  * "Q3 2026"), or after "since", "during" or a sentence-opening "In" when the facts (or `context`, such as the question) name that year.
  * Every other number from 1900 to 2100 is an amount like any other ("spend of 1950", "brought in 1999").
@@ -184,6 +191,8 @@ export function traceNumbers(text: string, facts: unknown, context?: unknown): s
     if (yearLike && isDateYear(prepared.slice(0, f.at), f.base, named)) continue;
     objections.add(`"${f.raw}" is not in the facts`);
   }
+  const ids = rowIdsGiven(facts);
+  for (const id of rowIdsIn(prepared)) if (!ids.has(id.toLowerCase())) objections.add(`"${id}" is not in the facts`);
   return [...objections];
 }
 

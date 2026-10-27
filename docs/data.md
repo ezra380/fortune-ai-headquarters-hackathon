@@ -307,14 +307,18 @@ The worker refuses a `FINANCE_PERIOD` the data does not serve and logs why. With
   decimal point is still read, and so is any other word before the hyphen: "a sub-$5,000 test", "mid-30%",
   "ROAS-9.5x", "the top-100 buyers". A minus sign or a range still reads (`-$3,000`, `10-20%`). `isRowId` is exported
   from `@fahq/contracts` and is the one rule: the worker's number trace (`reports.ts`, which also keeps a name such as
-  `nemotron-3-ultra`) and Code Mode's answer trace (`answer.ts`) skip exactly these digits (merge wave 1).
+  `nemotron-3-ultra`) and Code Mode's answer trace (`answer.ts`) skip exactly these digits (merge wave 1). Skipping the
+  digits is not a pass: `rowIdsIn` (beside `isRowId`) lists the ids a text names, and each must be given. The answer
+  trace wants it in a string of the facts and the number trace in a string of the data (any case); a plan is refused for
+  naming one, since it is written from metrics, which name no row (second-key review of merge wave 1).
 - **Small counts** (design 4d): a whole number under 100 is a claim when the words after it (up to four, past
-  "of the", up to a joining word such as "about" or "and") name what a cited count metric counts. Each count
+  "of the", up to a joining word such as "about" or "and") name what a count metric in the data counts, cited or not
+  (second-key review of merge wave 1: "7 late repairs" in a plan citing no repair count had passed). Each count
   carries phrases in the catalog's `nouns` (`counted()` in `sql.ts`: "late repairs", "open repairs",
-  "overdue online invoices", then the bare nouns). The most specific phrase that fits picks the metric, and
-  the number must be THAT metric's value, one of its own projections or a count lever. A bare noun that two
-  cited counts with different values share ("3 repairs" beside 3 late and 16 open) is refused, with a phrase
-  of each to choose from. `catalog.test.ts` proves every count has a phrase that names it apart from every
+  "overdue online invoices", then the bare nouns). The most specific phrase that fits picks the metric (a count the
+  plan cites before one it does not), and the number must be THAT metric's value, one of its own projections or a
+  count lever. A bare noun that two such counts with different values share ("3 repairs" beside 3 late and 16 open)
+  is refused, with a phrase of each to choose from. `catalog.test.ts` proves every count has a phrase that names it apart from every
   other count its division reads. `writePlans` passes the phrases from the port's catalog; without them small
   counts are not checked, as before. The final check of a round does not pass them (the departments' own
   checks already did).

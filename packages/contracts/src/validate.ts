@@ -9,13 +9,15 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //    a value of the same kind: a dollar amount a dollar value, a percentage a percentage, "2.4x" a
 //    ratio, a bare number of 100 or more a dollar or count value, a bare decimal ("1.35") one of those or a
 //    ratio. Allowed values are cited metrics, projection inputs and results, and levers (a proposed price,
-//    discount, budget or count: a choice, not a fact). Durations ("90 days"), years ("in 2026") and row ids
-//    ("demo-rt-01234", "SUP-2201") are not claims; "a sub-$5,000 test" is.
-//  - A small count (under 100) is a claim when the words after it name what a cited count metric counts
-//    ("3 overdue invoices", "3 of the overdue invoices"): it must then be THAT count's value, one of its own
-//    projections, or a count lever. The phrases come from the data's catalog (`nouns`); the most specific one
-//    wins ("late repairs" over "repairs"), and a phrase two cited counts with different values share is refused
-//    until the plan names which. Without the catalog's phrases small counts are not checked.
+//    discount, budget or count: a choice, not a fact). Durations ("90 days") and years ("in 2026") are not
+//    claims; "a sub-$5,000 test" is. A row id's digits ("demo-rt-01234", "SUP-2201") are no amount, but the id is
+//    refused: a plan is written from metrics, which name no row.
+//  - A small count (under 100) is a claim when the words after it name what a count metric in the data counts,
+//    cited or not ("3 overdue invoices", "3 of the overdue invoices"): it must then be THAT count's value, one of
+//    its own projections, or a count lever. The phrases come from the data's catalog (`nouns`); the most specific
+//    one wins ("late repairs" over "repairs"), then a count the plan cites over one it does not, and a phrase two
+//    such counts with different values share is refused until the plan names which. Without the catalog's phrases
+//    small counts are not checked.
 //  - A seasonal budget (an approved cap's projection, once the plan cites last year's index or the projection names
 //    the season) must use the index's value as its factor.
 //  - Numbers in words ("twelve thousand dollars") and digits the scanner cannot read are refused,
@@ -45,8 +47,8 @@ const SEASON_INDEX = 'm:online.season.last_year_index';
 
 /** For each count metric, the phrases that name what it counts (from the data's catalog): "late repairs", "repairs". */
 export type CountNouns = ReadonlyMap<string, readonly string[]>;
-/** A count metric a plan cites: its value, its own projection results and the phrases that name it, word by word. */
-type CitedCount = { id: string; value: number; results: number[]; phrases: string[][] };
+/** A count metric the catalog names: its value, its own projection results, the phrases that name it word by word, and whether the plan cites it. */
+type NamedCount = { id: string; value: number; results: number[]; phrases: string[][]; cited: boolean };
 
 export function checkPlans(raw: unknown, metrics: readonly Metric[], nouns: CountNouns = new Map()): PlanCheck {
   const parsed = ProfitPlansSchema.safeParse(raw);
@@ -80,16 +82,18 @@ function checkPlan(
   const pool = poolOf(plan, byId);
   const units = new Set<BusinessUnit>();
   const citedValues: { value: number; business: BusinessUnit }[] = [];
-  // The plan's cited counts that the catalog names: a small number next to one of their phrases is a claim.
-  const counts = new Map<string, CitedCount>();
+  // Every count in the data that the catalog names, cited or not: a small number next to one of their phrases is a claim.
+  const counts = new Map<string, NamedCount>();
+  for (const m of byId.values()) {
+    const phrases = m.unit === 'count' ? data.nouns.get(m.id) ?? [] : [];
+    if (phrases.length > 0) counts.set(m.id, { id: m.id, value: m.value, results: [], phrases: phrases.map((p) => p.toLowerCase().split(/\s+/).filter(Boolean)), cited: false });
+  }
 
   const useMetric = (m: Metric) => {
     cited.add(m.id);
     units.add(m.business);
-    const phrases = m.unit === 'count' ? data.nouns.get(m.id) ?? [] : [];
-    if (phrases.length > 0 && !counts.has(m.id)) {
-      counts.set(m.id, { id: m.id, value: m.value, results: [], phrases: phrases.map((p) => p.toLowerCase().split(/\s+/).filter(Boolean)) });
-    }
+    const count = counts.get(m.id);
+    if (count) count.cited = true;
     const prefix = m.id.split(':')[1]?.split('.')[0];
     if (prefix !== m.business) errors.push(`${where}: metric ${m.id} is labeled ${m.business}, not ${prefix}`);
   };
@@ -169,9 +173,11 @@ function checkPlan(
   return pool;
 }
 
-function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[], counts: readonly CitedCount[] = []): void {
+function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[], counts: readonly NamedCount[] = []): void {
   const { found, unreadable, small } = scan(text);
   for (const u of unreadable) errors.push(`${where}: "${u}" is a number the checker cannot read; write it in digits`);
+  // A plan is written from metrics, and a metric names no row: a row id in a plan was not given, so it is invented.
+  for (const id of rowIdsIn(normalize(text))) errors.push(`${where}: "${id}" is not in the data: a plan cites metrics, never a row`);
   const levers = pool.filter((a) => a.business === null && a.kind === 'count');
   for (const n of small) {
     const named = countsNamed(n.next, counts);
@@ -196,7 +202,7 @@ function checkText(where: string, text: string, pool: readonly Allowed[], errors
 }
 
 /** A count's first qualified phrase that none of the others shares, to suggest when a plan must say which it means. */
-function ownPhrase(c: CitedCount, others: readonly CitedCount[]): string {
+function ownPhrase(c: NamedCount, others: readonly NamedCount[]): string {
   const shared = new Set(others.filter((o) => o !== c).flatMap((o) => o.phrases.map((p) => p.join(' '))));
   return c.phrases.map((p) => p.join(' ')).find((p) => p.includes(' ') && !shared.has(p)) ?? c.id;
 }
@@ -324,10 +330,11 @@ function nextWords(after: string): string[] {
 }
 
 /**
- * The cited counts the words after a small number name: those whose most specific phrase fits (its words in
- * order among them), and where the last matched word sits. Null when no cited count's phrase fits.
+ * The counts the words after a small number name: those whose most specific phrase fits (its words in order among
+ * them), and where the last matched word sits. Null when no count's phrase fits. When the best fit takes in a count the
+ * plan cites and one it does not ("16 repairs" beside cited open repairs and uncited late repairs), the cited one is meant.
  */
-function countsNamed(words: readonly string[], counts: readonly CitedCount[]): { counts: CitedCount[]; end: number } | null {
+function countsNamed(words: readonly string[], counts: readonly NamedCount[]): { counts: NamedCount[]; end: number } | null {
   const fit = (phrase: readonly string[]) => {
     let i = 0;
     let end = -1;
@@ -345,7 +352,8 @@ function countsNamed(words: readonly string[], counts: readonly CitedCount[]): {
   });
   const size = Math.max(0, ...best.map((b) => b.size));
   if (size === 0) return null;
-  const top = best.filter((b) => b.size === size);
+  const fits = best.filter((b) => b.size === size);
+  const top = fits.some((b) => b.c.cited) ? fits.filter((b) => b.c.cited) : fits;
   return { counts: top.map((b) => b.c), end: Math.max(...top.map((b) => b.end)) };
 }
 
@@ -409,7 +417,9 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[]; smal
 // Row ids are names, not amounts (design 4e): a synthetic row's id ("demo-rt-01234", "demo-s-3") and a supplier
 // number ("SUP-2201"). Only bare digits that end such an id exactly are skipped, so "a sub-$5,000 test", "mid-30%",
 // "ROAS-9.5x" and "the top-100 buyers" are still read (review 2026-10-27).
-const ROW_ID = /(?:^|[^\p{L}\p{N}_-])(?:demo(?:-[a-z]+)+-[a-z]*|sup-)\d+$/iu;
+const ROW_ID_BODY = String.raw`(?:demo(?:-[a-z]+)+-[a-z]*|sup-)\d+`;
+const ROW_ID = new RegExp(String.raw`(?:^|[^\p{L}\p{N}_-])${ROW_ID_BODY}$`, 'iu');
+const ROW_ID_TOKEN = new RegExp(String.raw`(?<![\p{L}\p{N}_-])${ROW_ID_BODY}`, 'giu');
 const ID_END = /^(?:$|[\s,;:)!?]|\.(?:\s|$))/;
 
 /**
@@ -418,6 +428,14 @@ const ID_END = /^(?:$|[\s,;:)!?]|\.(?:\s|$))/;
  */
 export function isRowId(text: string, end: number): boolean {
   return ROW_ID.test(text.slice(0, end)) && ID_END.test(text.slice(end));
+}
+
+/**
+ * The row ids written in `text`, as written: exactly the ids whose digits isRowId skips. Skipping the digits is not a pass:
+ * each of the three checks then asks whether the id itself was given (the facts, the data, or for a plan never).
+ */
+export function rowIdsIn(text: string): string[] {
+  return [...text.matchAll(ROW_ID_TOKEN)].filter((m) => isRowId(text, (m.index ?? 0) + m[0].length)).map((m) => m[0]);
 }
 
 function sentenceIndex(text: string, at: number): number {

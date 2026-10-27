@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkPlans, Metric, mixedSentences, numbersIn, Plan } from '../src/index.ts';
+import { checkPlans, Metric, mixedSentences, numbersIn, Plan, rowIdsIn } from '../src/index.ts';
 
 const source = {
   system: 'zetaris' as const,
@@ -220,8 +220,22 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
     expect(() => Metric.parse({ ...metrics[3]!, id: 'm:salon.revenue.wash_set', business: 'online' })).toThrow();
   });
 
-  it('lets an action name a row by its id: the digits after a letter and a hyphen are not an amount (design 4e)', () => {
-    expect(checkPlans(withPlan1({ actions: ['Chase invoice demo-inv-i00412 and ticket demo-rt-01234 first'] }), metrics).ok).toBe(true);
+  // Design 4e kept a row id's digits from reading as an amount. Second-key review of merge wave 1: a plan is written from
+  // metrics only, which name no row, so a row id in a plan is invented and is refused (its digits are still no amount).
+  it('refuses a row id in a plan: plans are written from metrics, which name no row', () => {
+    const r = checkPlans(withPlan1({ actions: ['Chase invoice demo-inv-i00412 and ticket demo-rt-01234 first'], risks: ['SUP-2201 may be late'] }), metrics);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.errors).toEqual([
+      'plan 1 action 1: "demo-inv-i00412" is not in the data: a plan cites metrics, never a row',
+      'plan 1 action 1: "demo-rt-01234" is not in the data: a plan cites metrics, never a row',
+      'plan 1 risk 1: "SUP-2201" is not in the data: a plan cites metrics, never a row',
+    ]);
+    rejects({ ...good, memoryConflicts: [{ memoryId: 'mem-1', note: 'Declined chasing demo-sup-s2 before' }] }, '"demo-sup-s2" is not in the data');
+  });
+
+  it('rowIdsIn names exactly the ids whose digits isRowId skips', () => {
+    expect(rowIdsIn('Chase SUP-2201, demo-rt-01234 and demo-s-3. Not SUP-2201\'s, x-SUP-3, a sub-$5,000 test or nemotron-3-ultra.')).toEqual(['SUP-2201', 'demo-rt-01234', 'demo-s-3']);
+    expect(rowIdsIn('demo-sup-s1 (and sup-7)')).toEqual(['demo-sup-s1', 'sup-7']);
   });
 
   // Review 2026-10-27: PLAN_SYSTEM rule 2 said a seasonal budget's factor is last year's index, and nothing checked it.
@@ -317,6 +331,35 @@ describe('checkPlans and small counts next to what a cited count counts', () => 
       ]);
       // A count lever is a choice, whatever it is next to.
       expect(errorsOf({ actions: ['Book 5 repairs a day'], levers: [{ label: 'Repairs booked a day', value: 5, unit: 'count' }] })).toEqual([]);
+    });
+  });
+
+  // Second-key review of merge wave 1: only cited counts had phrases, so "7 late repairs" in a plan that cites no repair
+  // count passed untraced. Every count in the data the catalog names now holds a small number next to its words.
+  describe('a count the plan does not cite', () => {
+    const late = { ...counts.at(-1)!, value: 2 };
+    const data: Metric[] = [...metrics.filter((m) => m.business === 'salon'), late, { ...late, id: 'm:salon.repairs.open.count', label: 'Repairs not finished yet', value: 16 }];
+    const qualified = new Map([
+      ['m:salon.repairs.open_over_14d.count', ['late repair', 'late repairs', 'repair', 'repairs']],
+      ['m:salon.repairs.open.count', ['open repair', 'open repairs', 'repair', 'repairs']],
+    ]);
+    const errorsOf = (p1: Record<string, unknown>, evidence = [{ metricId: 'm:salon.revenue.wash_set', value: 6200 }]) => {
+      const r = checkPlans({ plans: [salonPlan(1, { evidence, ...p1 }), salonPlan(2), salonPlan(3)], memoryConflicts: [] }, data, qualified);
+      return r.ok ? [] : r.errors.filter((e) => e.startsWith('plan 1 summary'));
+    };
+
+    it('holds a small number to the uncited count its words name', () => {
+      expect(errorsOf({ summary: 'Finish the 7 late repairs before new intake.' })).toEqual([
+        'plan 1 summary: "7 late repairs" counts what m:salon.repairs.open_over_14d.count counts, so it must be its value (2), one of its projections or a count lever',
+      ]);
+      expect(errorsOf({ summary: 'Finish the 2 late repairs before new intake.' })).toEqual([]);
+      expect(errorsOf({ summary: 'Finish the 5 repairs this week.' })[0]).toContain('"5 repairs" could be m:salon.repairs.open_over_14d.count (2) or m:salon.repairs.open.count (16)');
+    });
+
+    it('lets a bare noun mean the count the plan cites when an uncited count shares it', () => {
+      const openCited = [{ metricId: 'm:salon.repairs.open.count', value: 16 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }];
+      expect(errorsOf({ summary: 'Clear the 16 repairs this month.' }, openCited)).toEqual([]);
+      expect(errorsOf({ summary: 'Clear the 2 repairs this month.' }, openCited)[0]).toContain('must be its value (16)');
     });
   });
 

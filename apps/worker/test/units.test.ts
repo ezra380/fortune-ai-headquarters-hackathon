@@ -371,9 +371,19 @@ describe('numberTrace', () => {
     expect(t('The top-100 buyers.')).toEqual(['t: "100" is not a number in the data']);
     expect(t('A sub-$5,000 test.')).toEqual(['t: "5,000" is not a number in the data']);
     expect(t('A mid-20% margin and ROAS-4.1x on a sub-$3,000 spend.')).toEqual([]); // in the data, so they pass
-    expect(t('Invoice SUP-2201 and repair demo-rt-01234 are open; so is demo-s-3.')).toEqual([]);
     expect(t('It ran on nvidia/nemotron-3.5-lightning-30b-a3b and nemotron-3-ultra.')).toEqual([]);
     expect(t("SUP-2201's total is 7.")).toEqual(['t: "2201" is not a number in the data', 't: "7" is not a number in the data']); // glued: not an id
+  });
+
+  // Second-key review of merge wave 1: the row id's digits were skipped and nothing else was asked, so a review could name
+  // a repair or an invoice that does not exist. A row id must be one the data holds (any case), as a number must.
+  it('refuses a row id that is not in the data, and passes one that is', () => {
+    const text = 'Invoice SUP-2201 and repair demo-rt-01234 are open; so is demo-s-3.';
+    expect(numberTrace([['t', text]], { margin: 0.2 })).toEqual([
+      't: "SUP-2201" is not in the data', 't: "demo-rt-01234" is not in the data', 't: "demo-s-3" is not in the data',
+    ]);
+    expect(numberTrace([['t', text]], { rows: [{ id: 'sup-2201' }, { id: 'demo-rt-01234' }], note: 'Stylist DEMO-S-3 is out.' })).toEqual([]);
+    expect(numberTrace([['t', 'Invoice SUP-9999 is open.']], { rows: [{ id: 'SUP-2201' }] })).toEqual(['t: "SUP-9999" is not in the data']);
   });
 });
 
