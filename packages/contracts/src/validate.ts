@@ -7,7 +7,8 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //  - Every free-text field is scanned (title, summary, actions, test, stop-loss, risks, projection
 //    labels and assumptions, evidence notes, lever labels, memory notes). Each number found must match
 //    a value of the same kind: a dollar amount a dollar value, a percentage a percentage, "2.4x" a
-//    ratio, a bare number of 100 or more a dollar or count value. Allowed values are cited metrics,
+//    ratio, a bare number of 100 or more a dollar or count value, a bare decimal ("1.35") one of those or a
+//    ratio. Allowed values are cited metrics,
 //    projection inputs and results, and levers (a proposed price, discount, budget or count: a
 //    choice, not a fact). Durations ("90 days"), years ("in 2026") and ids ("demo-rt-01234") are not claims.
 //  - A small count (under 100) is a claim when the words after it name what a cited count metric counts
@@ -15,6 +16,8 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //    projections, or a count lever. The phrases come from the data's catalog (`nouns`); the most specific one
 //    wins ("late repairs" over "repairs"), and a phrase two cited counts with different values share is refused
 //    until the plan names which. Without the catalog's phrases small counts are not checked.
+//  - A seasonal budget (an approved cap's projection, once the plan cites last year's index or the projection names
+//    the season) must use the index's value as its factor.
 //  - Numbers in words ("twelve thousand dollars") and digits the scanner cannot read are refused,
 //    never skipped.
 //  - A plan declares which businesses it touches and cites numbers from exactly those. One sentence
@@ -35,6 +38,10 @@ const RESULT_WORDS = /\b(profit|revenue|sales|income|gain|uplift|expected|projec
 // Phrases that name both businesses. Not "combined" or "together" alone: live plans use them for
 // levers ("the combined effect of ads and email"), which is not a salon + online figure.
 const COMBINING_WORDS = /\b(both businesses|salon and online|online and salon|salon \+ online|online \+ salon|salon plus online|online plus salon|across both|whole company|company-wide)\b/i;
+
+// A seasonal budget: an approved ad budget cap, and the index its factor must be.
+const BUDGET_CAP = /^m:online\.budget\.[a-z]+\.cap$/;
+const SEASON_INDEX = 'm:online.season.last_year_index';
 
 /** For each count metric, the phrases that name what it counts (from the data's catalog): "late repairs", "repairs". */
 export type CountNouns = ReadonlyMap<string, readonly string[]>;
@@ -100,6 +107,7 @@ function checkPlan(
     citedValues.push({ value: m.value, business: m.business });
   }
 
+  const citesIndex = plan.evidence.some((e) => e.metricId === SEASON_INDEX) || plan.projections.some((p) => p.baseMetricId === SEASON_INDEX);
   for (const p of plan.projections) {
     const m = byId.get(p.baseMetricId);
     if (!m) {
@@ -111,6 +119,13 @@ function checkPlan(
     const expected = m.value * p.factor;
     if (!close(p.result, expected, 0.002)) {
       errors.push(`${where}: projection "${p.label}" says ${p.result} but ${m.id} × ${p.factor} = ${round2(expected)}`);
+    }
+    // A seasonal budget is the approved cap × last year's index for the month (PLAN_SYSTEM rule 2): once a plan
+    // cites the index, or a cap projection names the season, the cap's factor must be the index's value.
+    if (BUDGET_CAP.test(m.id) && (citesIndex || /\bseason/i.test(`${p.label} ${p.assumption}`))) {
+      const index = byId.get(SEASON_INDEX);
+      if (!citesIndex || !index) errors.push(`${where}: projection "${p.label}" is a seasonal budget, so cite ${SEASON_INDEX} and use its value as the factor`);
+      else if (!close(p.factor, index.value, 0.001)) errors.push(`${where}: projection "${p.label}" multiplies ${m.id} by ${p.factor}, but a seasonal budget's factor is ${SEASON_INDEX} (${index.value})`);
     }
     if (m.business !== 'combined' && COMBINING_WORDS.test(`${p.label} ${p.assumption}`)) {
       errors.push(`${where}: projection "${p.label}" reads as a salon + online figure but its base is ${m.business} only`);
@@ -255,7 +270,8 @@ function accepts(n: FoundNumber, a: Allowed): boolean {
     case 'usd': return a.kind === 'usd' && same(n.value, a.value, 0.01);
     case 'percent': return a.kind === 'percent' && (Math.abs(n.value - a.value) <= 0.5 || same(n.value, a.value, 0.02));
     case 'ratio': return a.kind === 'ratio' && same(n.value, a.value, 0.01);
-    case 'plain': return (a.kind === 'usd' || a.kind === 'count') && same(n.value, a.value, 0.01);
+    // A bare decimal may also be a ratio written without its "x" (an index of 1.35).
+    case 'plain': return (a.kind === 'usd' || a.kind === 'count' || (a.kind === 'ratio' && !Number.isInteger(n.value))) && same(n.value, a.value, 0.01);
   }
 }
 
@@ -379,7 +395,8 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[]; smal
     const plain = !money && !isPercent && !isRatio && !(r.unit in MAGNITUDE);
     if (plain && TIME_AFTER.test(after)) continue; // a duration
     if (plain && r.plainInt && r.base >= 1900 && r.base <= 2100 && YEAR_BEFORE.test(text.slice(0, r.at))) continue; // a year
-    if (plain && Math.abs(value) < 100) { // small counts ("3 plans"): a claim only next to a cited count's noun
+    // Small whole numbers ("3 plans"): a claim only next to a cited count's phrase. A bare decimal ("1.35") is a claim.
+    if (plain && r.plainInt && Math.abs(value) < 100) {
       small.push({ raw: r.raw, value, next: nextWords(after) });
       continue;
     }

@@ -224,6 +224,43 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
     expect(checkPlans(withPlan1({ actions: ['Chase invoice demo-inv-i00412 and ticket demo-rt-01234 first'] }), metrics).ok).toBe(true);
   });
 
+  // Review 2026-10-27: PLAN_SYSTEM rule 2 said a seasonal budget's factor is last year's index, and nothing checked it.
+  describe('a seasonal budget (the approved cap × last year\'s index for the month)', () => {
+    const budget: Metric[] = [
+      ...metrics,
+      { ...metrics[1]!, id: 'm:online.budget.google.cap', label: 'Approved Google ad budget', value: 2000 },
+      { ...metrics[2]!, id: 'm:online.season.last_year_index', label: 'Online revenue of the same month last year against the average month', value: 1.35 },
+    ];
+    const seasonal = (factor: number, cite = true, label = 'Google budget for the season') => withPlan1({
+      evidence: [{ metricId: 'm:online.revenue.mazali', value: 12400 }, ...(cite ? [{ metricId: 'm:online.season.last_year_index', value: 1.35 }] : [])],
+      projections: [{ label, baseMetricId: 'm:online.budget.google.cap', factor, result: 2000 * factor, assumption: 'Spend follows last year' }],
+      summary: 'Mazali brought in $12,400 last month.', actions: ['Set the Google cap to the seasonal budget'], stopLoss: 'Stop if orders fall.',
+    });
+    const errorsOf = (raw: unknown) => { const r = checkPlans(raw, budget); return r.ok ? [] : r.errors; };
+
+    it("accepts the cap times the index, and refuses any other factor once the plan cites the index", () => {
+      expect(errorsOf(seasonal(1.35))).toEqual([]);
+      expect(errorsOf(seasonal(1.5))).toEqual([
+        'plan 1: projection "Google budget for the season" multiplies m:online.budget.google.cap by 1.5, but a seasonal budget\'s factor is m:online.season.last_year_index (1.35)',
+      ]);
+      expect(errorsOf(seasonal(1.5, true, 'Google cap after a raise'))[0]).toContain("a seasonal budget's factor is m:online.season.last_year_index (1.35)");
+    });
+
+    it('refuses a cap projection that names the season without citing the index, and leaves a plain raise alone', () => {
+      expect(errorsOf(seasonal(1.35, false))).toEqual([
+        'plan 1: projection "Google budget for the season" is a seasonal budget, so cite m:online.season.last_year_index and use its value as the factor',
+      ]);
+      expect(errorsOf(seasonal(1.2, false, 'Google cap after a raise'))).toEqual([]);
+    });
+
+    it('checks an index written as a bare decimal in the text', () => {
+      expect(errorsOf(seasonal(1.35, true, 'Google budget at 1.35 for the season'))).toEqual([]);
+      expect(errorsOf(seasonal(1.35, true, 'Google budget at 1.42 for the season'))).toEqual([
+        'plan 1 projection 1 label: "1.42" in the text is not one of its cited or projected numbers',
+      ]);
+    });
+  });
+
   it('still refuses an untraced figure written after a word and a hyphen ("a mid-$45,000 profit")', () => {
     rejects(withPlan1({ summary: 'This adds a mid-$45,000 profit every month.' }), '$45,000');
     rejects(withPlan1({ summary: 'Run a sub-$5,000 test.' }), '$5,000');
