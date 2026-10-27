@@ -204,6 +204,8 @@ describe('the Legal Team skill', () => {
     expect(job).toMatch(/one overall call/i);
     expect(job).not.toMatch(/\b(one|two|three|four|five)\s+things\b/i);
     expect(job).not.toMatch(/\bthree\b/i);
+    // The document comes with a staff session at a door; a text carries none, so the Job must not say the owner hands it one by text.
+    expect(job).not.toMatch(/owner by text/i);
   });
 
   it('says plainly what the Legal Team does by text: no document is carried, so it recalls its own decisions and lessons, points to a door, and gives no read, count or figure', () => {

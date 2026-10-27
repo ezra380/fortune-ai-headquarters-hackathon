@@ -98,8 +98,10 @@ review itself; two findings are met by documenting the limit, because the code t
    and a check that the invented ones and the bare command names are gone; seen failing against the old skill) and
    `doors-db.test.ts` "serves the stored Legal Team profile ..." (the skill a door really serves; it failed against the stale
    stored row until the row was reseeded, which is how the stored words were proved to change). The stored `legal` row on the shared
-   database was reseeded (v1 -> v2, by the seed) with a one-off that touches only `legal`: `seed-profiles.ts --force` would have
-   written every assistant's file words from this branch's older files over whatever other lanes have stored.
+   database was reseeded (v1 -> v2, then v2 -> v3 after a last wording fix: the Job no longer says the owner hands the Legal Team a
+   document by text; a test, seen failing, now holds that), both by the seed, with a one-off that touches only `legal`:
+   `seed-profiles.ts --force` would have written every assistant's file words from this branch's older files over whatever other
+   lanes have stored. The one-off script is not committed. On the shared local database `legal` is at version 3.
 2. **Major: a text answer for the Legal Team could not follow its own skill. Fixed by changing what is promised (option b).**
    The answer step (`askQuestion`, `ANSWER_RULES`) uses only the lookup's facts (the Legal Team's past decisions and lessons,
    almost always none) and number-traces the answer, words "one, two, three" included; "the three things to fix first" and "a
@@ -140,6 +142,23 @@ review itself; two findings are met by documenting the limit, because the code t
 7. **Minor: the Admin console knows nothing of `legal`. Not done, by the finding's own advice** (follow up after the console lane
    merges): add a Legal Team tab to `DEPARTMENTS`, the loader's id check and `LIVE_ASSISTANTS`, and update the console tests that
    assert the five-assistant lists.
+
+### Verification of the review fixes (2026-10-27, all under `flock ~/.fahq-db-test.lock`)
+
+- `npm run typecheck`: clean.
+- Full suite on the final tree (with `METERLESS_DIR=/home/jobia/fahq-merge/.local/meterless`, because this worktree has no
+  `.local/meterless` and `legal.test.ts` skips itself without Meterless; a run of mine without it showed "1 skipped" and was
+  not counted): 66 files, 1293 tests, all passed, none skipped.
+- Seen failing first: the three skill tests and the Job-wording test against the old skill (`git show HEAD:` put back, then the
+  new file); the redaction unit tests before `maskContactDetails` existed; the stack's `redact_text` on
+  `before: legal@vendor.example 718-555-1234` returned the address unmasked before migration `20261027130020` and `[email]` after;
+  the stale stored `legal` row failed the door test until it was reseeded; the review in the loop test was refused ("one" is not
+  a number in the data) until the finding's wording was number-free.
+- Tests of machinery that already worked, for the Legal Team (these passed on their first run, so they prove coverage, not a fix):
+  the loop test, the scratch-database lesson test and the "texts the owner the facts" test. The loop test was made to fail by
+  taking `mine.add(filed.id)` out (the manager is then never shown the legal report: both modes fail), and was restored.
+- A first full-suite attempt was stopped by me about a minute in to make the last wording fix; no row of this lane was left behind
+  (the shared database holds no token of mine); one `manager-decides test` token belongs to another lane.
 
 ## What is not done
 
