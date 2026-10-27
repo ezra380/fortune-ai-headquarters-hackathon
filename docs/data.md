@@ -612,7 +612,9 @@ line each).
   Live, 15:09 ET: `derived_metrics` recreated alone (the period, standing and row views and the marts untouched),
   then **all 13 periods in one statement in 38.6 s, 156 of 156 equal to the oracle** (load 4.5 to 5.9). The marts read
   the view by name: the online mart's derived table for `2026-10-mtd` in 10.5 s; its standing table 85.6 s and its
-  period table 182.8 s (load 3 to 6.4). `getDivisionMetrics salon 2026-10-mtd`: 28 of 28 in 287.9 s. The period
+  period table 182.8 s (load 3 to 6.4). `getDivisionMetrics`, 15:10–15:31 ET, every division in `2026-10-mtd` and
+  `2026-09`, all equal to the oracle (590 values): salon 287.9 s and 24.5 s, online 20.3 s and 35.5 s, finance 31.7 s
+  and 35.8 s, hq 254.5 s and 24.4 s (the slow ones ran while other lanes' suites loaded the machine). The period
   table is now the slow part: each division's period filter view still reads the whole period view; the same fix
   (a filter view over `periodSubsetBody` of the division's own ids) is the next step.
 

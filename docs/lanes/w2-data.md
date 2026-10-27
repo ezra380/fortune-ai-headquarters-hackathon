@@ -301,14 +301,20 @@ An independent review listed one blocker, two majors and five minors. What each 
   another): the period table is now the slowest statement of a division read.
 - `getDivisionMetrics` through the DataPort (all three statements together): **salon `2026-10-mtd`, 28 of 28 equal to
   the oracle, in 287.9 s** (15:10–15:15 ET, load 4.5 to 6.7, while other lanes' suites ran): it answers, but within
-  seconds of the five-minute limit. LIVE4_RESULT
+  seconds of the five-minute limit. Then, one after another (15:24–15:29 ET, load 2.9 to 4.6): **online `2026-10-mtd`
+  92 of 92 in 20.3 s** (before the fix: failed, "Cannot reach Zetaris"), **finance 104 of 104 in 31.7 s**, **hq 71 of
+  71 in 254.5 s**, all equal to the oracle. All four divisions answer for the month so far; the spread (20 s to 288 s)
+  follows the machine's load and the size of each division's period table. **`2026-09`** (15:29–15:31 ET, load 4.1
+  to 5.5): **finance 104 of 104 in 35.8 s, online 92 of 92 in 35.5 s, salon 28 of 28 in 24.5 s, hq 71 of 71 in 24.4 s**,
+  all equal to the oracle. So `getDivisionMetrics` is proved live for all four divisions in `2026-10-mtd` and `2026-09`
+  (eight reads, 590 metric values, 0 mismatches).
 - **Still open (not a structural blocker now, but a real risk under load):** every division's period table reads
   the whole period view (a `metric_id IN (...)` filter cannot prune the union's branches, as docs/data.md says), so a
   division read pays for all 21 sources. The next fix, same pattern: build each division's period filter view from
   `periodSubsetBody(divisionIds(division, 'period'))` (the salon would read four sources, not 21), prove it live, and
   re-time. Not done in this round.
-- **Not proved (time):** the tier-0 baseline (16449bf's period body on this instance now); `getDivisionMetrics` for
-  2026-09 and for the divisions not listed above; the full `zetaris-setup.ts --v2` comparison over all 13 periods.
+- **Not proved (time):** the tier-0 baseline (16449bf's period body on this instance now); the unsliced
+  `getFinanceMetrics`; the full `zetaris-setup.ts --v2` comparison over all 13 periods (every mart table, the series).
   Run `npx tsx scripts/zetaris-setup.ts --v2 --verify-only` before W1/W2 rely on version 2, on a quiet machine.
 - One live hazard learned: the live scripts' in-process source server (port 18121) dies with the script; stopping a
   live run mid-way leaves Zetaris unable to reach the sources ("Connection refused") until another read starts it.
