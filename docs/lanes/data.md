@@ -213,3 +213,92 @@ tier-0 run showed failing on bb29578's own code against the shared local databas
   marts, the `*_v2` and new REST tables); new database `FORTUNE_DEMO_SUPPORT`. Version 1 untouched. Reads
   are slower with twelve sources (division read 4.5–7.4 s, unsliced 23 s): prefer `getDivisionMetrics`.
 - Env: unchanged. No migration.
+
+## Slice 4 of 4: tools and profiles (2026-10-27, 09:21–09:55 ET)
+
+### What works (with the tests that prove it)
+
+- **Row reads on the data port** (`packages/data/src/rows.ts`, `DataPort.readRows`, `RowRead`/`RowsData` in
+  `@fahq/contracts`): four fixed questions (repairs open / late / done in 30 days; unpaid invoices open /
+  overdue / due in 30 days, one business or both; waiting customer messages older than N hours; low stock on
+  the data date). One statement each over the source's existing row view, with the source's data-quality
+  rule and the standing metric's own condition; columns by position from a fixed list; "older than" and the
+  row limit applied after the read; totals added by the port (money per business, never across). No new
+  Zetaris object. `rows.test.ts`: "count exactly what the standing and month-so-far numbers count", "keep
+  money per business…", "never return a planted bad row, a customer, a message text or a name", "build their
+  SQL only from fixed conditions…", "refuse anything off the fixed lists…", and the port tests ("returns the
+  rows and totals of each read…", "applies 'older than' to the rows it read…", "refuses a read too large…",
+  "is not offered by a version 1 port").
+- **Series** (`DataPort.getMetricSeries`, `seriesQuery`/`seriesHashText`/`seriesOf` in `divisions.ts`): one
+  period or derived id over every period from the division's own mart, oldest first, with min, max and
+  mean12 (the season index's denominator); refuses an id outside the division, a standing id, an unknown
+  division, a repeated or unknown period. `rows.test.ts` "DataPort metric series" (4 tests, including "the
+  yearly mean is the season index's denominator").
+- **Proved live, `--v2 --verify-only` 09:41–09:46 ET:** every earlier comparison matched again, plus 9 row
+  reads (0.3–0.4 s each; e.g. 16 open repairs, 2 late, 4 overdue invoices, 4 waiting messages, 2 over a day,
+  21 low-stock products, 5 wanted, 4 wanted and out) and 5 series (2.4–2.9 s each) all equal to the oracle;
+  "version 1: mart … listed exactly as before"; "version 2 verified".
+- **Read tools** (`apps/worker/src/read-tools.ts`): `get_budget_room`, `get_metric_series`,
+  `get_company_overview`, `get_data_quality`, `get_repair_tickets`, `get_supplier_invoices`,
+  `get_waiting_conversations`, `get_low_stock_interest`; the three metric tools read their division's mart
+  when the port has `getDivisionMetrics` (metrics carry their period, plus the attention list) and list
+  exactly the ids they return. `read-tools.test.ts` "division read tools (data version 2)" (6 tests) and
+  "writes every signature as valid TypeScript…".
+- **Who gets what** (`packages/profiles` SHAPES, READ_TOOL_NAMES, each skill's "You can read"): design 3.7
+  without the customer join. `profiles.test.ts` "gives each division its own rows and the company view to HQ
+  only (design 3.7)"; every skill still within 48 lines (owner 44).
+- **Plan slices by division** (`departments.ts` `sliceFor(department, metrics, catalog)`, planUse false left
+  out; `writePlans` passes the port's catalog; a round passes its port). `rounds.test.ts` "gives each
+  department its division's metrics when the data names divisions…", `units.test.ts` "for a department,
+  plans from its division's metrics when the port's catalog names divisions, even from a round's source".
+- **Door** (`brain-mcp.ts`): DOOR_READS adds `get_salon_metrics` and every new tool. `doors.test.ts` "gives
+  the salon door salon numbers only", "serves the division data from a version 2 port…".
+- **Validator**: 4e (`numbersIn` "reads the digits of an id after a letter and a hyphen…", seen failing
+  first; `checkPlans` "lets an action name a row by its id…"); 4d (`validate.test.ts` "checkPlans and small
+  counts next to what a cited count counts", 2 tests; `units.test.ts` "holds a plan's small counts to what
+  the catalog says…"). PLAN_SYSTEM rules 1, 2 and 4 carry 4g (standing, seasonal budget, small counts); the
+  plan writer now sees each metric's period.
+
+Test counts: `npm run typecheck` green; `packages/data` 109 tests in 12 files green (rows.test.ts 13); full `npm test`
+(09:47 ET): 631 passed, 3 failed: the two `supabase/tests/db.test.ts` RLS tests that fail on bb29578's own
+code (slice 1's tier 0), and one `chain.test.ts` test. `chain.test.ts` + `departments.test.ts` passed 35 of
+35 at 09:49:34 ET on this code, then failed 5 to 21 of 35 on three reruns within two minutes while other lanes
+ran real-database tests on the shared local stack (four of their vitest processes were running), so those
+failures come from the shared database, not this branch.
+
+### Not done
+
+- No independent second-key review of this slice (no reviewer was available to this lane); the merge
+  should get one.
+- `main.ts` still defaults `FINANCE_PERIOD` to `2026-09` (design 4g: `2026-10-mtd`, so budget room and the
+  last-year index mean "this month"); not this lane's file.
+- Rounds still read `getFinanceMetrics` once, unsliced (about 23 s live under version 2), and slice by
+  catalog; per-division mart reads in `rounds.ts` and `explain.ts` (design 4h, option 1) are not built.
+- Durations (4c: `days`/`minutes` units) and the synthetic-join guard (4f) are not built; no metric has
+  `planUse: false` yet.
+- Twin of 4e not fixed (not this lane's file): `packages/codemode/src/answer.ts` `FIGURE` reads
+  "SUP-2201" as 2201. Every row id this lane serves has a letter right before its digits, so answers that
+  name them are unaffected.
+
+### What the merge must know
+
+- **Outside this lane's files (unavoidable, minimal):** `packages/contracts/src/ports.ts` (`RowRead`,
+  `RowsData`, `MetricSeries`, `DataPort.readRows?`, `DataPort.getMetricSeries?`, `MetricInfo.about/nouns/
+  planUse`); `packages/contracts/src/index.ts` (exports `CountNouns`); `apps/worker/src/finance.ts` beyond
+  PLAN_SYSTEM: `sliceFor(…, deps.data?.catalog)`, `checkPlans(…, countNouns(deps.data?.catalog))`, `period`
+  in the metrics sent to the plan writer, one doc comment; `apps/worker/src/rounds.ts` (passes `data` to
+  `writePlans`, one field); `packages/codemode/src/brain-mcp.ts` beyond DOOR_READS (handlers for the new
+  door reads; the metric tools read divisions); tests updated for the new tool lists and Finance's line:
+  `apps/worker/test/departments.test.ts`, `chain.test.ts`, `units.test.ts`, `rounds.test.ts`,
+  `packages/codemode/test/doors.test.ts`, `packages/data/test/zetaris.test.ts`.
+- **Behaviour change under version 1 too:** the catalog has carried `divisions` since slice 1, so plan
+  rounds now slice by division on the live default: Finance plans from 28 of 33 metrics (no longer email
+  sends, email click rate, salon no-shows and the two rejected-rows counts); Salon 11 and Online 22 as
+  before. Under version 2: Finance 79, Salon 29, Online 58 (of 110).
+- **Stricter plan check:** with the port's catalog, a plan writing "5 late repairs" when the cited count is
+  3 is rejected (one correction round, then the department fails plainly). The round's final check passes
+  no nouns.
+- Skills: owner's SKILL.md is at 44 of 48 lines; another lane adding lines there must keep `profiles.test.ts`
+  green. Only the "You can read" lists changed.
+- Zetaris: nothing created or changed (the row reads use the existing `fortune_hq_v2` row views). Env:
+  unchanged. No migration.
