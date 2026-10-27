@@ -247,13 +247,7 @@ const SCRIPT = `
   }
 
   function briefRow(li, b) {
-    var top = h('div', 'head');
-    top.appendChild(h('div', 'title', 'Brief for ' + (b.date || 'an unknown day')));
-    var chips = h('div', 'chips');
-    chips.appendChild(chip(b.status));
-    if (b.writtenBy === 'rule') chips.appendChild(chip('rule'));
-    top.appendChild(chips);
-    li.appendChild(top);
+    head(li, 'Brief for ' + (b.date || 'an unknown day'), b.writtenBy === 'rule' ? 'rule' : '');
     li.appendChild(h('div', 'text', b.headline));
     li.appendChild(h('div', 'meta', 'Written ' + when(b.createdAt)));
     if (b.findings.length) {
@@ -315,7 +309,6 @@ const SCRIPT = `
   function digestSection(d) {
     return section('CEO digest', 'The very short text Owner HQ sends the owner: one line per division. The heads get the detail in their own briefs.',
       d.digest ? [d.digest] : [], function (li, dg) {
-        head(li, 'Company status' + (dg.date ? ' for ' + dg.date : ''));
         li.appendChild(h('div', 'text digest', dg.text));
         var chips = h('div', 'chips');
         dg.reports.forEach(function (r) {
