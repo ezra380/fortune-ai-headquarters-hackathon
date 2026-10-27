@@ -178,6 +178,10 @@ export function formatValue(value: number, unit: Metric['unit'] | undefined): st
     case 'percent': return `${digits(value, 1)}%`;
     case 'ratio': return `${value.toFixed(2)}x`;
     case 'count': return digits(value, 0);
+    case 'minutes': return `${digits(value, 0)} min`;
+    case 'days': return `${digits(value, 1)} days`;
+    case 'seconds': return `${digits(value, 2)} s`;
+    case 'score': return digits(value, 2);
     default: return digits(value, Math.abs(value) >= 100 ? 0 : 2);
   }
 }

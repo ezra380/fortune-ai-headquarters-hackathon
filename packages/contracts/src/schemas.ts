@@ -81,7 +81,7 @@ export const Metric = z.object({
   id: MetricId,
   label: z.string().min(1).max(120),
   value: z.number().finite(),
-  unit: z.enum(['usd', 'count', 'ratio', 'percent']),
+  unit: z.enum(['usd', 'count', 'ratio', 'percent', 'minutes', 'days', 'seconds', 'score']),
   business: BusinessUnit,
   period: z.string().min(1).max(40),
   source: z.object({
@@ -160,7 +160,7 @@ export type AssistantMessage = z.infer<typeof AssistantMessage>;
 
 export const ApprovalStatus = z.enum(['pending', 'signed', 'declined', 'expired']);
 
-export const OutboxChannel = z.enum(['sms', 'print']);
+export const OutboxChannel = z.enum(['sms', 'print', 'email']);
 
 export const ProposalDocument = z.object({
   proposalId: z.uuid(),

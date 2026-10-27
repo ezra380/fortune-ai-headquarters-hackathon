@@ -33,6 +33,9 @@ export function formatMetric(m: Pick<Metric, 'value' | 'unit'>): string {
   if (m.unit === 'usd') return money(m.value);
   if (m.unit === 'percent') return `${m.value}%`;
   if (m.unit === 'ratio') return `${m.value}x`;
+  if (m.unit === 'minutes') return `${m.value.toLocaleString('en-US')} min`;
+  if (m.unit === 'days') return `${m.value.toLocaleString('en-US')} days`;
+  if (m.unit === 'seconds') return `${m.value.toLocaleString('en-US')} s`;
   return m.value.toLocaleString('en-US');
 }
 

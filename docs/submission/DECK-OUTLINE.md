@@ -1,23 +1,26 @@
 # Slide deck outline (rule 6.2), DRAFT
 
-Eight slides. One idea per slide; the numbers on slides 5 and 6 are copied from the recorded runs.
+**Track 01: Solving Fragmented Intelligence.** Nine slides, one idea per slide. Numbers marked [run] come from the live run.
 
-1. **Fortune AI Headquarters.** "The agent that can explain why." A company brain and an assistant per
-   person for a family business that is really two businesses.
-2. **The problem.** A salon and an online store, three owners, separate books. Ideas travel by phone and
-   memory; nobody can later say why a decision was made, on which numbers, or whether it was tried before.
-3. **The users.** The online owner (his assistant), the finance owner (his assistant, by text), the head
-   stylist (Cindy, her own app; shown as a placeholder tab). Each has their own number and an instant reply.
-4. **The workflow.** Diagram: text → webhook (instant "working on it") → front door (Nemotron Lightning) →
-   finance assistant → Zetaris view + H-MEM decisions → Nemotron Ultra → validator → PDF + text →
-   `SEND n code` → `CONFIRM code` → World Model + long-term memory.
-5. **Zetaris: federated, governed, proven.** Three source databases, one view, data-quality rules with a
-   visible rejected-rows metric, 33 metrics per period, live answer = independent computation (33/33).
-6. **Every number traces.** One plan with its evidence (metric id, value, Zetaris query hash), one
-   projection (metric × factor), one declared proposed setting. A rejected plan with the validator's reason.
-7. **Meterless: record and memory.** World Model timeline of one decision; H-MEM showing a proposal
-   ("unapproved", short-term) superseded by a person's decision (long-term). Code Mode: any AI tool reads
-   the same brain with one sandboxed `code` call.
-8. **Stack and what's next.** Supabase (queue, approvals, outbox), Twilio, Zetaris, Meterless, NVIDIA
-   Nemotron, Cloudflare Code Mode. Next, as planned and not built: the four assistants inside the owner's
-   operations hub, and Cindy's backend mirrored in the Admin console.
+1. **Fortune AI Headquarters.** "One company, a dozen systems, one picture." An AI manager for each division of a
+   family company that is really two businesses.
+2. **The problem: fragmented intelligence.** A salon and an online store, separate books, and the numbers in a dozen
+   systems: store, bookings, email, Google, Meta, Amazon, Walmart, inbox, repairs, invoices, stock, site. Nobody sees
+   the whole; the owner can't tell whether things are running normally.
+3. **The company as an enterprise.** Org chart: CEO division (Ezra) over Finance (George → Alan), Online
+   (Georgette → Emma) and Salon (Cindy → Esther). The HQ Manager reviews everyone's work.
+4. **Zetaris: federated, governed, proven.** [run] sources in their own databases, three layers of views, four
+   division marts generated from one catalog, data-quality rules with visible rejected rows, the live answer equal to
+   an independent computation ([run] of [run]).
+5. **Daily workers.** The fifteen workers by division; status set by fixed rules; Nemotron writes the words; an
+   untraced number is refused. One real worker report.
+6. **Managers ask each other.** Georgette → George: Amazon and Walmart stock; George → Cindy: client segments;
+   George → Georgette: returns and product profit. Each is a typed request, answered from the other division's own
+   data.
+7. **The weekly report.** George's packet: the marketing fleet, both businesses' money side by side, the goal of the
+   week and three paths with evidence and stop-loss. Delivered to the head's phone, printer and email.
+8. **People decide; the CEO gets one line.** `APPROVE 2 <code>` → "Recorded". The morning digest: "Salon: running
+   normally. Online: needs a look …". Meterless World Model and H-MEM keep the why.
+9. **Stack and what's next.** Zetaris, Meterless (World Model, H-MEM, Nightshift), NVIDIA Nemotron (Ultra, Lightning,
+   Content Safety), Cloudflare Code Mode, Supabase, Twilio, Postmark. The Code Mode trade-off we measured. Next:
+   real connectors in the owner's operations hub, one division at a time.

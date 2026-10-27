@@ -76,7 +76,7 @@ describe('every migration, in order, on an empty database', () => {
     expect(grants.rows[0].n).toBe(0);
     const client = await scratch!.connect();
     try {
-      for (const table of ['tasks', 'work_reports', 'recommendations', 'division_briefs', 'assistant_profiles', 'session_reports']) {
+      for (const table of ['tasks', 'work_reports', 'recommendations', 'division_briefs', 'assistant_profiles', 'session_reports', 'worker_reports', 'weekly_reports']) {
         await client.query('begin');
         await client.query('set local role anon');
         await expect(client.query(`select count(*) from public.${table}`), table).rejects.toThrow(/permission denied/);
@@ -98,5 +98,38 @@ describe('every migration, in order, on an empty database', () => {
       for (const fn of bodies.rows) expect(fn.prosrc, `${fn.proname} ${action}`).toContain(`'${action}'`);
     }
     expect(bodies.rows).toHaveLength(2);
+  });
+
+  it('keys each worker report to its worker and day, and each weekly report to its division and Monday, and emails can be queued', async ({ skip }) => {
+    if (!name || failed) skip();
+    const client = await scratch!.connect();
+    const tries: [string, string][] = [
+      // [sql, expected outcome: 'ok' or an error pattern]
+      [`insert into public.worker_reports (worker_id, division, report_key, report_date, period, status, written_by, report)
+        values ('finance.email', 'finance', 'worker:finance.email:2026-10-27', '2026-10-27', '2026-10-mtd', 'normal', 'model', '{}')`, 'ok'],
+      [`insert into public.worker_reports (worker_id, division, report_key, report_date, period, status, written_by, report)
+        values ('finance.email', 'finance', 'worker:finance.email:2026-10-27:0b0e8a52-5a3c-4f43-9f7e-0c1d2e3f4a5b', '2026-10-27', '2026-10-mtd', 'normal', 'model', '{}')`, 'ok'],
+      [`insert into public.worker_reports (worker_id, division, report_key, report_date, period, status, written_by, report)
+        values ('finance.email', 'online', 'worker:finance.email:2026-10-28', '2026-10-28', '2026-10-mtd', 'normal', 'model', '{}')`, 'check'],
+      [`insert into public.worker_reports (worker_id, division, report_key, report_date, period, status, written_by, report)
+        values ('finance.email', 'finance', 'worker:financeXemail:2026-10-29', '2026-10-29', '2026-10-mtd', 'normal', 'model', '{}')`, 'check'],
+      [`insert into public.weekly_reports (division, report_key, week_of, period, status, written_by, report, ceo_line)
+        values ('finance', 'weekly:finance:2026-10-26', '2026-10-26', '2026-10-mtd', 'watch', 'model', '{}', 'Running normally.')`, 'ok'],
+      [`insert into public.weekly_reports (division, report_key, week_of, period, status, written_by, report, ceo_line)
+        values ('finance', 'weekly:finance:2026-10-27', '2026-10-27', '2026-10-mtd', 'watch', 'model', '{}', 'Not a Monday.')`, 'check'],
+      [`insert into public.weekly_reports (division, report_key, week_of, period, status, written_by, report, ceo_line)
+        values ('salon', 'weekly:finance:2026-10-26', '2026-10-26', '2026-10-mtd', 'watch', 'model', '{}', 'Wrong division.')`, 'check'],
+      [`select 'email'::public.outbox_channel`, 'ok'],
+    ];
+    try {
+      for (const [sql, expected] of tries) {
+        await client.query('begin');
+        if (expected === 'ok') await expect(client.query(sql), sql).resolves.toBeDefined();
+        else await expect(client.query(sql), sql).rejects.toThrow(/check constraint/);
+        await client.query('rollback');
+      }
+    } finally {
+      client.release();
+    }
   });
 });
