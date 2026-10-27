@@ -99,7 +99,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       const messageSid = await textIn(ownerPhone, 'How is the online store doing?');
       expect(lastTo(ownerPhone)).toBe('[Online] Online Mazali revenue is 12400 dollars.');
       expect(codeMode.calls[0]).toMatchObject({ purpose: 'online.lookup', model: 'MOCK/online/code', skill: 'SKILL(online)', question: 'How is the online store doing?' });
-      expect(toolNames()).toEqual(['get_online_metrics', 'recall_my_decisions', 'my_lessons']);
+      expect(toolNames()).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'recall_my_decisions', 'my_lessons']);
       expect(model.of('online.answer')[0]).toMatchObject({ model: 'MOCK/online/answer', system: expect.stringContaining('SKILL(online)') });
       // The answer comes from the number the owner texted, not from a number the owner never wrote to.
       expect((await pool.query(`select from_assistant from public.outbox where dedupe_key = $1`, [`reply:${(await taskOfText(messageSid)).id}`])).rows[0].from_assistant).toBe('owner');
@@ -116,7 +116,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       await textIn(ownerPhone, 'How is the salon doing?');
       expect(lastTo(ownerPhone)).toBe('[Salon] Salon wash and set revenue is 6200 dollars.');
       expect(codeMode.calls[0]).toMatchObject({ purpose: 'salon.lookup', model: 'MOCK/salon/code', skill: 'SKILL(salon)' });
-      expect(toolNames()).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
+      expect(toolNames()).toEqual(['get_salon_metrics', 'get_metric_series', 'get_repair_tickets', 'recall_my_decisions', 'my_lessons']);
       const salon = (await codeMode.calls[0]!.tools.find((t) => t.name === 'get_salon_metrics')!.run({ period: '2026-09' })) as { metrics: Record<string, { business: string }> };
       expect(Object.keys(salon.metrics)).toEqual(['m:salon.revenue.wash_set', 'm:salon.appointments.count']);
       expect(Object.values(salon.metrics).every((m) => m.business === 'salon')).toBe(true);
@@ -128,7 +128,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       codeMode.respond(() => okResult({ spend: 1800 }));
       await textIn(ownerPhone, 'What did we spend on Google ads?');
       expect(lastTo(ownerPhone)).toBe('[Finance] Google ad spend is 1800 dollars.');
-      expect(toolNames()).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
+      expect(toolNames()).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
 
       model.script('front-door', routerReply('owner', 'question'));
       model.script('owner.answer', 'Nothing is waiting on you.');

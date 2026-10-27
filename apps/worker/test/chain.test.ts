@@ -160,7 +160,7 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     expect(slice('finance.plans')).toEqual(mockMetrics.map((m) => m.id).sort());
     expect(slice('salon.plans')).toEqual(['m:salon.appointments.count', 'm:salon.revenue.wash_set']);
     expect(slice('online.plans')).toEqual(['m:online.ads.google.roas', 'm:online.ads.google.spend', 'm:online.revenue.mazali']);
-    expect(model.of('finance.plans')[0]!.system).toBe(PLAN_SYSTEM + '\nYou are writing as the Finance department. Your data is every metric provided (salon, online and combined).');
+    expect(model.of('finance.plans')[0]!.system).toBe(PLAN_SYSTEM + '\nYou are writing as the Finance department. Your data is the money metrics of both businesses provided, side by side (salon, online and combined).');
     expect(model.of('salon.plans')[0]!.system).toContain('You are writing as the Salon department. Your data is only the salon metrics provided');
     expect(model.of('online.plans')[0]!.system).toContain('You are writing as the Online department. Your data is only the online metrics provided');
     const synthesis = model.of('owner.synthesis');
