@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AssistantId } from '@fahq/contracts';
 import {
   KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, MONEY_READS, READ_SCOPE, READ_TOOL_NAMES, applyProfileChange, changeOf, checkChangeText,
-  checkProfileRow, dataNeverStored, describeChange, loadProfiles, managerNotes, withManagerNotes, type ChangeOptions, type ProfileContent, type ReadToolName,
+  checkProfileRow, dataNeverStored, describeChange, lessonAddedBy, loadProfiles, managerNotes, withManagerNotes, type ChangeOptions, type ProfileContent, type ReadToolName,
 } from '../src/index.ts';
 
 // The changes the HQ Manager may make to a profile: pure functions, so every rule has a case here.
@@ -332,6 +332,54 @@ describe('describing a change', () => {
     expect(changeOf({ kind: 'reads', change: 'x', reads: { add: ['usage_summary'] } })).toEqual({ kind: 'reads', add: ['usage_summary'], remove: [] });
     expect(changeOf({ kind: 'model', change: 'x', model: { job: 'code', model: 'm1' } })).toEqual({ kind: 'model', job: 'code', model: 'm1' });
     expect(() => changeOf({ kind: 'model', change: 'x' })).toThrow('a model change needs the job and the model');
-    expect(KIND_LABEL).toEqual({ lesson: 'lesson', skill_note: 'skill note', reads: 'data access', model: 'model' });
+    expect(changeOf({ kind: 'retire', change: 'x', retire: { target: 'note', text: 'Say the month.', why: 'Outdated.' } })).toEqual({ kind: 'retire', target: 'note', text: 'Say the month.' });
+    expect(() => changeOf({ kind: 'retire', change: 'x' })).toThrow('a retire needs the target and the exact text');
+    expect(KIND_LABEL).toEqual({ lesson: 'lesson', skill_note: 'skill note', retire: 'retire', reads: 'data access', model: 'model' });
+  });
+
+  it('words a retire in the program\'s words, naming the assistant', () => {
+    expect(describeChange({ kind: 'retire', target: 'lesson', text: 'Name the month.' }, 'finance')).toBe('Retire from finance: Name the month.');
+    expect(describeChange({ kind: 'retire', target: 'note', text: 'x'.repeat(300) }, 'online').length).toBe(300);
+  });
+});
+
+describe('a retire', () => {
+  const lessons = [
+    { text: 'Name the month.', source: 'rec-a', adoptedAt: '2026-10-20T00:00:00.000Z', by: 'owner' as const },
+    { text: 'Say the period first.', source: 'rec-b', adoptedAt: '2026-10-21T00:00:00.000Z', by: 'manager' as const },
+  ];
+
+  it('takes one standing lesson out by its exact text, and leaves the rest of the profile as it was', () => {
+    const before = content('finance', { lessons });
+    const r = must(applyProfileChange(before, { kind: 'retire', target: 'lesson', text: 'Say the period first.' }, options({ by: 'manager' })));
+    expect(r.changed).toBe(true);
+    expect(r.next.lessons).toEqual([lessons[0]]);
+    expect(r.next.skill).toBe(before.skill);
+    expect(r.next.reads).toEqual(before.reads);
+  });
+
+  it('takes one line of the notes out, and the section with it when it was the last', () => {
+    const skill = withManagerNotes(files.finance.skill, ['Name the month.', 'Say the period first.']);
+    const once = must(applyProfileChange(content('finance', { skill }), { kind: 'retire', target: 'note', text: 'Name the month.' }, options()));
+    expect(managerNotes(once.next.skill)).toEqual(['Say the period first.']);
+    const twice = must(applyProfileChange(content('finance', { skill: once.next.skill }), { kind: 'retire', target: 'note', text: 'Say the period first.' }, options()));
+    expect(twice.next.skill).toBe(files.finance.skill.trimEnd());
+  });
+
+  it('is refused, with the reason, when the exact text is not in the stored profile', () => {
+    expect(reason(applyProfileChange(content('finance', { lessons }), { kind: 'retire', target: 'lesson', text: 'Name the month' }, options())))
+      .toBe('there is no standing lesson "Name the month" in the stored profile');
+    expect(reason(applyProfileChange(content('finance', { lessons }), { kind: 'retire', target: 'note', text: 'Name the month.' }, options())))
+      .toBe('there is no note "Name the month." in the stored profile');
+  });
+
+  it('says who put a lesson there from the stored row: the manager only when it says so, the owner otherwise (no record fails closed)', () => {
+    const raw = [{ text: 'A.', by: 'manager' }, { text: 'B.', by: 'owner' }, { text: 'C.' }, { text: 'D.', by: 'someone' }];
+    expect(lessonAddedBy(raw, 'A.')).toBe('manager');
+    expect(lessonAddedBy(raw, 'B.')).toBe('owner');
+    expect(lessonAddedBy(raw, 'C.')).toBe('owner');
+    expect(lessonAddedBy(raw, 'D.')).toBe('owner');
+    expect(lessonAddedBy(raw, 'E.')).toBeNull();
+    expect(lessonAddedBy('not a list', 'A.')).toBeNull();
   });
 });

@@ -1,10 +1,11 @@
-import { hasCode, hasPhone, type ChangeKind, type ModelChange, type ReadsChange } from '@fahq/contracts';
+import { hasCode, hasPhone, type ChangeKind, type ModelChange, type ReadsChange, type RetireChange } from '@fahq/contracts';
 import { checkProfileRow, type ProfileLesson, type ProfileRow } from './rows.ts';
 
 // The changes the HQ Manager may make to a profile, as pure functions: a typed change in, the next profile (or a
 // plain reason it was refused) out. Nothing here reads or writes the database; the worker does that around it.
 //  - lesson     adds one standing lesson to the profile's lessons;
 //  - skill_note adds one line to the "Notes from the HQ Manager" section at the end of the skill;
+//  - retire     takes one standing lesson, or one line of that section, out again, named by its exact text;
 //  - reads      adds or removes read tools; the same checks as for any stored profile still hold afterwards;
 //  - model      moves one job to a model another job already uses.
 // A lesson or a note is one short line of plain text, checked here before it is ever stored (see checkChangeText).
@@ -12,6 +13,7 @@ import { checkProfileRow, type ProfileLesson, type ProfileRow } from './rows.ts'
 export type ProfileChange =
   | { kind: 'lesson'; text: string }
   | { kind: 'skill_note'; text: string }
+  | { kind: 'retire'; target: RetireChange['target']; text: string }
   | { kind: 'reads'; add: readonly string[]; remove: readonly string[] }
   | { kind: 'model'; job: ModelChange['job']; model: string };
 
@@ -137,12 +139,17 @@ export function checkChangeText(text: string, reads: readonly string[], readName
 
 const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}…`);
 
-/** The change as the recommendation table stores and the owner reads it. At most 300 characters. */
-export function describeChange(change: ProfileChange): string {
+/**
+ * The change as the recommendation table stores and the owner reads it. At most 300 characters. A retire is worded by
+ * the program, naming the assistant (`assistant`), so the owner reads exactly what would be taken out.
+ */
+export function describeChange(change: ProfileChange, assistant = 'the assistant'): string {
   switch (change.kind) {
     case 'lesson':
     case 'skill_note':
       return change.text;
+    case 'retire':
+      return clip(`Retire from ${assistant}: ${change.text}`, 300);
     case 'reads': {
       const parts = [change.add.length > 0 ? `add ${change.add.join(', ')}` : '', change.remove.length > 0 ? `remove ${change.remove.join(', ')}` : ''];
       return clip(`Read tools: ${parts.filter(Boolean).join('; ')}`, 300);
@@ -153,19 +160,52 @@ export function describeChange(change: ProfileChange): string {
 }
 
 /** How the owner's text names a kind, e.g. "lesson" before the words of a lesson. */
-export const KIND_LABEL: Record<ChangeKind, string> = { lesson: 'lesson', skill_note: 'skill note', reads: 'data access', model: 'model' };
+export const KIND_LABEL: Record<ChangeKind, string> = { lesson: 'lesson', skill_note: 'skill note', retire: 'retire', reads: 'data access', model: 'model' };
 
 /** The typed change a stored or written recommendation stands for. */
-export function changeOf(rec: { kind: ChangeKind; change: string; reads?: Partial<ReadsChange> | undefined; model?: ModelChange | undefined }): ProfileChange {
+export function changeOf(rec: {
+  kind: ChangeKind; change: string; reads?: Partial<ReadsChange> | undefined; model?: ModelChange | undefined;
+  retire?: { target: RetireChange['target']; text: string; why?: string } | undefined;
+}): ProfileChange {
   switch (rec.kind) {
     case 'reads':
       return { kind: 'reads', add: rec.reads?.add ?? [], remove: rec.reads?.remove ?? [] };
     case 'model':
       if (!rec.model) throw new Error('a model change needs the job and the model');
       return { kind: 'model', job: rec.model.job, model: rec.model.model };
+    case 'retire':
+      if (!rec.retire) throw new Error('a retire needs the target and the exact text');
+      return { kind: 'retire', target: rec.retire.target, text: rec.retire.text };
     default:
       return { kind: rec.kind, text: rec.change };
   }
+}
+
+/**
+ * Who put a standing lesson into a stored profile, from the row as the database holds it (before any default is
+ * filled in): 'manager' only when the lesson says so, 'owner' for anything else, so a lesson with no record is the
+ * owner's and a retire of it waits for his code. Null when the row holds no lesson with exactly these words.
+ */
+export function lessonAddedBy(rawLessons: unknown, text: string): 'manager' | 'owner' | null {
+  if (!Array.isArray(rawLessons)) return null;
+  const found = rawLessons.find((l): l is { text: string; by?: unknown } => typeof l === 'object' && l !== null && (l as { text?: unknown }).text === text);
+  if (!found) return null;
+  return found.by === 'manager' ? 'manager' : 'owner';
+}
+
+const quoted = (text: string) => `"${clip(text, 120)}"`;
+
+function applyRetire(row: ProfileContent, change: Extract<ProfileChange, { kind: 'retire' }>): AppliedChange {
+  const text = change.text.trim();
+  if (change.target === 'lesson') {
+    const lessons = row.lessons.filter((l) => l.text.trim() !== text);
+    if (lessons.length === row.lessons.length) return { ok: false, reason: `there is no standing lesson ${quoted(text)} in the stored profile` };
+    return { ok: true, changed: true, next: { title: row.title, skill: row.skill, reads: row.reads, models: row.models, lessons }, dropped: [] };
+  }
+  const notes = managerNotes(row.skill);
+  const kept = notes.filter((n) => n !== text);
+  if (kept.length === notes.length) return { ok: false, reason: `there is no note ${quoted(text)} in the stored profile` };
+  return { ok: true, changed: true, next: { title: row.title, skill: withManagerNotes(row.skill, kept), reads: row.reads, models: row.models, lessons: row.lessons }, dropped: [] };
 }
 
 function applyReads(row: ProfileContent, change: Extract<ProfileChange, { kind: 'reads' }>, options: ChangeOptions): AppliedChange {
@@ -219,6 +259,7 @@ export function applyProfileChange(row: ProfileContent, change: ProfileChange, o
   let applied: AppliedChange;
   if (change.kind === 'reads') applied = applyReads(row, change, options);
   else if (change.kind === 'model') applied = applyModel(row, change, options);
+  else if (change.kind === 'retire') applied = applyRetire(row, change);
   else {
     const refusal = checkChangeText(change.text, row.reads, options.readNames);
     if (refusal) return { ok: false, reason: `the ${change.kind === 'lesson' ? 'lesson' : 'note'} was not accepted: ${refusal}` };

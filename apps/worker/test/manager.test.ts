@@ -31,7 +31,7 @@ afterAll(async () => pool.end());
 
 const sid = () => 'SM' + randomBytes(16).toString('hex');
 const OWNER_NUMBER = '+15550100001';
-const RULE_ON = { lesson: true, skill_note: true, reads: false, model: false } as const;
+const RULE_ON = { lesson: true, skill_note: true, retire: true, reads: false, model: false } as const;
 
 // ---- Fakes (fixtures.ts) --------------------------------------------------------------------------
 

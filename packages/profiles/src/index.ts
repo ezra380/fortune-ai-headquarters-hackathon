@@ -187,7 +187,7 @@ export type { RestoreResult } from './restore.ts';
 export { MONEY_READS, ProfileLesson as ProfileLessonSchema, ProfileRow, READ_SCOPE, checkProfileRow, parseProfileRows } from './rows.ts';
 export type { ParsedProfileRows, ReadScope } from './rows.ts';
 export { DEFAULT_PROFILE_TTL_MS, MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, skillWithLessons } from './source.ts';
-export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, dataNeverStored, describeChange, managerNotes, withManagerNotes } from './changes.ts';
+export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, dataNeverStored, describeChange, lessonAddedBy, managerNotes, withManagerNotes } from './changes.ts';
 export type { AppliedChange, ChangeOptions, ProfileChange, ProfileContent } from './changes.ts';
 export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './source.ts';
 export { canonicalJson, ownerChoices } from './seed.ts';

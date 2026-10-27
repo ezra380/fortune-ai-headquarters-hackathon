@@ -326,22 +326,23 @@ export const SESSION_REPORT_MAX_BYTES = 30 * 1024;
  * What a recommendation changes in the assistant's profile:
  *  - lesson: one standing lesson (the profile's newest ten reach every prompt);
  *  - skill_note: one line added to the assistant's instructions;
+ *  - retire: takes one standing lesson, or one line of the notes, out again (outdated, a duplicate, or contradicted);
  *  - reads: the read tools the assistant may use (data access);
  *  - model: the model that does one of its jobs (cost).
  * An older recommendation has no kind: it was a lesson.
  */
-export const ChangeKind = z.enum(['lesson', 'skill_note', 'reads', 'model']);
+export const ChangeKind = z.enum(['lesson', 'skill_note', 'retire', 'reads', 'model']);
 export type ChangeKind = z.infer<typeof ChangeKind>;
 
 /**
- * Who applies a kind, when the HQ Manager is allowed to apply anything by itself. The program reads this table, never
- * the model. It is all false: nothing changes an assistant's profile without a person's one-time code, so every kind
- * waits for the owner's ADOPT. (The manager once applied lessons and skill notes at once; the independent review of
- * 2026-10-27 found that an approval path with no code, fed by outside tools' reports, was a decision only Ezra can make.
- * The mechanism is still in the worker, tested, and off. To turn it on, Ezra approves it in writing and a person
- * changes this table; the review lists what must be added first, see docs/manager.md, "Who decides what changes".)
+ * Which kinds the HQ Manager may apply by itself. The program reads this table, never the model. Ezra approved it in
+ * writing on 2026-10-27 ("The HQ manager should apply lessons by itself, update itself, occasionally remove outdated
+ * information, and learn and grow according to my needs"): a lesson, a skill note and a retire are the manager's, a
+ * change of read tools or of model always waits for the owner's one-time code. The table is only the first gate: the
+ * worker applies nothing by itself from a review that carried an outside report, nor for an assistant whose door did
+ * not file a report it carried, nor a retire of anything the owner put there (docs/manager.md, "Who decides what changes").
  */
-export const MANAGER_APPLIES: Record<ChangeKind, boolean> = { lesson: false, skill_note: false, reads: false, model: false };
+export const MANAGER_APPLIES: Record<ChangeKind, boolean> = { lesson: true, skill_note: true, retire: true, reads: false, model: false };
 
 const ReadToolNames = z.array(z.string().regex(/^[a-z][a-z_]{1,59}$/)).max(5).default([]);
 /** Read tools to add to and remove from an assistant. Whether a name is a real tool is checked against the profile rules. */
@@ -352,11 +353,24 @@ export type ReadsChange = z.infer<typeof ReadsChange>;
 export const ModelChange = z.object({ job: z.enum(['code', 'answer', 'review']), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/:-]{0,119}$/) }).strict();
 export type ModelChange = z.infer<typeof ModelChange>;
 
+/**
+ * What a retire takes out: one standing lesson or one line of the skill's "Notes from the HQ Manager", named by its exact
+ * stored text, and why it goes (outdated, a duplicate, or contradicted by a newer one). The program finds the text in the
+ * stored profile or refuses it.
+ */
+export const RetireChange = z.object({
+  target: z.enum(['lesson', 'note']),
+  text: z.string().min(1).max(300),
+  why: z.string().min(1).max(300),
+}).strict();
+export type RetireChange = z.infer<typeof RetireChange>;
+
 /** A recommendation with its kind. No kind means a lesson, so a review or a stored row from before kinds still reads. */
 export const TypedRecommendation = Recommendation.extend({
   kind: ChangeKind.default('lesson'),
   reads: ReadsChange.optional(),
   model: ModelChange.optional(),
+  retire: RetireChange.optional(),
 }).superRefine((r, ctx) => {
   const problem = (path: string, message: string) => ctx.addIssue({ code: 'custom', path: [path], message });
   if (r.kind === 'reads') {
@@ -366,6 +380,9 @@ export const TypedRecommendation = Recommendation.extend({
   if (r.kind === 'model') {
     if (!r.model) problem('model', 'a model change needs the job and the model');
   } else if (r.model) problem('model', `a ${r.kind} recommendation takes no model`);
+  if (r.kind === 'retire') {
+    if (!r.retire) problem('retire', 'a retire needs the target, the exact text and why');
+  } else if (r.retire) problem('retire', `a ${r.kind} recommendation takes no retire`);
 });
 export type TypedRecommendation = z.infer<typeof TypedRecommendation>;
 
@@ -377,6 +394,7 @@ export type TypedManagerReview = z.infer<typeof TypedManagerReview>;
 export const RecommendationDetail = z.object({
   reads: ReadsChange.optional(),
   model: ModelChange.optional(),
+  retire: RetireChange.optional(),
   refused: z.string().min(1).max(300).optional(),
 }).strict();
 export type RecommendationDetail = z.infer<typeof RecommendationDetail>;

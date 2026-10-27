@@ -32,7 +32,7 @@ if (!api) console.warn('SKIPPED manager-decides tests: needs local Supabase (npm
 const pool = new pg.Pool({ connectionString: dbUrl, max: 3 });
 const OWNER_NUMBER = '+15550100001';
 const files = loadProfiles({});
-const RULE_ON = { lesson: true, skill_note: true, reads: false, model: false } as const;
+const RULE_ON = { lesson: true, skill_note: true, retire: true, reads: false, model: false } as const;
 const DAY_MS = 86_400_000;
 
 const digest = {
