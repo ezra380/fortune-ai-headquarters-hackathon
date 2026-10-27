@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ProfitPlans, type Division, type Metric, type MetricInfo, type Receipt } from '@fahq/contracts';
-import { departmentLine, departmentsFor, isDepartment, originsOf, sliceFor } from '../src/departments.ts';
+import { countNouns, departmentLine, departmentsFor, isDepartment, originsOf, sliceFor } from '../src/departments.ts';
 import { planDigest } from '../src/finance.ts';
 import { buildWorkReport, codeModeDetail } from '../src/reports.ts';
 import { finalSms } from '../src/rounds.ts';
@@ -45,6 +45,15 @@ describe('who is asked, and what each may read', () => {
     // Without divisions in the catalog, planUse still holds and the business rule decides.
     const plain = catalog.map(({ divisions: _d, ...rest }) => rest);
     expect(sliceFor('salon', all, plain).map((m) => m.id)).toEqual(['m:salon.revenue.wash_set']);
+  });
+
+  it('takes the count words of count metrics only from the catalog', () => {
+    expect(countNouns([
+      { id: 'm:salon.no_shows.count', label: 'x', unit: 'count', business: 'salon', nouns: ['no-show', 'no-shows'] },
+      { id: 'm:salon.revenue.total', label: 'x', unit: 'usd', business: 'salon', nouns: ['dollar'] },
+      { id: 'm:salon.appointments.count', label: 'x', unit: 'count', business: 'salon' },
+    ])).toEqual(new Map([['m:salon.no_shows.count', ['no-show', 'no-shows']]]));
+    expect(countNouns()).toEqual(new Map());
   });
 
   it('names the department and its data in one line', () => {

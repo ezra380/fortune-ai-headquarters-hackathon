@@ -9,7 +9,10 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //    a value of the same kind: a dollar amount a dollar value, a percentage a percentage, "2.4x" a
 //    ratio, a bare number of 100 or more a dollar or count value. Allowed values are cited metrics,
 //    projection inputs and results, and levers (a proposed price, discount, budget or count: a
-//    choice, not a fact). Durations ("90 days") and years ("in 2026") are not claims.
+//    choice, not a fact). Durations ("90 days"), years ("in 2026") and ids ("demo-rt-01234") are not claims.
+//  - A small count (under 100) is a claim when one of the next two words names what a cited count metric
+//    counts ("3 overdue invoices" when the plan cites the overdue invoice count): it must then be a count the
+//    plan holds. The words come from the data's catalog (`nouns`); without them small counts are not checked.
 //  - Numbers in words ("twelve thousand dollars") and digits the scanner cannot read are refused,
 //    never skipped.
 //  - A plan declares which businesses it touches and cites numbers from exactly those. One sentence
@@ -31,7 +34,10 @@ const RESULT_WORDS = /\b(profit|revenue|sales|income|gain|uplift|expected|projec
 // levers ("the combined effect of ads and email"), which is not a salon + online figure.
 const COMBINING_WORDS = /\b(both businesses|salon and online|online and salon|salon \+ online|online \+ salon|salon plus online|online plus salon|across both|whole company|company-wide)\b/i;
 
-export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck {
+/** For each count metric, the words that name what it counts (from the data's catalog). */
+export type CountNouns = ReadonlyMap<string, readonly string[]>;
+
+export function checkPlans(raw: unknown, metrics: readonly Metric[], nouns: CountNouns = new Map()): PlanCheck {
   const parsed = ProfitPlansSchema.safeParse(raw);
   if (!parsed.success) {
     return {
@@ -45,7 +51,7 @@ export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck 
   const ranks = parsed.data.plans.map((p) => p.rank).sort((a, b) => a - b);
   if (ranks.join(',') !== '1,2,3') errors.push('plans must be ranked 1, 2 and 3, once each');
   const everyPool: Allowed[] = [];
-  for (const plan of parsed.data.plans) everyPool.push(...checkPlan(plan, byId, errors, cited));
+  for (const plan of parsed.data.plans) everyPool.push(...checkPlan(plan, { byId, nouns }, errors, cited));
   for (const c of parsed.data.memoryConflicts) checkText(`memory note ${c.memoryId}`, c.note, everyPool, errors);
   return errors.length > 0
     ? { ok: false, errors }
@@ -54,18 +60,22 @@ export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck 
 
 function checkPlan(
   plan: Plan,
-  byId: ReadonlyMap<string, Metric>,
+  data: { byId: ReadonlyMap<string, Metric>; nouns: CountNouns },
   errors: string[],
   cited: Set<string>,
 ): Allowed[] {
+  const { byId } = data;
   const where = `plan ${plan.rank}`;
   const pool = poolOf(plan, byId);
   const units = new Set<BusinessUnit>();
   const citedValues: { value: number; business: BusinessUnit }[] = [];
+  // What the plan's cited counts count: a small number next to one of these words is a claim.
+  const countWords = new Set<string>();
 
   const useMetric = (m: Metric) => {
     cited.add(m.id);
     units.add(m.business);
+    if (m.unit === 'count') for (const w of data.nouns.get(m.id) ?? []) countWords.add(w.toLowerCase());
     const prefix = m.id.split(':')[1]?.split('.')[0];
     if (prefix !== m.business) errors.push(`${where}: metric ${m.id} is labeled ${m.business}, not ${prefix}`);
   };
@@ -132,13 +142,19 @@ function checkPlan(
     ...plan.evidence.flatMap((e, i): [string, string][] => (e.note ? [[`evidence ${i + 1} note`, e.note]] : [])),
     ...plan.levers.map((l, i): [string, string] => [`lever ${i + 1} label`, l.label]),
   ];
-  for (const [field, text] of texts) checkText(`${where} ${field}`, text, pool, errors);
+  for (const [field, text] of texts) checkText(`${where} ${field}`, text, pool, errors, countWords);
   return pool;
 }
 
-function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[]): void {
-  const { found, unreadable } = scan(text);
+function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[], countWords: ReadonlySet<string> = new Set()): void {
+  const { found, unreadable, small } = scan(text);
   for (const u of unreadable) errors.push(`${where}: "${u}" is a number the checker cannot read; write it in digits`);
+  for (const n of small) {
+    const noun = n.next.find((w) => countWords.has(w.toLowerCase()));
+    if (noun && !pool.some((a) => a.kind === 'count' && close(n.value, a.value, 0))) {
+      errors.push(`${where}: "${n.raw} … ${noun}" counts what a cited metric counts, so it must be that metric's value or a count lever`);
+    }
+  }
   for (const sentence of splitSentences(found)) {
     for (const n of sentence) {
       if (!pool.some((a) => accepts(n, a))) errors.push(`${where}: "${n.raw}" in the text is not one of its cited or projected numbers`);
@@ -251,7 +267,12 @@ export function numbersIn(text: string): FoundNumber[] {
   return scan(text).found;
 }
 
-function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
+/** A plain number under 100 (not a duration or a year) and the next two words after it. */
+type SmallCount = { raw: string; value: number; next: string[] };
+const NEXT_WORDS = /^\s*(\p{L}[\p{L}'-]*)(?:\s+(\p{L}[\p{L}'-]*))?/u;
+const nextWords = (after: string) => (NEXT_WORDS.exec(after) ?? []).slice(1).filter((w): w is string => Boolean(w));
+
+function scan(input: string): { found: FoundNumber[]; unreadable: string[]; small: SmallCount[] } {
   const text = normalize(input);
   const unreadable = [...text.matchAll(WORD_NUMBERS)].map((m) => m[0]);
   for (const m of text.matchAll(/\p{Nd}+/gu)) if (/[^0-9]/.test(m[0])) unreadable.push(m[0]);
@@ -262,6 +283,7 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
     const at = m.index ?? 0;
     const prev = text[at - 1] ?? '';
     if (/[\p{L}_.:\d]/u.test(prev)) continue; // part of a word, an id or a version ("Q4", "m:online", "v1.2")
+    if (/\p{L}-$/u.test(text.slice(Math.max(0, at - 2), at))) continue; // an id's digits after a letter and a hyphen ("demo-rt-01234")
     const [raw, dollar, whole, fraction, exponent, unitRaw, currencyWord] = m;
     if (whole === undefined) continue;
     let base = Number(whole.replaceAll(',', '') + (fraction ?? ''));
@@ -283,6 +305,7 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
   }
 
   const found: FoundNumber[] = [];
+  const small: SmallCount[] = [];
   for (const r of raws) {
     const isPercent = r.unit === '%' || r.unit.startsWith('percent') || r.unit.startsWith('per') || r.unit === 'pct';
     const isRatio = r.unit === 'x' || r.unit === '×';
@@ -295,11 +318,14 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
     const plain = !money && !isPercent && !isRatio && !(r.unit in MAGNITUDE);
     if (plain && TIME_AFTER.test(after)) continue; // a duration
     if (plain && r.plainInt && r.base >= 1900 && r.base <= 2100 && YEAR_BEFORE.test(text.slice(0, r.at))) continue; // a year
-    if (plain && Math.abs(value) < 100) continue; // small counts ("3 plans", "14 days")
+    if (plain && Math.abs(value) < 100) { // small counts ("3 plans"): a claim only next to a cited count's noun
+      small.push({ raw: r.raw, value, next: nextWords(after) });
+      continue;
+    }
     const kind = money ? 'usd' : isPercent ? 'percent' : isRatio ? 'ratio' : 'plain';
     found.push({ raw: r.raw, value, percent: kind === 'percent', kind, at: r.at, sentence: sentenceIndex(text, r.at) });
   }
-  return { found, unreadable };
+  return { found, unreadable, small };
 }
 
 function sentenceIndex(text: string, at: number): number {

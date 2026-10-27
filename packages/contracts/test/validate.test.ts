@@ -120,6 +120,15 @@ describe('numbersIn', () => {
     expect(numbersIn('an add-on at $200-300').map((n) => [n.value, n.kind])).toEqual([[200, 'usd'], [300, 'usd']]);
     expect(numbersIn('1,000-2,000 visits').map((n) => n.value)).toEqual([1000, 2000]);
   });
+
+  // Design 4e: a row id ("demo-rt-01234", "demo-inv-00412") used to read as a claim of 1,234 and fail the plan.
+  it('reads the digits of an id after a letter and a hyphen as part of the id, not as an amount', () => {
+    expect(numbersIn('Call about ticket demo-rt-01234 and invoice demo-inv-00412 today.')).toEqual([]);
+    expect(numbersIn('Chase SUP-2201 first.')).toEqual([]);
+    // A minus sign or a range is still read: the hyphen there follows a space or a digit, not a letter.
+    expect(numbersIn('net was -$3,000; a 10-20% lift; down -150 units').map((n) => n.value)).toEqual([-3000, 10, 20, -150]);
+    expect(numbersIn('ticket demo-rt-01234 owes $1,234').map((n) => n.raw)).toEqual(['$1,234']);
+  });
 });
 
 describe('checkPlans against invented numbers (adversarial review, 2026-10-26)', () => {
@@ -200,6 +209,41 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
 
   it("refuses a metric whose id names a different business than its label", () => {
     expect(() => Metric.parse({ ...metrics[3]!, id: 'm:salon.revenue.wash_set', business: 'online' })).toThrow();
+  });
+
+  it('lets an action name a row by its id: the digits after a letter and a hyphen are not an amount (design 4e)', () => {
+    expect(checkPlans(withPlan1({ actions: ['Chase invoice demo-inv-i00412 and ticket demo-rt-01234 first'] }), metrics).ok).toBe(true);
+  });
+});
+
+// Design 4d: small counts were never checked, so "clear the 5 late repairs" passed when the data said 3.
+describe('checkPlans and small counts next to what a cited count counts', () => {
+  const counts: Metric[] = [
+    ...metrics.filter((m) => m.business === 'salon'),
+    { id: 'm:salon.repairs.open_over_14d.count', label: 'Repairs open longer than two weeks', value: 3, unit: 'count', business: 'salon', period: 'standing', source },
+  ];
+  const nouns = new Map([['m:salon.repairs.open_over_14d.count', ['repair', 'repairs', 'ticket', 'tickets']]]);
+  const salonPlan = (rank: number, overrides: Record<string, unknown> = {}) => plan(rank, {
+    title: `Plan ${rank}: finish the late repairs`, summary: 'Finish the 3 late repairs before new intake.', actions: ['Call each owner today'],
+    evidence: [{ metricId: 'm:salon.repairs.open_over_14d.count', value: 3 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }],
+    projections: [], test: 'Track it for 14 days.', stopLoss: 'Stop if the late count does not fall.', businesses: ['salon'], risks: ['Stylists are busy'], ...overrides,
+  });
+  const three = (p1: Record<string, unknown>) => ({ plans: [salonPlan(1, p1), salonPlan(2), salonPlan(3)], memoryConflicts: [] });
+
+  it("accepts the cited count, and refuses another count of the same thing within two words", () => {
+    expect(checkPlans(three({}), counts, nouns)).toMatchObject({ ok: true });
+    const wrong = checkPlans(three({ summary: 'Finish the 5 late repairs before new intake.' }), counts, nouns);
+    expect(wrong.ok).toBe(false);
+    expect(!wrong.ok && wrong.errors).toEqual(['plan 1 summary: "5 … repairs" counts what a cited metric counts, so it must be that metric\'s value or a count lever']);
+    expect(checkPlans(three({ actions: ['Call the 7 tickets owners'] }), counts, nouns).ok).toBe(false);
+  });
+
+  it('accepts a count lever, and leaves alone a number next to other words, a duration, or no catalog words at all', () => {
+    const lever = three({ actions: ['Book 5 repairs a day'], levers: [{ label: 'Repairs booked a day', value: 5, unit: 'count' }] });
+    expect(checkPlans(lever, counts, nouns).ok).toBe(true);
+    expect(checkPlans(three({ actions: ['Open 2 evening slots and call 5 owners'] }), counts, nouns).ok).toBe(true);
+    expect(checkPlans(three({ actions: ['Finish them in 5 days, then review the repairs'] }), counts, nouns).ok).toBe(true);
+    expect(checkPlans(three({ summary: 'Finish the 5 late repairs before new intake.' }), counts).ok).toBe(true); // no nouns given: as before
   });
 });
 

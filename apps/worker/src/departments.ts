@@ -1,4 +1,4 @@
-import type { AssistantId, Metric, MetricInfo } from '@fahq/contracts';
+import type { AssistantId, CountNouns, Metric, MetricInfo } from '@fahq/contracts';
 
 // The departments that propose when the owner asks for plans. Each is an expert on its own data: the metrics
 // its division reads (the data's catalog says who reads each one): finance the money of both businesses side
@@ -34,6 +34,11 @@ export function sliceFor(department: Department, metrics: readonly Metric[], cat
     if (byDivision) return info.get(m.id)?.divisions?.includes(department) ?? false;
     return department === 'finance' || m.business === department;
   });
+}
+
+/** What each count metric counts, from the catalog, so the plan checker can hold a plan's small counts to it. */
+export function countNouns(catalog: readonly MetricInfo[] = []): CountNouns {
+  return new Map(catalog.flatMap((m) => (m.unit === 'count' && m.nouns ? [[m.id, m.nouns] as const] : [])));
 }
 
 /** The one line added to the plan writer's rules to name the department and its data. */
