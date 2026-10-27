@@ -13,12 +13,16 @@ import { DERIVED_VIEW_V2, STANDING_VIEW_V2, derivedViewBody, standingViewBody } 
 export const SOURCE_PORT_V2_DEFAULT = 18121;
 
 /** Databases version 2 adds. A database and a container must never share a name (one namespace). */
-export const V2_DATABASES = [{ db: 'FORTUNE_DEMO_FINANCE', about: 'Fortune demo finance owner budget sheet, synthetic' }] as const;
+export const V2_DATABASES = [
+  // Created live in slice 1 with this description; it also holds the supplier invoices now.
+  { db: 'FORTUNE_DEMO_FINANCE', about: 'Fortune demo finance owner budget sheet, synthetic' },
+  { db: 'FORTUNE_DEMO_SUPPORT', about: 'Fortune demo support inbox, message times and topics only, synthetic' },
+] as const;
 
 export const V2_TABLES = [
   {
     db: 'FORTUNE_DEMO_SALON', table: 'appointments_v2', path: '/v2/salon/appointments', view: 'salon_appointments',
-    cols: ['appointment_id', 'appointment_date', 'service', 'stylist_id', 'price_usd', 'duration_min', 'status'],
+    cols: ['appointment_id', 'appointment_date', 'service', 'stylist_id', 'price_usd', 'duration_min', 'status', 'location', 'booked_via', 'labor_cost_usd'],
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'orders_v2', path: '/v2/online/orders', view: 'online_orders',
@@ -35,6 +39,36 @@ export const V2_TABLES = [
   {
     db: 'FORTUNE_DEMO_FINANCE', table: 'budgets', path: '/v2/finance/budgets', view: 'finance_budgets',
     cols: ['budget_id', 'month_start', 'channel', 'cap_usd', 'status'],
+  },
+  // The day-to-day systems: the store's order fees, refunds, checkouts and stock; the support inbox (its own
+  // system and database); the ops app's repair tickets; the factories' invoices.
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'order_costs', path: '/v2/online/order_costs', view: 'online_order_costs',
+    cols: ['cost_id', 'order_id', 'order_date', 'payment_fee_usd', 'shipping_cost_usd'],
+  },
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'refunds', path: '/v2/online/refunds', view: 'online_refunds',
+    cols: ['refund_id', 'order_id', 'refund_date', 'amount_usd', 'reason'],
+  },
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'checkouts', path: '/v2/online/checkouts', view: 'online_checkouts',
+    cols: ['checkout_id', 'created_date', 'product_line', 'value_usd', 'recovered_via', 'recovered_order_id'],
+  },
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'inventory', path: '/v2/online/inventory', view: 'online_inventory',
+    cols: ['snapshot_id', 'snapshot_date', 'sku', 'product_line', 'on_hand', 'reorder_point', 'views_7d', 'add_to_cart_7d'],
+  },
+  {
+    db: 'FORTUNE_DEMO_SUPPORT', table: 'messages', path: '/v2/support/messages', view: 'support_messages',
+    cols: ['message_id', 'thread_id', 'channel', 'direction', 'received_date', 'received_at', 'first_reply_at', 'intent', 'converted_order_id'],
+  },
+  {
+    db: 'FORTUNE_DEMO_SALON', table: 'repair_tickets', path: '/v2/salon/repairs', view: 'salon_repairs',
+    cols: ['ticket_id', 'channel', 'location', 'repair_type', 'received_date', 'quoted_date', 'paid_date', 'completed_date', 'shipped_date', 'status', 'quote_usd', 'parts_cost_usd', 'labor_cost_usd'],
+  },
+  {
+    db: 'FORTUNE_DEMO_FINANCE', table: 'invoices', path: '/v2/finance/invoices', view: 'finance_invoices',
+    cols: ['invoice_id', 'supplier_id', 'business', 'product_line', 'invoice_date', 'due_date', 'paid_date', 'amount_usd'],
   },
 ] as const;
 

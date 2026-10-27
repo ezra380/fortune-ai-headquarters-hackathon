@@ -1,9 +1,10 @@
 import { PERIOD_KEYS, type Period } from '@fahq/contracts';
 import {
-  CHANNEL_LABEL, CONTAINER_V2, PERIOD_VIEW_V2, SOURCES, aggSql, aggregate, computeAll, quoted, round, sourceRows, unpivot,
+  CHANNEL_LABEL, CONTAINER_V2, PERIOD_VIEW_V2, aggSql, aggregate, computeAll, quoted, round, sourceRows, specOf, unpivot,
   type MetricAbout, type MetricDef, type Source, type SourceRows,
 } from './finance-sql.ts';
-import { AD_CHANNELS, PERIODS } from './synthetic.ts';
+import { OPS_STANDING } from './operations.ts';
+import { AD_CHANNELS, AS_OF, LAST_WEEK } from './synthetic.ts';
 
 // Version 2's two layers above the period totals, each its own Zetaris view and its own statement:
 // - derived: numbers made from other metrics: the budget left and used, revenue per ad dollar (same
@@ -12,8 +13,7 @@ import { AD_CHANNELS, PERIODS } from './synthetic.ts';
 // - standing: numbers as of the data date, whatever period is asked (period key 'standing').
 // The oracle computes both again in TypeScript from the same rows, so setup can prove the views.
 
-/** The data date: the last day the synthetic rows cover. Standing numbers are "as of" it. */
-export const AS_OF = PERIODS['2026-10-mtd'].to;
+export { AS_OF };
 /** The period key standing numbers carry. */
 export const STANDING_PERIOD = 'standing';
 export const DERIVED_VIEW_V2 = `${CONTAINER_V2}.derived_metrics`;
@@ -24,7 +24,8 @@ const WHOLE_MONTHS: readonly Period[] = PERIOD_KEYS.filter((p) => p !== '2026-10
 
 type Formula =
   | { op: 'sum'; of: readonly string[] }
-  | { op: 'minus'; a: string; b: string }
+  /** a less the sum of b. */
+  | { op: 'minus'; a: string; b: readonly string[] }
   | { op: 'ratio'; num: readonly string[]; den: readonly string[] }
   /** The metric's value in a whole month divided by its average over the twelve whole months. */
   | { op: 'month_index'; of: string }
@@ -42,7 +43,7 @@ export const DERIVED: DerivedDef[] = [
   ...AD_CHANNELS.flatMap((ch): DerivedDef[] => [
     {
       id: `m:online.budget.${ch}.room`, label: `${CHANNEL_LABEL[ch]} ad budget left (approved budget minus spend)`, unit: 'usd', business: 'online',
-      divisions: FINANCE_HQ, layer: 'derived', since: 2, formula: { op: 'minus', a: cap(ch), b: spend(ch) },
+      divisions: FINANCE_HQ, layer: 'derived', since: 2, formula: { op: 'minus', a: cap(ch), b: [spend(ch)] },
       about: "Below zero when spend went over the approved budget. For the month so far: what is left of the whole month's budget.",
     },
     {
@@ -58,6 +59,17 @@ export const DERIVED: DerivedDef[] = [
     id: 'm:online.mer', label: 'Online revenue per ad dollar, all channels', unit: 'ratio', business: 'online', divisions: ['online', 'finance', 'hq'],
     layer: 'derived', since: 2, formula: { op: 'ratio', num: ['m:online.revenue.total'], den: AD_CHANNELS.map(spend) },
   },
+  {
+    id: 'm:online.refund_rate', label: 'Online refunds against online revenue', unit: 'ratio', business: 'online', divisions: ['online', 'finance', 'hq'],
+    layer: 'derived', since: 2, formula: { op: 'ratio', num: ['m:online.refunds.total'], den: ['m:online.revenue.total'] },
+    about: 'Refunds issued in the period over revenue from orders placed in it, so a refund can fall in a later period than its order.',
+  },
+  {
+    id: 'm:online.contribution', label: 'Online profit after payment fees, shipping, refunds and ad spend', unit: 'usd', business: 'online', divisions: FINANCE_HQ,
+    layer: 'derived', since: 2,
+    formula: { op: 'minus', a: 'm:online.gross_profit', b: ['m:online.fees.payment', 'm:online.shipping.cost', 'm:online.refunds.total', ...AD_CHANNELS.map(spend)] },
+    about: 'Gross profit less payment fees, shipping labels, refunds issued and ad spend on all three channels, same period. Email, staff and rent are not in it.',
+  },
   ...(['salon', 'online'] as const).flatMap((b): DerivedDef[] => [
     {
       id: `m:${b}.season.month_index`, label: `${BUSINESS_LABEL[b]} revenue of the month against the average month`, unit: 'ratio', business: b,
@@ -71,9 +83,6 @@ export const DERIVED: DerivedDef[] = [
     },
   ]),
 ];
-
-/** The seven days ending on the data date. */
-const LAST_WEEK = { from: new Date(Date.parse(`${AS_OF}T00:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10), to: AS_OF };
 
 export const STANDING_METRICS: MetricDef[] = [
   {
@@ -92,13 +101,15 @@ export const STANDING_METRICS: MetricDef[] = [
     window: { from: `${AS_OF.slice(0, 7)}-01` }, nouns: ['change', 'changes', 'raise', 'raises'], since: 2,
     about: 'Proposed lines on the budget sheet for this month or later. A proposed cap never counts as approved.',
   },
+  // The day-to-day systems: the inbox's waiting messages, open and late repairs, what is owed to suppliers.
+  ...OPS_STANDING,
 ];
 
 // ---- SQL ----------------------------------------------------------------------------------
 
 /** The period metrics a formula reads (a last-year index reads another derived metric, not the period view). */
 const inputsOf = (f: Formula): readonly string[] =>
-  f.op === 'sum' ? f.of : f.op === 'minus' ? [f.a, f.b] : f.op === 'ratio' ? [...f.num, ...f.den] : f.op === 'month_index' ? [f.of] : [];
+  f.op === 'sum' ? f.of : f.op === 'minus' ? [f.a, ...f.b] : f.op === 'ratio' ? [...f.num, ...f.den] : f.op === 'month_index' ? [f.of] : [];
 
 /** Every period metric the derived view reads, in first-use order. */
 export const DERIVED_INPUTS: readonly string[] = [...new Set(DERIVED.flatMap((d) => inputsOf(d.formula)))];
@@ -107,7 +118,7 @@ function formulaSql(f: Exclude<Formula, { op: 'last_year' }>, col: (id: string) 
   const plus = (ids: readonly string[]) => ids.map(col).join(' + ');
   switch (f.op) {
     case 'sum': return `ROUND(${plus(f.of)}, 2)`;
-    case 'minus': return `ROUND(${col(f.a)} - ${col(f.b)}, 2)`;
+    case 'minus': return `ROUND(${col(f.a)} - (${plus(f.b)}), 2)`;
     case 'ratio': return `ROUND((${plus(f.num)}) / NULLIF(${plus(f.den)}, 0), 4)`;
     case 'month_index': {
       const whole = `period IN (${quoted(WHOLE_MONTHS)})`;
@@ -133,7 +144,7 @@ export function derivedViewBody(): string {
 
 /** One source's standing numbers: every row of the source, no period, one scan. */
 function standingSelect(source: Source): string {
-  const s = SOURCES[source];
+  const s = specOf(source, 2);
   const defs = STANDING_METRICS.filter((d) => d.source === source);
   const wide = `SELECT '${STANDING_PERIOD}' AS period, ${defs.map((d, i) => `CAST(${aggSql(d, s)} AS DOUBLE) AS m${i}`).join(', ')} FROM ${CONTAINER_V2}.${s.table}`;
   return unpivot(defs, wide, source);
@@ -160,7 +171,7 @@ function formulaValue(f: Exclude<Formula, { op: 'last_year' }>, period: Period, 
     return xs.every((x) => x !== undefined) ? (xs as number[]).reduce((t, x) => t + x, 0) : undefined;
   };
   if (f.op === 'sum') { const s = all(f.of); return s === undefined ? undefined : round(s, 2); }
-  if (f.op === 'minus') { const [a, b] = [value(period, f.a), value(period, f.b)]; return a === undefined || b === undefined ? undefined : round(a - b, 2); }
+  if (f.op === 'minus') { const [a, b] = [value(period, f.a), all(f.b)]; return a === undefined || b === undefined ? undefined : round(a - b, 2); }
   if (f.op === 'ratio') { const [n, d] = [all(f.num), all(f.den)]; return n === undefined || !d ? undefined : round(n / d, 4); }
   if (!WHOLE_MONTHS.includes(period)) return undefined;
   const x = value(period, f.of);
@@ -193,7 +204,7 @@ export function computeStanding(b: SourceRows): Map<string, number> {
   const rows = sourceRows(b);
   const out = new Map<string, number>();
   for (const d of STANDING_METRICS) {
-    const v = aggregate(d, rows[d.source]);
+    const v = aggregate(d, rows[d.source], 2);
     if (v !== undefined) out.set(d.id, v);
   }
   return out;

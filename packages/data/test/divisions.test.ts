@@ -42,6 +42,31 @@ describe('division filter views', () => {
     expect(divisionIds('hq', 'period')).not.toContain('m:online.revenue.mazali');
     expect(divisionIds('online', 'derived')).not.toContain('m:online.budget.google.room');
   });
+
+  it('route the day-to-day systems: repairs to the Salon, the inbox, checkouts and stock to Online, what is owed and what sales cost to Finance', () => {
+    const all = (d: Division) => LAYERS.flatMap((l) => divisionIds(d, l));
+    expect(all('salon')).toEqual(expect.arrayContaining(['m:salon.repairs.received.count', 'm:salon.repairs.within_14d.share', 'm:salon.repairs.open.count', 'm:salon.repairs.open_over_14d.count', 'm:salon.dq.rejected_repairs']));
+    expect(all('online')).toEqual(expect.arrayContaining([
+      'm:online.service.replied_1h.share', 'm:online.service.missed_sale_intent.count', 'm:online.service.waiting_now.count', 'm:online.checkouts.recovery_rate',
+      'm:online.inventory.wanted_low_stock.count', 'm:online.refunds.count', 'm:online.refund_rate', 'm:online.dq.rejected_messages',
+    ]));
+    expect(all('finance')).toEqual(expect.arrayContaining([
+      'm:online.fees.payment', 'm:online.shipping.cost', 'm:online.refunds.total', 'm:online.contribution', 'm:online.refund_rate', 'm:salon.repairs.cost',
+      'm:salon.ap.invoiced', 'm:online.ap.open', 'm:salon.ap.due_30d', 'm:online.ap.overdue', 'm:combined.dq.rejected_invoices',
+    ]));
+    // Finance reads the money, not the inbox or the stock; Online does not read what is owed to factories.
+    expect(all('finance').some((id) => /service|inventory|checkouts\.abandoned/.test(id))).toBe(false);
+    expect(all('online').some((id) => /\.ap\.|contribution/.test(id))).toBe(false);
+    // HQ: the profit after costs, what needs attention, and every rejected-rows count of every source.
+    expect(all('hq')).toEqual(expect.arrayContaining(['m:online.contribution', 'm:online.service.waiting_over_24h.count', 'm:salon.repairs.open_over_14d.count', 'm:online.ap.overdue.count', 'm:salon.ap.overdue.count']));
+    expect(all('hq')).toEqual(expect.arrayContaining(CATALOG_V2.filter((m) => m.id.includes('.dq.rejected_')).map((m) => m.id)));
+    expect(all('hq')).not.toContain('m:online.service.inbound.count');
+    // A combined number is a count of rows, never money, and only Finance and HQ read it.
+    for (const m of CATALOG_V2.filter((x) => x.business === 'combined')) {
+      expect(m.unit).toBe('count');
+      expect([...m.divisions].sort()).toEqual(['finance', 'hq']);
+    }
+  });
 });
 
 describe('division marts', () => {
@@ -121,8 +146,29 @@ describe('attention list', () => {
     const read = (d: Division, p: Period) => attentionFor([...divisionSlice(layers, d, p)].map(([id, value]) => ({ id, value })));
     expect(read('finance', '2026-10-mtd')).toContainEqual({ metricId: 'm:online.budget.proposed.count', level: 'act', rule: "A proposed ad budget change is waiting for the finance owner's decision." });
     expect(read('hq', '2026-10-mtd').map((a) => a.metricId)).toContain('m:online.budget.proposed.count');
-    expect(read('salon', '2026-09').map((a) => a.metricId)).toEqual(['m:salon.dq.rejected_appointments']); // demo-a-bad-price, Sept 22
-    expect(read('online', '2026-10-mtd').map((a) => a.metricId)).toEqual(['m:online.dq.rejected_orders']); // demo-o-bad-line, Oct 3
+    expect(read('salon', '2026-09').map((a) => a.metricId)).toContain('m:salon.dq.rejected_appointments'); // demo-a-bad-price, Sept 22
+    expect(read('online', '2026-10-mtd').map((a) => a.metricId)).toContain('m:online.dq.rejected_orders'); // demo-o-bad-line, Oct 3
     expect(read('finance', '2026-03').map((a) => a.metricId)).toContain('m:online.dq.rejected_budgets'); // demo-bu-bad-negative
+  });
+
+  it("fires on the day-to-day systems where their rows say so, each in the divisions that read them, HQ seeing them all", () => {
+    const read = (d: Division, p: Period) => attentionFor([...divisionSlice(layers, d, p)].map(([id, value]) => ({ id, value }))).map((a) => a.metricId);
+    // Late repairs (standing, so every period), and nothing else for the salon this month.
+    expect(read('salon', '2026-10-mtd')).toEqual(['m:salon.repairs.open_over_14d.count']);
+    // The inbox, the stock and the planted order row for the online division.
+    expect(read('online', '2026-10-mtd').sort()).toEqual([
+      'm:online.dq.rejected_orders', 'm:online.inventory.wanted_low_stock.count', 'm:online.inventory.wanted_out_of_stock.count',
+      'm:online.service.missed_sale_intent.count', 'm:online.service.waiting_over_24h.count',
+    ]);
+    // Overdue supplier invoices of both businesses for Finance; no inbox or stock rule there.
+    expect(read('finance', '2026-10-mtd')).toEqual(expect.arrayContaining(['m:salon.ap.overdue.count', 'm:online.ap.overdue.count']));
+    expect(read('finance', '2026-10-mtd').some((id) => /service|inventory|repairs/.test(id))).toBe(false);
+    const hq = read('hq', '2026-10-mtd');
+    for (const d of ['salon', 'online', 'finance'] as const) for (const id of read(d, '2026-10-mtd')) expect(hq, id).toContain(id);
+    // Each planted row of a new source shows where its source is read, in its own month.
+    expect(read('online', '2026-02')).toContain('m:online.dq.rejected_checkouts'); // demo-ck-bad-recovery
+    expect(read('online', '2026-08')).toContain('m:online.dq.rejected_messages'); // demo-msg-bad-reply
+    expect(read('salon', '2026-07')).toContain('m:salon.dq.rejected_repairs'); // demo-rt-bad-dates
+    expect(read('hq', '2026-01')).toContain('m:combined.dq.rejected_invoices'); // demo-inv-bad-due
   });
 });

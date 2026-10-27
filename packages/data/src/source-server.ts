@@ -18,6 +18,13 @@ export const SOURCE_ROUTES = {
   '/v2/marketing/ads': (d: Served) => d.v2.marketing.ads,
   '/v2/marketing/email': (d: Served) => d.v2.marketing.email,
   '/v2/finance/budgets': (d: Served) => d.v2.finance.budgets,
+  '/v2/online/order_costs': (d: Served) => d.v2.online.orderCosts,
+  '/v2/online/refunds': (d: Served) => d.v2.online.refunds,
+  '/v2/online/checkouts': (d: Served) => d.v2.online.checkouts,
+  '/v2/online/inventory': (d: Served) => d.v2.online.inventory,
+  '/v2/support/messages': (d: Served) => d.v2.support.messages,
+  '/v2/salon/repairs': (d: Served) => d.v2.salon.repairs,
+  '/v2/finance/invoices': (d: Served) => d.v2.finance.invoices,
 } as const;
 
 export function createSourceServer(business: SyntheticBusiness = generateBusiness(), year: SyntheticYear = generateYear()): http.Server {

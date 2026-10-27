@@ -122,6 +122,12 @@ export const ATTENTION: readonly AttentionRule[] = [
   { metrics: BUDGET_USED, when: (v) => v > 1, level: 'act', rule: 'Ad spend went over the approved budget.' },
   { metrics: BUDGET_USED, when: (v) => v > 0.9 && v <= 1, level: 'watch', rule: 'Ad spend is close to the approved budget.' },
   { metrics: /^m:online\.budget\.proposed\.count$/, when: (v) => v > 0, level: 'act', rule: "A proposed ad budget change is waiting for the finance owner's decision." },
+  { metrics: /^m:online\.service\.waiting_over_24h\.count$/, when: (v) => v > 0, level: 'act', rule: 'Customer messages have waited more than a day for a first answer.' },
+  { metrics: /^m:online\.service\.missed_sale_intent\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Customers who asked to buy got no answer in time and did not order.' },
+  { metrics: /^m:online\.inventory\.wanted_out_of_stock\.count$/, when: (v) => v > 0, level: 'act', rule: 'Products customers are looking at are out of stock.' },
+  { metrics: /^m:online\.inventory\.wanted_low_stock\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Products customers are looking at are low on stock.' },
+  { metrics: /^m:salon\.repairs\.open_over_14d\.count$/, when: (v) => v > 0, level: 'act', rule: 'Repairs have been open longer than two weeks.' },
+  { metrics: /^m:(salon|online)\.ap\.overdue\.count$/, when: (v) => v > 0, level: 'act', rule: 'Supplier invoices are past their due date and unpaid.' },
 ];
 
 /** The rules that fire on these metrics, in metric order. Only metrics present can fire; nothing is computed. */

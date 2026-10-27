@@ -1,5 +1,9 @@
 import { DEFAULT_PERIODS, PERIOD_KEYS, type Division, type Period } from '@fahq/contracts';
-import { AD_CHANNELS, PERIODS, PRODUCT_LINES, SALON_SERVICES, type BudgetRow, type SyntheticBusiness } from './synthetic.ts';
+import { OPS_METRICS, OPS_SOURCES, OPS_SOURCE_NAMES, type OpsSource } from './operations.ts';
+import { ONE, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
+import {
+  AD_CHANNELS, BOOKING_CHANNELS, PERIODS, PRODUCT_LINES, SALON_LOCATIONS, SALON_SERVICES, type SyntheticBusiness, type SyntheticYear,
+} from './synthetic.ts';
 
 // The governed metric views. Each metric is defined once, as data, and turned into two things: the
 // Zetaris SQL (one conditional aggregate per metric, one scan per source, UNION ALL'd into one view) and a
@@ -33,17 +37,15 @@ export function martSql(): { create: string; addTable: string; drop: string } {
   };
 }
 
-export type Row = Record<string, unknown>;
-type Field = string | { sql: string; js: (r: Row) => number };
+export { quoted, type Row };
 
 export type DataVersion = 1 | 2;
-export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets';
-type SourceSpec = { table: string; date: string; validSql: string; valid: (r: Row) => boolean };
-export const quoted = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', ');
-const num = (r: Row, k: string) => Number(r[k]);
+/** Version 1's four sources, the budget sheet, and the day-to-day systems of operations.ts (version 2). */
+export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets' | OpsSource;
 
 /** Each source: its row view's name (in each version's container), its date column and its data-quality rule. */
 export const SOURCES: Record<Source, SourceSpec> = {
+  ...OPS_SOURCES,
   orders: {
     table: 'online_orders',
     date: 'order_date',
@@ -76,6 +78,20 @@ export const SOURCES: Record<Source, SourceSpec> = {
   },
 };
 
+/**
+ * Version 2's appointments also carry the location, how the visit was booked and the stylist's labor cost, and
+ * their rule checks those too. Version 1's view never names them: its rule is frozen with it.
+ */
+const APPOINTMENTS_V2: SourceSpec = {
+  ...SOURCES.appointments,
+  validSql: `${SOURCES.appointments.validSql} AND status IN ('completed', 'no_show') AND location IN (${quoted(SALON_LOCATIONS)}) AND booked_via IN (${quoted(BOOKING_CHANNELS)}) AND labor_cost_usd >= 0`,
+  valid: (r) => SOURCES.appointments.valid(r) && oneOf(['completed', 'no_show'], r.status) && oneOf(SALON_LOCATIONS, r.location)
+    && oneOf(BOOKING_CHANNELS, r.booked_via) && num(r, 'labor_cost_usd') >= 0,
+};
+
+/** A source as a version reads it: the same everywhere but version 2's appointments. */
+export const specOf = (source: Source, version: DataVersion): SourceSpec => (version === 2 && source === 'appointments' ? APPOINTMENTS_V2 : SOURCES[source]);
+
 type Agg =
   | { kind: 'sum'; field: Field }
   | { kind: 'avg'; field: Field }
@@ -88,8 +104,11 @@ export type MetricAbout = {
   id: string;
   label: string;
   unit: 'usd' | 'count' | 'ratio';
-  /** The legal split (salon or online); never changes, and the number validator keeps using it. */
-  business: 'salon' | 'online';
+  /**
+   * The legal split (salon or online); never changes, and the number validator keeps using it. 'combined' only
+   * for a count that belongs to neither, like rows rejected from a source both businesses share; never money.
+   */
+  business: 'salon' | 'online' | 'combined';
   /** Who reads it. Ad spend is online business, read by Finance and Online. */
   divisions: readonly Division[];
   /** 'period': a total over the period's rows; 'derived': from other metrics (layers.ts); 'standing': as of the data date. */
@@ -110,6 +129,8 @@ export type MetricDef = MetricAbout & {
   source: Source;
   agg: Agg;
   where?: Record<string, string>;
+  /** A condition beyond equality (a comparison, NULL, a list), in SQL and in TypeScript. */
+  test?: Cond;
   /** Standing metrics: only rows dated from `from` (and up to `to`, when given), whatever the period. */
   window?: { from: string; to?: string };
 };
@@ -168,6 +189,26 @@ export const METRICS: MetricDef[] = [
   { id: 'm:salon.no_shows.count', label: 'Salon no-shows', unit: 'count', business: 'salon', divisions: SALON, layer: 'period', source: 'appointments', agg: { kind: 'count' }, where: { status: 'no_show' }, nouns: ['no-show', 'no-shows'] },
   { id: 'm:salon.avg_ticket', label: 'Salon average ticket', unit: 'usd', business: 'salon', divisions: SALON_MONEY, layer: 'period', source: 'appointments', agg: { kind: 'avg', field: 'price_usd' }, where: done },
   { id: 'm:salon.dq.rejected_appointments', label: 'Salon appointment rows rejected by data checks', unit: 'count', business: 'salon', divisions: ['salon', 'hq'], layer: 'period', source: 'appointments', agg: { kind: 'rejected' }, nouns: ROWS },
+  // Version 2's appointment columns: the no-show rate, each location's revenue, online booking, and the
+  // stylists' labor, so the salon has a profit beside the store's.
+  {
+    id: 'm:salon.no_show_rate', label: 'Salon no-show rate (no-shows over booked visits)', unit: 'ratio', business: 'salon', divisions: ['salon', 'hq'], layer: 'period', source: 'appointments',
+    agg: { kind: 'ratio', num: oneIf({ sql: "status = 'no_show'", js: (r) => r.status === 'no_show' }), den: ONE }, since: 2,
+  },
+  ...SALON_LOCATIONS.map((loc): MetricDef => ({
+    id: `m:salon.revenue.${loc}`, label: `Salon revenue, ${loc === 'brooklyn' ? 'Brooklyn' : 'Lakewood'}`, unit: 'usd', business: 'salon', divisions: SALON_MONEY, layer: 'period',
+    source: 'appointments', agg: { kind: 'sum', field: 'price_usd' }, where: { ...done, location: loc }, since: 2,
+  })),
+  {
+    id: 'm:salon.booked_online.share', label: 'Salon visits booked through the online store', unit: 'ratio', business: 'salon', divisions: SALON, layer: 'period', source: 'appointments',
+    agg: { kind: 'ratio', num: oneIf({ sql: "booked_via = 'online'", js: (r) => r.booked_via === 'online' }), den: ONE }, where: done, since: 2,
+  },
+  { id: 'm:salon.labor_cost', label: 'Salon stylist labor cost', unit: 'usd', business: 'salon', divisions: SALON_MONEY, layer: 'period', source: 'appointments', agg: { kind: 'sum', field: 'labor_cost_usd' }, where: done, since: 2 },
+  {
+    id: 'm:salon.gross_profit', label: 'Salon gross profit after stylist labor', unit: 'usd', business: 'salon', divisions: ['salon', 'finance', 'hq'], layer: 'period', source: 'appointments',
+    agg: { kind: 'sum', field: { sql: '(price_usd - labor_cost_usd)', js: (r) => num(r, 'price_usd') - num(r, 'labor_cost_usd') } }, where: done, since: 2,
+    about: 'Completed visits: price less the stylist labor cost. Rent, products and front desk are not in it.',
+  },
   // The finance owner's budget sheet (version 2). Only approved caps count; a proposed raise never does.
   ...AD_CHANNELS.map((ch): MetricDef => ({
     id: `m:online.budget.${ch}.cap`, label: `Approved ${CHANNEL_LABEL[ch]} ad budget`, unit: 'usd', business: 'online', divisions: ['finance'], layer: 'period',
@@ -176,6 +217,9 @@ export const METRICS: MetricDef[] = [
   })),
   // The budget sheet lists only online ad channels, so its rejected rows are online business.
   { id: 'm:online.dq.rejected_budgets', label: 'Budget sheet rows rejected by data checks', unit: 'count', business: 'online', divisions: ['finance', 'hq'], layer: 'period', source: 'budgets', agg: { kind: 'rejected' }, nouns: ROWS, since: 2 },
+  // The day-to-day systems (version 2): order fees and shipping, refunds, checkouts, inventory, the support
+  // inbox, salon repair tickets and supplier invoices.
+  ...OPS_METRICS,
 ];
 
 export const METRIC_BY_ID = new Map(METRICS.map((m) => [m.id, m]));
@@ -188,7 +232,7 @@ export const VERSIONS: Record<DataVersion, { periods: readonly Period[]; contain
   },
   2: {
     periods: PERIOD_KEYS, container: CONTAINER_V2, view: PERIOD_VIEW_V2,
-    sources: ['orders', 'appointments', 'ads', 'email', 'budgets'], metrics: METRICS.filter((m) => m.layer === 'period'),
+    sources: ['orders', 'appointments', 'ads', 'email', 'budgets', ...OPS_SOURCE_NAMES], metrics: METRICS.filter((m) => m.layer === 'period'),
   },
 };
 
@@ -212,9 +256,10 @@ const fieldSql = (f: Field) => (typeof f === 'string' ? f : f.sql);
 export function aggSql(d: MetricDef, s: SourceSpec): string {
   const validSql = s.validSql;
   const filters = Object.entries(d.where ?? {}).map(([k, v]) => `${k} = '${v}'`);
+  const test = d.test ? [`(${d.test.sql})`] : [];
   const window = d.window ? [`${s.date} >= '${d.window.from}'`, ...(d.window.to ? [`${s.date} <= '${d.window.to}'`] : [])] : [];
   const agg = d.agg;
-  const cond = [...(agg.kind === 'rejected' ? [] : [`(${validSql})`]), ...filters, ...window].join(' AND ') || 'TRUE';
+  const cond = [...(agg.kind === 'rejected' ? [] : [`(${validSql})`]), ...filters, ...test, ...window].join(' AND ') || 'TRUE';
   const when = (f: Field) => `CASE WHEN ${cond} THEN ${fieldSql(f)} END`;
   switch (agg.kind) {
     case 'sum': return `ROUND(SUM(${when(agg.field)}), 2)`;
@@ -227,7 +272,7 @@ export function aggSql(d: MetricDef, s: SourceSpec): string {
 
 /** One source: aggregate every metric per period in one scan, then unpivot to (period, metric_id, value). */
 function sourceSelect(source: Source, version: DataVersion): string {
-  const s = SOURCES[source];
+  const s = specOf(source, version);
   const { periods, container, metrics } = VERSIONS[version];
   const defs = metrics.filter((d) => d.source === source);
   const period = periodCase(s.date, periods);
@@ -268,31 +313,37 @@ const fieldJs = (f: Field) => (typeof f === 'string' ? (r: Row) => num(r, f) : f
 const sum = (rows: Row[], f: Field) => rows.reduce((t, r) => t + fieldJs(f)(r), 0);
 export const round = (n: number, places: number) => Math.round(n * 10 ** places) / 10 ** places;
 
-/** Rows to compute from: a version 1 business, or version 2's year (which adds the budget sheet). */
-export type SourceRows = SyntheticBusiness & { finance?: { budgets: readonly BudgetRow[] } };
+/** Rows to compute from: a version 1 business, or version 2's year (which adds the budget sheet and the operations). */
+export type SourceRows = SyntheticBusiness | SyntheticYear;
 
-/** Each source's rows, by the name the metric definitions use. */
+/** Each source's rows, by the name the metric definitions use (a version 1 business has none of version 2's). */
 export function sourceRows(b: SourceRows): Record<Source, readonly Row[]> {
+  const y = 'finance' in b ? b : undefined;
   return {
     orders: b.online.orders, appointments: b.salon.appointments, ads: b.marketing.ads, email: b.marketing.email,
-    budgets: b.finance?.budgets ?? [],
+    budgets: y?.finance.budgets ?? [], order_costs: y?.online.orderCosts ?? [], refunds: y?.online.refunds ?? [],
+    checkouts: y?.online.checkouts ?? [], inventory: y?.online.inventory ?? [], messages: y?.support.messages ?? [],
+    repairs: y?.salon.repairs ?? [], invoices: y?.finance.invoices ?? [],
   };
 }
 
 /**
  * One metric over the rows its SQL aggregates (a period's rows, or for a standing metric all of them), as
  * the SQL computes it. undefined is SQL's NULL: COUNT of nothing is 0; SUM, AVG and a ratio over nothing are
- * NULL, and NULL rows are dropped from the view.
+ * NULL, and NULL rows are dropped from the view. Version 2's appointments are checked by version 2's rule.
  */
-export function aggregate(d: MetricDef, rows: readonly Row[]): number | undefined {
-  const s = SOURCES[d.source];
+export function aggregate(d: MetricDef, rows: readonly Row[], version: DataVersion): number | undefined {
+  const s = specOf(d.source, version);
   const inWindow = (r: Row) => !d.window || (String(r[s.date]) >= d.window.from && (!d.window.to || String(r[s.date]) <= d.window.to));
   const matching = rows
     .filter((r) => d.agg.kind === 'rejected' || s.valid(r))
     .filter((r) => Object.entries(d.where ?? {}).every(([k, v]) => r[k] === v))
+    .filter((r) => !d.test || d.test.js(r))
     .filter(inWindow);
   const a = d.agg;
   if (matching.length === 0 && (a.kind === 'sum' || a.kind === 'avg' || a.kind === 'ratio')) return undefined;
+  // A ratio over a zero denominator is NULL in Zetaris (no row), as here.
+  if (a.kind === 'ratio' && sum(matching, a.den) === 0) return undefined;
   return a.kind === 'sum' ? round(sum(matching, a.field), 2)
     : a.kind === 'avg' ? round(sum(matching, a.field) / matching.length, 2)
     : a.kind === 'count' ? matching.length
@@ -301,14 +352,14 @@ export function aggregate(d: MetricDef, rows: readonly Row[]): number | undefine
 }
 
 /** One period's metric values, as the view's SQL computes them. */
-function periodValues(defs: readonly MetricDef[], rowsBySource: Record<Source, readonly Row[]>, period: Period): Map<string, number> {
+function periodValues(rowsBySource: Record<Source, readonly Row[]>, period: Period, version: DataVersion): Map<string, number> {
   const { from, to } = PERIODS[period];
   const out = new Map<string, number>();
-  for (const d of defs) {
+  for (const d of VERSIONS[version].metrics) {
     const s = SOURCES[d.source];
     const inPeriod = rowsBySource[d.source].filter((r) => String(r[s.date]) >= from && String(r[s.date]) <= to);
     if (inPeriod.length === 0) continue; // no GROUP BY row for this source and period
-    const value = aggregate(d, inPeriod);
+    const value = aggregate(d, inPeriod, version);
     if (value !== undefined) out.set(d.id, value);
   }
   return out;
@@ -319,6 +370,6 @@ function periodValues(defs: readonly MetricDef[], rowsBySource: Record<Source, r
  * rows Zetaris reads. All periods at once, because a season index needs the whole year.
  */
 export function computeAll(b: SourceRows, version: DataVersion = 2): Map<Period, Map<string, number>> {
-  const { periods, metrics } = VERSIONS[version];
-  return new Map(periods.map((p) => [p, periodValues(metrics, sourceRows(b), p)]));
+  const rows = sourceRows(b);
+  return new Map(VERSIONS[version].periods.map((p) => [p, periodValues(rows, p, version)]));
 }

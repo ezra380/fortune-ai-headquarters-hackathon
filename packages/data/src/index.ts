@@ -8,7 +8,7 @@ import { SOURCE_PORT_DEFAULT, ensureSourceServer } from './source-server.ts';
 import { createZetarisClient, zetarisConfigFromEnv, type ZetarisClient } from './zetaris-client.ts';
 import { SOURCE_PORT_V2_DEFAULT } from './zetaris-objects.ts';
 
-export { generateBusiness, generateDivisions, generateHistory, generateYear, PERIODS, SEASON } from './synthetic.ts';
+export { generateBusiness, generateDivisions, generateHistory, generateOperations, generateYear, PERIODS, SEASON } from './synthetic.ts';
 export { createSourceServer, ensureSourceServer, SOURCE_PORT_DEFAULT } from './source-server.ts';
 export { createZetarisClient, zetarisConfigFromEnv, ZetarisError } from './zetaris-client.ts';
 export { METRICS, FINANCE_VIEW, PERIOD_VIEW_V2, VERSIONS, computeAll, dataVersionFromEnv, type DataVersion } from './finance-sql.ts';

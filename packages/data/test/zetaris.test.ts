@@ -123,11 +123,12 @@ describe('finance view', () => {
     expect(() => financeQuery('2026-08')).toThrow('unknown period'); // version 1 serves two periods
   });
 
-  it('version 2 lives in its own container: thirteen periods, five sources, every metric once', () => {
+  it('version 2 lives in its own container: thirteen periods, twelve sources, every metric once', () => {
     const v2 = financeViewBody(2);
     expect(v2).not.toContain('fortune_hq.');
     for (const m of METRICS) expect(v2.split(`'${m.id}'`).length - 1).toBe(1);
-    for (const v of ['online_orders', 'salon_appointments', 'marketing_ads', 'marketing_email', 'finance_budgets']) {
+    expect(VERSIONS[2].sources).toHaveLength(12);
+    for (const v of ['online_orders', 'salon_appointments', 'marketing_ads', 'marketing_email', 'finance_budgets', 'support_messages', 'salon_repairs', 'finance_invoices']) {
       expect(v2.split(`fortune_hq_v2.${v} `).length - 1).toBe(1);
     }
     expect(v2).toContain("month_start BETWEEN '2025-10-01' AND '2026-10-26'");
@@ -311,11 +312,12 @@ describe('division reads (version 2)', () => {
     expect(hashes.size).toBe(4);
   });
 
-  it('reports the attention rules that fired: the waiting budget change for Finance, nothing for a division that does not see it', async () => {
+  it("reports the attention rules that fired, each on the division's own numbers: the waiting budget change for Finance, the late repairs for the Salon", async () => {
     const finance = await portWith(fromOracle).port.getDivisionMetrics!({ division: 'finance', period: '2026-10-mtd', asOf });
     expect(finance.attention).toContainEqual({ metricId: 'm:online.budget.proposed.count', level: 'act', rule: "A proposed ad budget change is waiting for the finance owner's decision." });
     const salon = await portWith(fromOracle).port.getDivisionMetrics!({ division: 'salon', period: '2026-10-mtd', asOf });
-    expect(salon.attention).toEqual([]);
+    expect(salon.attention).toEqual([{ metricId: 'm:salon.repairs.open_over_14d.count', level: 'act', rule: 'Repairs have been open longer than two weeks.' }]);
+    for (const a of [...finance.attention, ...salon.attention]) expect(finance.metrics.concat(salon.metrics).some((m) => m.id === a.metricId)).toBe(true);
   });
 
   it('refuses a metric outside the division, a metric twice, an unknown division or period, and no rows at all', async () => {

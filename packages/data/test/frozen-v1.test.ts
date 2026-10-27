@@ -65,20 +65,26 @@ describe('version 1 is frozen at bb29578', () => {
 describe('version 2 leaves those numbers where they were', () => {
   const year = generateYear();
 
-  it("keeps version 2's period view as it was built live in Zetaris (574bd04, 07:58 ET), so the layers built on it read the same view", () => {
-    expect(sha(financeViewBody(2))).toBe('2747af1dd068029234c79ad539832b524e116b590db429c23e85d8d39f89c1da');
+  // Rebuilt live in slice 3 (2026-10-27, from 08:56 ET) with the day-to-day systems and the appointments' new
+  // columns; slice 1's body (574bd04, 07:58 ET) was 2747af1d…. A change here needs `zetaris-setup.ts --v2 --recreate`.
+  it("keeps version 2's period view as it was last built live in Zetaris, so the layers built on it read the same view", () => {
+    expect(sha(financeViewBody(2))).toBe('e8198a3cc4b9230d2bb1849e5acef25fe91c1f5f5e7d57d4c1b3a88d0398a7e3');
   });
 
-  it("carries version 1's rows unchanged among its own", () => {
+  it("carries version 1's rows unchanged among its own: every version 1 column and value (version 2 may add columns)", () => {
     const v1 = generateBusiness();
     const pairs: [readonly object[], readonly object[]][] = [
       [v1.online.orders, year.online.orders], [v1.salon.appointments, year.salon.appointments],
       [v1.marketing.ads, year.marketing.ads], [v1.marketing.email, year.marketing.email],
     ];
     for (const [rows, all] of pairs) {
-      const inYear = new Set(all.map((r) => JSON.stringify(r)));
-      expect(rows.filter((r) => !inYear.has(JSON.stringify(r)))).toEqual([]);
+      const columns = Object.keys(rows[0]!);
+      const asV1 = (r: object) => JSON.stringify(columns.map((c) => (r as Record<string, unknown>)[c]));
+      const inYear = new Set(all.map(asV1));
+      expect(rows.filter((r) => !inYear.has(asV1(r)))).toEqual([]);
     }
+    // The appointments gain only their three new columns.
+    expect(Object.keys(year.salon.appointments[0]!)).toEqual([...Object.keys(v1.salon.appointments[0]!), 'location', 'booked_via', 'labor_cost_usd']);
   });
 
   it('computes the same 33 values for 2026-09 and 2026-10-mtd from thirteen months of rows', () => {

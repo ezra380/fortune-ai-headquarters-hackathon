@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { DIVISIONS, LAYERS, filterViewBody } from '../src/divisions.ts';
-import { financeViewBody } from '../src/finance-sql.ts';
+import { SOURCES, VERSIONS, financeViewBody } from '../src/finance-sql.ts';
 import { derivedViewBody, standingViewBody } from '../src/layers.ts';
 import { SOURCE_ROUTES } from '../src/source-server.ts';
-import { generateYear } from '../src/synthetic.ts';
+import { generateBusiness, generateYear } from '../src/synthetic.ts';
 import { SOURCE_PORT_V2_DEFAULT, V2_DATABASES, V2_TABLES, v2CreateStatements, v2DropStatements, v2Marts } from '../src/zetaris-objects.ts';
 
 // Version 2's Zetaris objects are built beside version 1's. These checks keep every statement away from
@@ -39,16 +39,23 @@ describe('version 2 Zetaris objects', () => {
 
   it('read their own port and routes, and every row view keeps exactly the columns its rows carry', () => {
     expect(SOURCE_PORT_V2_DEFAULT).not.toBe(18120);
-    const year = generateYear();
-    const served: Record<string, readonly object[]> = {
-      '/v2/salon/appointments': year.salon.appointments, '/v2/online/orders': year.online.orders, '/v2/marketing/ads': year.marketing.ads,
-      '/v2/marketing/email': year.marketing.email, '/v2/finance/budgets': year.finance.budgets,
-    };
+    const served = { v1: generateBusiness(), v2: generateYear() };
     for (const t of V2_TABLES) {
-      expect(Object.keys(SOURCE_ROUTES)).toContain(t.path);
-      expect(new Set(served[t.path]!.flatMap((r) => Object.keys(r)))).toEqual(new Set(t.cols));
+      const rows: readonly object[] = SOURCE_ROUTES[t.path](served);
+      expect(rows.length, t.path).toBeGreaterThan(0);
+      expect(new Set(rows.flatMap((r) => Object.keys(r))), t.path).toEqual(new Set(t.cols));
       expect(create.find((s) => s.label.endsWith(`.${t.table}`))!.sql).toContain(`endpoint "${BASE}${t.path}"`);
     }
+    // Every version 2 route has its table, and the support inbox is its own system: its own database.
+    expect(Object.keys(SOURCE_ROUTES).filter((p) => p.startsWith('/v2/')).sort()).toEqual(V2_TABLES.map((t) => t.path).sort());
+    expect(V2_TABLES.find((t) => t.view === 'support_messages')!.db).toBe('FORTUNE_DEMO_SUPPORT');
+    expect(V2_DATABASES.map((d) => d.db)).toContain('FORTUNE_DEMO_SUPPORT');
+  });
+
+  it('give every version 2 source a row view, read once by the period view', () => {
+    const body = financeViewBody(2);
+    expect(V2_TABLES.map((t) => t.view).sort()).toEqual(VERSIONS[2].sources.map((s) => SOURCES[s].table).sort());
+    for (const t of V2_TABLES) expect(body.split(`fortune_hq_v2.${t.view} `).length - 1, t.view).toBe(1);
   });
 
   it('create each view after the views it reads: period, then derived and standing, then the twelve division filter views', () => {
