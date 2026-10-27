@@ -11,9 +11,10 @@ import { easternClock } from '../src/digest.ts';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { SCHEDULE, runDueJobs } from '../src/scheduler.ts';
 
-// The brief lane's two jobs. The HQ Manager's 09:00 review has its own tests (digest.test.ts); left in, it would queue
-// review tasks into the shared database at every clock time from 09:00.
-const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review');
+// The brief lane's two jobs. The HQ Manager's 09:00 review, the 07:00 workers and the Monday 07:30 weekly reports have
+// their own tests (digest.test.ts, workers.test.ts, weekly.test.ts); left in, they would queue their tasks into the shared
+// database at every clock time after theirs.
+const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review' && j.name !== 'division-workers' && j.name !== 'weekly-reports');
 import { createStore, type TaskRow } from '../src/store.ts';
 import { dataMock, fakeCodeMode, mockMetrics, scriptedModel } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
