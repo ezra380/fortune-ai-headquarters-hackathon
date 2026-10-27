@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { AssistantId, type ReadTool } from '@fahq/contracts';
+import type { ProfileLesson } from './rows.ts';
+import { buildProfileSource, type ProfileSource, type ProfileSourceOptions } from './source.ts';
+import { seedFromFiles, type Queryable, type SeedResult } from './seed.ts';
 
 // The assistants as data. Every assistant is read-only: its reads are a fixed list of tool names, and
 // proposals and work reports are fixed worker code paths that no model can call. A profile also says
@@ -34,9 +37,15 @@ export type AssistantProfile = {
   models: Partial<Record<ModelJob, ModelSetting>>;
   /** Its own Meterless H-MEM folder. */
   memory: AssistantId;
+  /** The standing lessons a person adopted for it. Only a stored (database) profile has any. */
+  lessons: readonly ProfileLesson[];
+  /** The stored version this profile was read at; null for a file profile. */
+  version: number | null;
+  /** Where this profile came from: the files under skills/, or its row in public.assistant_profiles. */
+  source: 'files' | 'database';
 };
 
-type Shape = Omit<AssistantProfile, 'skill' | 'models'> & { jobs: readonly ModelJob[] };
+type Shape = Omit<AssistantProfile, 'skill' | 'models' | 'lessons' | 'version' | 'source'> & { jobs: readonly ModelJob[] };
 
 const SHAPES: Record<AssistantId, Shape> = {
   owner: {
@@ -123,7 +132,7 @@ export function loadProfiles(env: NodeJS.ProcessEnv): Record<AssistantId, Assist
     const { jobs, ...shape } = SHAPES[id];
     const models: Partial<Record<ModelJob, ModelSetting>> = {};
     for (const job of jobs) models[job] = { ...settings[job] };
-    profiles[id] = { ...shape, reads: [...shape.reads], writes: [...shape.writes], skill: readSkill(id).body, models };
+    profiles[id] = { ...shape, reads: [...shape.reads], writes: [...shape.writes], skill: readSkill(id).body, models, lessons: [], version: null, source: 'files' };
   }
   return profiles;
 }
@@ -140,3 +149,25 @@ export function pickTools(all: Record<string, ReadTool>, profile: AssistantProfi
     return tool;
   });
 }
+
+// ---- Profiles in the database ---------------------------------------------------------------------
+
+/** The worker's profiles: the stored row of each assistant (read about once a minute), the files where there is none. */
+export function createProfileSource(options: Omit<ProfileSourceOptions, 'files' | 'readNames'> & { env: NodeJS.ProcessEnv }): ProfileSource {
+  const { env, ...rest } = options;
+  return buildProfileSource({ ...rest, files: () => loadProfiles(env), readNames: READ_TOOL_NAMES });
+}
+
+/** Stores the file profiles that have no row yet (`force`: replaces the others' words and models too). See seed.ts. */
+export function seedProfiles(db: Queryable, env: NodeJS.ProcessEnv, options: { force?: boolean; now?: Date } = {}): Promise<SeedResult[]> {
+  return seedFromFiles(db, loadProfiles(env), options);
+}
+
+export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
+export type { ParsedProfileRows } from './rows.ts';
+export { DEFAULT_PROFILE_TTL_MS, skillWithLessons } from './source.ts';
+export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './source.ts';
+export { canonicalJson } from './seed.ts';
+export type { Queryable, SeedAction, SeedResult } from './seed.ts';
+export { issueDoorToken, newDoorToken, tokenHash, writeTokenFile } from './tokens.ts';
+export type { ProfileLesson };

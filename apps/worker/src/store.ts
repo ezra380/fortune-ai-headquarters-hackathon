@@ -356,6 +356,13 @@ export function createStore(url: string, serviceKey: string) {
         };
       });
     },
+
+    // ---- Assistant profiles ------------------------------------------------------------------------
+
+    /** Every stored profile row exactly as the database returned it; @fahq/profiles checks each one before use. */
+    async assistantProfiles(): Promise<unknown[]> {
+      return must(await db.from('assistant_profiles').select('*'), 'assistant profiles') as unknown[];
+    },
   };
 }
 

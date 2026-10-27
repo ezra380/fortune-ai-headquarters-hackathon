@@ -32,6 +32,14 @@ async function enqueue(messageSid: string, from: string, body = 'Three plans ple
   return rows[0] as { task_id: string | null; outcome: string; duplicate: boolean };
 }
 
+// The public (anon) role holds no privilege on any table, so a read is refused outright (no rows, not "zero rows").
+// A savepoint lets one test check several refusals inside one transaction.
+async function denied(client: pg.PoolClient, sql: string, params: unknown[] = []) {
+  await client.query('savepoint refused');
+  await expect(client.query(sql, params)).rejects.toThrow(/permission denied/);
+  await client.query('rollback to savepoint refused');
+}
+
 describe('inbound texts', () => {
   it('queues one task per message, even when Twilio retries', async ({ skip }) => {
     if (!reachable) skip();
@@ -312,16 +320,15 @@ describe('spending cap', () => {
 });
 
 describe('row-level security', () => {
-  it('shows the public (anon) role nothing and lets it call nothing', async ({ skip }) => {
+  it('lets the public (anon) role read nothing and call nothing', async ({ skip }) => {
     if (!reachable) skip();
     await enqueue(sid(), OWNER);
     const client = await pool.connect();
     try {
       await client.query('begin');
       await client.query('set local role anon');
-      const visible = await client.query('select count(*)::int as n from public.tasks');
-      expect(visible.rows[0].n).toBe(0);
-      await expect(client.query(`select * from public.claim_task('anon', 60)`)).rejects.toThrow(/permission denied/);
+      await denied(client, 'select count(*)::int as n from public.tasks');
+      await denied(client, `select * from public.claim_task('anon', 60)`);
     } finally {
       await client.query('rollback');
       client.release();
@@ -366,7 +373,7 @@ describe('the HQ Manager tables', () => {
     expect(people.rows[0].n).toBe(0);
   });
 
-  it('shows the public (anon) role nothing in the new tables', async ({ skip }) => {
+  it('lets the public (anon) role read nothing in the new tables', async ({ skip }) => {
     if (!reachable) skip();
     await insertReport(await newTask(), 'A finished task');
     const reviewId = await reviewWithRecommendations();
@@ -375,10 +382,9 @@ describe('the HQ Manager tables', () => {
       await client.query('begin');
       await client.query('set local role anon');
       for (const table of ['work_reports', 'manager_reviews', 'recommendations']) {
-        const visible = await client.query(`select count(*)::int as n from public.${table}`);
-        expect(visible.rows[0].n, table).toBe(0);
+        await denied(client, `select count(*)::int as n from public.${table}`);
       }
-      await expect(client.query(`select * from public.adopt_recommendations($1, '{1}', 'demo-p-owner')`, [reviewId])).rejects.toThrow(/permission denied/);
+      await denied(client, `select * from public.adopt_recommendations($1, '{1}', 'demo-p-owner')`, [reviewId]);
     } finally {
       await client.query('rollback');
       client.release();

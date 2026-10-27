@@ -1,0 +1,681 @@
+import { execSync, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import pg from 'pg';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { AssistantId } from '@fahq/contracts';
+import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, loadProfiles, newDoorToken, parseProfileRows, seedProfiles, tokenHash } from '@fahq/profiles';
+
+// Profiles in the database, the two doors an outside tool may call, and what the public (anon) role can reach.
+// Real Postgres and the real Data API (local Supabase: npm run db:start); nothing is mocked.
+//  - The "doors" and "privileges" groups run against the shared local database. They write only tokens and
+//    session reports (which they delete again) and read the five seeded profiles. A profile version is
+//    append-only, so nothing here may add one to the shared database.
+//  - The "profile writes" group builds a throwaway database from the real migration file, so it can commit
+//    versions, race two writers and reseed as often as it likes.
+
+const url = process.env.SUPABASE_DB_URL ?? 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
+const isLocal = /@(127\.0\.0\.1|localhost|\[::1\]):/.test(url);
+const MIGRATION = path.resolve(import.meta.dirname, '../migrations/20261027100000_profiles.sql');
+
+const pool = new pg.Pool({ connectionString: url, max: 6 });
+let ready = false;
+let keys: { url: string; anon: string } | null = null;
+const madeTokens: string[] = [];
+
+function localKeys(): { url: string; anon: string } | null {
+  try {
+    const out = execSync('npx supabase status -o env', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60_000 });
+    const get = (name: string) => out.match(new RegExp(`^${name}="?([^"\\n]*)"?$`, 'm'))?.[1];
+    const apiUrl = get('API_URL');
+    const anon = get('ANON_KEY');
+    return apiUrl && anon ? { url: apiUrl, anon } : null;
+  } catch {
+    return null;
+  }
+}
+
+beforeAll(async () => {
+  if (!isLocal) return console.warn('SKIPPED profile database tests: SUPABASE_DB_URL does not point at the local stack');
+  try {
+    ready = (await pool.query(`select to_regclass('public.assistant_profiles') as t`)).rows[0].t !== null;
+  } catch {
+    return console.warn(`SKIPPED profile database tests: no Postgres at ${url.replace(/:[^:@/]+@/, ':***@')} (run npm run db:start)`);
+  }
+  if (!ready) return console.warn('SKIPPED profile database tests: apply supabase/migrations/20261027100000_profiles.sql first');
+  keys = localKeys();
+  if (!keys) console.warn('SKIPPED the Data API checks: `supabase status` did not answer');
+  await seedProfiles(pool, {}); // an assistant with no row gets one; the others are left alone
+});
+
+afterAll(async () => {
+  try {
+    if (madeTokens.length > 0) {
+      await pool.query('delete from public.session_reports where token_id = any($1)', [madeTokens]);
+      await pool.query('delete from public.door_tokens where id = any($1)', [madeTokens]);
+    }
+  } finally {
+    await pool.end();
+  }
+});
+
+// ---- Helpers -----------------------------------------------------------------------------------------
+
+async function newToken(assistant: AssistantId): Promise<string> {
+  const issued = await issueDoorToken(pool, assistant, 'profiles test');
+  madeTokens.push(issued.id);
+  return issued.token;
+}
+const tokenRowId = async (token: string) => (await pool.query('select id from public.door_tokens where token_hash = $1', [tokenHash(token)])).rows[0].id as string;
+
+type Reply = { status: number; body: any };
+async function dataApi(pathAndQuery: string, init: { method?: string; body?: unknown } = {}): Promise<Reply> {
+  const res = await fetch(`${keys!.url}/rest/v1/${pathAndQuery}`, {
+    method: init.method ?? 'GET',
+    headers: { apikey: keys!.anon, authorization: `Bearer ${keys!.anon}`, 'content-type': 'application/json' },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+const rpc = (fn: 'door_profile' | 'door_file_report', body: unknown) => dataApi(`rpc/${fn}`, { method: 'POST', body });
+const file = (token: string, report: Record<string, unknown>) => rpc('door_file_report', { p_token: token, p_report: report });
+const base = (over: Record<string, unknown> = {}) => ({ tool: 'claude-code', summary: 'Checked the finance numbers.', ...over });
+
+async function denied(client: pg.PoolClient, sql: string) {
+  await client.query('savepoint refused');
+  await expect(client.query(sql)).rejects.toThrow(/permission denied/);
+  await client.query('rollback to savepoint refused');
+}
+
+async function asRole<T>(role: string, work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+    await client.query(`set local role ${role}`);
+    return await work(client);
+  } finally {
+    await client.query('rollback');
+    client.release();
+  }
+}
+
+// ---- The doors ------------------------------------------------------------------------------------------
+
+describe('door_profile (called with the public anon key, through the Data API)', () => {
+  it('gives a valid token the profile of its own assistant: skill, reads, models and lessons', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const token = await newToken('finance');
+    const reply = await rpc('door_profile', { p_token: token });
+    expect(reply.status).toBe(200);
+    const row = (await pool.query(`select * from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
+    expect(reply.body).toEqual({
+      assistant: 'finance', title: row.title, version: row.version, skill: row.skill, reads: row.reads, models: row.models, lessons: row.lessons,
+    });
+    expect(reply.body.reads).toContain('get_finance_metrics');
+    expect(JSON.stringify(reply.body)).not.toContain(token);
+    expect(JSON.stringify(reply.body)).not.toContain(tokenHash(token));
+  });
+
+  it('gives each token only its own assistant, so the salon and the online store never see each other', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const salon = await rpc('door_profile', { p_token: await newToken('salon') });
+    const online = await rpc('door_profile', { p_token: await newToken('online') });
+    expect(salon.body.assistant).toBe('salon');
+    expect(online.body.assistant).toBe('online');
+    expect(salon.body.reads).toContain('get_salon_metrics');
+    expect(salon.body.reads).not.toContain('get_online_metrics');
+    expect(online.body.reads).toContain('get_online_metrics');
+    expect(online.body.reads).not.toContain('get_salon_metrics');
+  });
+
+  it('refuses everything that is not a live token, with one answer that says nothing about why', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const revoked = await newToken('owner');
+    await pool.query('update public.door_tokens set revoked_at = now() where id = $1', [await tokenRowId(revoked)]);
+    const hash = tokenHash(await newToken('owner'));
+    const refused = [null, '', 'nope', 'x'.repeat(31), 'x'.repeat(129), newDoorToken(), revoked, hash, `${newDoorToken()}' or '1'='1`];
+    for (const candidate of refused) {
+      const reply = await rpc('door_profile', { p_token: candidate });
+      expect(reply.status, String(candidate)).toBe(403);
+      expect(reply.body).toMatchObject({ code: '28000', message: 'This token is not valid.' });
+      expect(reply.body.skill).toBeUndefined();
+    }
+    const missing = await rpc('door_profile', {});
+    expect(missing.status).toBeGreaterThanOrEqual(400);
+    expect(missing.body.skill).toBeUndefined();
+  });
+
+  it('refuses a token sent in a URL (a GET), which the Data API runs read-only, and the same token works as a POST', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const token = await newToken('owner');
+    const viaUrl = await dataApi(`rpc/door_profile?p_token=${token}`);
+    expect(viaUrl.status).toBe(405);
+    expect(viaUrl.body).toMatchObject({ code: '25006', message: 'Send the token in a POST body, never in a URL.' });
+    expect(viaUrl.body.skill).toBeUndefined();
+    expect((await rpc('door_profile', { p_token: token })).status).toBe(200);
+  });
+
+  it('says so plainly when a valid token has no stored profile yet, and never makes one up', async ({ skip }) => {
+    if (!ready) skip();
+    const token = await newToken('manager');
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query(`delete from public.assistant_profiles where assistant_id = 'manager'`);
+      await expect(client.query('select public.door_profile($1)', [token])).rejects.toThrow('No profile is stored for this assistant yet.');
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+});
+
+describe('door_file_report (called with the public anon key, through the Data API)', () => {
+  it('stores a report under the assistant of the token', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const token = await newToken('salon');
+    const reply = await file(token, base({
+      steps: [{ step: 'read_metrics', outcome: 'ok', detail: 'salon revenue for September' }],
+      suggestions: [{ kind: 'prompt', text: 'Say which period a number is for.' }],
+      lessons: [{ text: 'Ask which month before answering.' }],
+    }));
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({ id: expect.stringMatching(/^[0-9a-f-]{36}$/), duplicate: false });
+    const row = (await pool.query('select * from public.session_reports where id = $1', [reply.body.id])).rows[0];
+    expect(row).toMatchObject({
+      token_id: await tokenRowId(token), assistant_id: 'salon', tool: 'claude-code', summary: 'Checked the finance numbers.', reviewed_at: null,
+      steps: [{ step: 'read_metrics', outcome: 'ok', detail: 'salon revenue for September' }],
+      suggestions: [{ kind: 'prompt', text: 'Say which period a number is for.' }],
+      lessons: [{ text: 'Ask which month before answering.' }],
+    });
+  });
+
+  it('masks phone numbers and six-digit codes everywhere in the report, and leaves ordinary numbers alone', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const reply = await file(await newToken('finance'), {
+      tool: 'cursor +15551234567',
+      summary: 'Called +15551234567, (917) 555-0123, 917-555-0123 and 9175550123; the code was 123456 and SEND 2 482913. Cost $120000, 1,234,567 tokens, 12345 and 1234567.',
+      steps: [{ step: 'texted 917.555.0123', detail: 'code: 654321' }],
+      suggestions: [{ text: 'Never repeat 111222 to anyone.' }],
+      lessons: [{ text: 'Mask +1 555 123 4567 and 999888.' }],
+    });
+    expect(reply.status).toBe(200);
+    const row = (await pool.query('select tool, summary, steps, suggestions, lessons from public.session_reports where id = $1', [reply.body.id])).rows[0];
+    expect(row.tool).toBe('cursor [phone]');
+    expect(row.summary).toBe('Called [phone], [phone], [phone] and [phone]; the code was [code] and SEND 2 [code]. Cost $120000, 1,234,567 tokens, 12345 and 1234567.');
+    expect(row.steps).toEqual([{ step: 'texted [phone]', detail: 'code: [code]' }]);
+    expect(row.suggestions).toEqual([{ text: 'Never repeat [code] to anyone.' }]);
+    expect(row.lessons).toEqual([{ text: 'Mask [phone] and [code].' }]);
+  });
+
+  it('stores a retried report once (same token, same key) and returns the first one', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const token = await newToken('online');
+    const key = `retry-${randomBytes(6).toString('hex')}`;
+    const first = await file(token, base({ key }));
+    const second = await file(token, base({ key, summary: 'A retry with other words.' }));
+    expect(first.body.duplicate).toBe(false);
+    expect(second.body).toEqual({ id: first.body.id, duplicate: true });
+    const { rows } = await pool.query('select summary from public.session_reports where token_id = $1', [await tokenRowId(token)]);
+    expect(rows).toEqual([{ summary: 'Checked the finance numbers.' }]);
+    // The same key under another token is another report.
+    const other = await file(await newToken('online'), base({ key }));
+    expect(other.body).toEqual({ id: expect.not.stringMatching(first.body.id), duplicate: false });
+  });
+
+  it.each([
+    ['a report that is not an object', ['tool'], /must be a JSON object/],
+    ['a missing tool', { summary: 'x' }, /needs a "tool"/],
+    ['a tool of 61 characters', { tool: 'x'.repeat(61), summary: 'x' }, /needs a "tool" of 1 to 60/],
+    ['a missing summary', { tool: 'x' }, /needs a "summary"/],
+    ['a summary of 2001 characters', base({ summary: 'x'.repeat(2001) }), /"summary" of 1 to 2000/],
+    ['a field the door does not know', base({ model: 'x' }), /field this door does not accept/],
+    ['a key that is too short', base({ key: 'abc' }), /"key" must be 8 to 80/],
+    ['a key that is not text', base({ key: 12345678 }), /"key" must be 8 to 80/],
+    ['31 steps', base({ steps: Array.from({ length: 31 }, () => ({ step: 's' })) }), /steps must be a list of at most 30/],
+    ['a step of 81 characters', base({ steps: [{ step: 'x'.repeat(81) }] }), /steps needs a "step" of 1 to 80/],
+    ['a step that is only text', base({ steps: ['read'] }), /steps needs a "step"/],
+    ['11 suggestions', base({ suggestions: Array.from({ length: 11 }, () => ({ text: 's' })) }), /suggestions must be a list of at most 10/],
+    ['a suggestion of 301 characters', base({ suggestions: [{ text: 'x'.repeat(301) }] }), /suggestions needs a "text" of 1 to 300/],
+    ['a lesson with no text', base({ lessons: [{ note: 'x' }] }), /lessons needs a "text"/],
+    ['lessons that are not a list', base({ lessons: 'be kind' }), /lessons must be a list/],
+    ['more than 32 KB', base({ steps: Array.from({ length: 30 }, () => ({ step: 's', detail: 'd'.repeat(1500) })) }), /larger than 32 KB/],
+    ['nesting deeper than six levels', base({ steps: [{ step: 's', detail: { a: { b: { c: { d: { e: { f: 'deep' } } } } } } }] }), /nested too deeply/],
+  ])('refuses %s with a plain sentence and stores nothing', async (_name, report, message) => {
+    if (!ready || !keys) return;
+    const token = await newToken('finance');
+    const reply = await file(token, report as Record<string, unknown>);
+    expect(reply.status).toBe(400);
+    expect(reply.body.code).toBe('22023');
+    expect(reply.body.message).toMatch(message);
+    const { rows } = await pool.query('select count(*)::int as n from public.session_reports where token_id = $1', [await tokenRowId(token)]);
+    expect(rows[0].n).toBe(0);
+  });
+
+  it('files nothing for a token that is not valid', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const before = (await pool.query('select count(*)::int as n from public.session_reports')).rows[0].n;
+    const revoked = await newToken('owner');
+    await pool.query('update public.door_tokens set revoked_at = now() where id = $1', [await tokenRowId(revoked)]);
+    for (const candidate of [null, 'nope', newDoorToken(), revoked]) {
+      const reply = await file(candidate as string, base());
+      expect(reply.status).toBe(403);
+      expect(reply.body.message).toBe('This token is not valid.');
+    }
+    expect((await pool.query('select count(*)::int as n from public.session_reports')).rows[0].n).toBe(before);
+  });
+
+  it('stops a token after 60 reports in an hour', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    const token = await newToken('manager');
+    const id = await tokenRowId(token);
+    await pool.query(
+      `insert into public.session_reports (token_id, assistant_id, tool, summary) select $1, 'manager', 'bulk', 'filler ' || g from generate_series(1, 60) g`,
+      [id],
+    );
+    const reply = await file(token, base());
+    expect(reply.status).toBeGreaterThanOrEqual(400);
+    expect(reply.body).toMatchObject({ code: '54000', message: 'This token has filed 60 reports in the last hour. Try again later.' });
+    expect((await pool.query('select count(*)::int as n from public.session_reports where token_id = $1', [id])).rows[0].n).toBe(60);
+    // An older hour does not count against it.
+    await pool.query(`update public.session_reports set created_at = now() - interval '2 hours' where token_id = $1 and summary = 'filler 1'`, [id]);
+    expect((await file(token, base())).status).toBe(200);
+  });
+});
+
+describe('what the token table keeps', () => {
+  it('stores only the SHA-256 of a token, and the database agrees with the hash the script computes', async ({ skip }) => {
+    if (!ready) skip();
+    const token = await newToken('owner');
+    const cols = (await pool.query(`select column_name from information_schema.columns where table_schema = 'public' and table_name = 'door_tokens' order by 1`)).rows.map((r) => r.column_name);
+    expect(cols).toEqual(['assistant_id', 'created_at', 'id', 'label', 'revoked_at', 'token_hash']);
+    const { rows } = await pool.query(
+      `select token_hash = encode(extensions.digest($1::text, 'sha256'), 'hex') as same, t::text like '%' || $1 || '%' as leaks
+         from public.door_tokens t where t.id = $2`,
+      [token, await tokenRowId(token)],
+    );
+    expect(rows[0]).toEqual({ same: true, leaks: false });
+    expect((await pool.query(`select count(*)::int as n from public.door_tokens where token_hash !~ '^[0-9a-f]{64}$'`)).rows[0].n).toBe(0);
+    await expect(pool.query(`insert into public.door_tokens (assistant_id, token_hash, label) values ('owner', $1, 'plain')`, [token])).rejects.toThrow(/violates check constraint/);
+  });
+});
+
+// ---- What the public role can reach ---------------------------------------------------------------------
+
+describe('the public (anon) and signed-in (authenticated) roles', () => {
+  it('hold no privilege on any table, today or on a table made later', async ({ skip }) => {
+    if (!ready) skip();
+    const grants = await pool.query(`select grantee, table_name from information_schema.role_table_grants where table_schema = 'public' and grantee in ('anon', 'authenticated')`);
+    expect(grants.rows).toEqual([]);
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('create table public.zz_later_table (id integer)');
+      const { rows } = await client.query(
+        `select has_table_privilege('anon', 'public.zz_later_table', 'select') as anon,
+                has_table_privilege('authenticated', 'public.zz_later_table', 'select') as authenticated,
+                has_table_privilege('service_role', 'public.zz_later_table', 'select') as service`,
+      );
+      expect(rows[0]).toEqual({ anon: false, authenticated: false, service: true });
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
+  it.each(['anon', 'authenticated'])('%s cannot read, insert, change, delete or empty any table in the database', async (role) => {
+    if (!ready) return;
+    const found = (await pool.query(
+      `select t.table_name, c.column_name from information_schema.tables t
+         join information_schema.columns c on c.table_schema = t.table_schema and c.table_name = t.table_name and c.ordinal_position = 1
+        where t.table_schema = 'public' and t.table_type = 'BASE TABLE' order by 1`,
+    )).rows as { table_name: string; column_name: string }[];
+    const tables = found.map((r) => r.table_name);
+    for (const needed of ['assistant_profiles', 'assistant_profile_versions', 'door_tokens', 'session_reports', 'tasks', 'people', 'outbox']) expect(tables).toContain(needed);
+    await asRole(role, async (client) => {
+      for (const { table_name: table, column_name: column } of found) {
+        await denied(client, `select 1 from public.${table} limit 1`);
+        await denied(client, `insert into public.${table} default values`);
+        await denied(client, `update public.${table} set "${column}" = default where false`);
+        await denied(client, `delete from public.${table} where false`);
+        await denied(client, `truncate public.${table}`);
+      }
+    });
+  });
+
+  it('are refused by the Data API too: no rows come back from any new table, and nothing can be inserted', async ({ skip }) => {
+    if (!ready || !keys) skip();
+    for (const table of ['assistant_profiles', 'assistant_profile_versions', 'door_tokens', 'session_reports']) {
+      const read = await dataApi(`${table}?limit=1`);
+      expect([401, 403, 404], `${table} read`).toContain(read.status);
+      expect(Array.isArray(read.body), `${table} read`).toBe(false);
+      const write = await dataApi(table, { method: 'POST', body: {} });
+      expect([401, 403, 404], `${table} insert`).toContain(write.status);
+    }
+  });
+
+  it('can run exactly the two doors and no other function in the schema', async ({ skip }) => {
+    if (!ready) skip();
+    const callable = async (role: string) => (await pool.query(
+      `select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and has_function_privilege($1, p.oid, 'execute') order by 1`,
+      [role],
+    )).rows.map((r) => r.proname as string);
+    expect(await callable('anon')).toEqual(['door_file_report', 'door_profile']);
+    expect(await callable('authenticated')).toEqual([]);
+    // The door functions run as their owner (so RLS never blocks them) and cannot be pointed at another schema.
+    const doors = await pool.query(`select proname, prosecdef, proconfig from pg_proc where proname in ('door_profile', 'door_file_report', 'door_token') order by 1`);
+    for (const door of doors.rows) {
+      expect(door.prosecdef, door.proname).toBe(true);
+      expect(door.proconfig, door.proname).toEqual(['search_path=""']);
+    }
+  });
+});
+
+// ---- Versions are append-only ---------------------------------------------------------------------------
+
+describe('assistant_profile_versions', () => {
+  it('refuses update, delete and truncate, even from the table owner', async ({ skip }) => {
+    if (!ready) skip();
+    const client = await pool.connect();
+    try {
+      for (const sql of [
+        `update public.assistant_profile_versions set reason = 'edited'`,
+        `delete from public.assistant_profile_versions`,
+        `truncate public.assistant_profile_versions`,
+      ]) {
+        await client.query('begin');
+        await expect(client.query(sql), sql).rejects.toThrow('assistant_profile_versions is append-only');
+        await client.query('rollback');
+      }
+    } finally {
+      client.release();
+    }
+    expect((await pool.query('select count(*)::int as n from public.assistant_profile_versions')).rows[0].n).toBeGreaterThanOrEqual(5);
+  });
+
+  it('is closed to the service role as well: it can read and add, never change or remove', async ({ skip }) => {
+    if (!ready) skip();
+    await asRole('service_role', async (client) => {
+      await client.query('select 1 from public.assistant_profile_versions limit 1');
+      await denied(client, `update public.assistant_profile_versions set reason = 'edited'`);
+      await denied(client, 'delete from public.assistant_profile_versions');
+      await denied(client, 'truncate public.assistant_profile_versions');
+    });
+  });
+});
+
+// ---- Writing and seeding profiles, in a throwaway database made from the real migration -----------------
+
+describe('profile writes (a throwaway database built from the real migration file)', () => {
+  let admin: pg.Pool;
+  let scratch: pg.Pool;
+  let scratchName = '';
+
+  beforeAll(async () => {
+    if (!isLocal) return;
+    try {
+      admin = new pg.Pool({ connectionString: url, max: 1 });
+      scratchName = `profiles_scratch_${randomBytes(4).toString('hex')}`; // made here, never taken from input
+      await admin.query(`create database ${scratchName}`);
+      const target = new URL(url);
+      target.pathname = `/${scratchName}`;
+      scratch = new pg.Pool({ connectionString: target.toString(), max: 4 });
+      // Only what the migration expects to find already there; the migration file itself runs unchanged.
+      await scratch.query(`
+        create schema extensions;
+        create extension pgcrypto with schema extensions;
+        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
+        create table public.assistants (id public.assistant_id primary key);
+        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
+      await scratch.query(fs.readFileSync(MIGRATION, 'utf8'));
+    } catch (error) {
+      console.warn(`SKIPPED the profile write tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
+      scratchName = '';
+    }
+  });
+
+  afterAll(async () => {
+    await scratch?.end().catch(() => undefined);
+    if (scratchName) await admin.query(`drop database ${scratchName} with (force)`).catch(() => undefined);
+    await admin?.end().catch(() => undefined);
+  });
+
+  const files = loadProfiles({});
+  const save = (id: string, expected: number | null, over: { title?: string; lessons?: unknown[]; by?: string } = {}, db: pg.Pool = scratch) =>
+    db.query(
+      `select public.save_assistant_profile($1::public.assistant_id, $2::integer, $3, $4, $5::text[], $6::jsonb, $7::jsonb, $8, 'a test', '{"kind":"test"}'::jsonb) as v`,
+      [id, expected, over.title ?? `Title for ${id}`, files.finance.skill, ['my_lessons'], JSON.stringify(files.finance.models), JSON.stringify(over.lessons ?? []), over.by ?? 'manager'],
+    ).then((r) => r.rows[0].v as number | null);
+  const versionsOf = async (id: string) => (await scratch.query('select version, made_by, reason, snapshot from public.assistant_profile_versions where assistant_id = $1 order by version', [id])).rows;
+
+  it('creates a profile once, then only changes it from the version the writer last saw', async ({ skip }) => {
+    if (!scratchName) skip();
+    expect(await save('owner', null, { by: 'seed' })).toBe(1);
+    expect(await save('owner', null)).toBeNull(); // already there
+    expect(await save('owner', 7)).toBeNull(); // not at that version
+    expect(await save('owner', 1, { title: 'Second' })).toBe(2);
+    expect(await save('owner', 1, { title: 'Stale' })).toBeNull(); // another writer got to version 2 first
+    expect(await save('owner', 2, { title: 'Third', by: 'owner' })).toBe(3);
+    const row = (await scratch.query(`select version, title, updated_by from public.assistant_profiles where assistant_id = 'owner'`)).rows[0];
+    expect(row).toEqual({ version: 3, title: 'Third', updated_by: 'owner' });
+    const versions = await versionsOf('owner');
+    expect(versions.map((v) => [v.version, v.made_by])).toEqual([[1, 'seed'], [2, 'manager'], [3, 'owner']]);
+    expect(versions.map((v) => v.snapshot.title)).toEqual(['Title for owner', 'Second', 'Third']);
+    expect(versions[2].snapshot).toEqual({ title: 'Third', skill: files.finance.skill, reads: ['my_lessons'], models: JSON.parse(JSON.stringify(files.finance.models)), lessons: [] });
+  });
+
+  it('refuses a writer that is not seed, manager or owner, and a profile that breaks the table limits', async ({ skip }) => {
+    if (!scratchName) skip();
+    await expect(save('finance', null, { by: 'anyone' })).rejects.toThrow(/updated_by_check/);
+    await expect(save('finance', null, { title: '' })).rejects.toThrow(/title_check/);
+    await expect(scratch.query(`select public.save_assistant_profile('finance', null, 't', 'short', '{}', '{}', '[]', 'seed', 'r')`)).rejects.toThrow(/skill_check/);
+    await expect(scratch.query(`select public.save_assistant_profile('finance', null, 't', repeat('x', 50), '{"Bad Name"}', '{}', '[]', 'seed', 'r')`)).rejects.toThrow(/reads_check/);
+    expect((await scratch.query(`select count(*)::int as n from public.assistant_profiles where assistant_id = 'finance'`)).rows[0].n).toBe(0);
+    expect(await versionsOf('finance')).toEqual([]);
+  });
+
+  it('gives exactly one of two writers racing from the same version the next version', async ({ skip }) => {
+    if (!scratchName) skip();
+    expect(await save('online', null, { by: 'seed' })).toBe(1);
+    const [a, b] = await Promise.all([save('online', 1, { title: 'Writer A' }), save('online', 1, { title: 'Writer B' })]);
+    expect([a, b].filter((v) => v === 2)).toHaveLength(1);
+    expect([a, b].filter((v) => v === null)).toHaveLength(1);
+    const versions = await versionsOf('online');
+    expect(versions.map((v) => v.version)).toEqual([1, 2]);
+    const row = (await scratch.query(`select version, title from public.assistant_profiles where assistant_id = 'online'`)).rows[0];
+    expect(row.version).toBe(2);
+    expect(row.title).toBe(versions[1].snapshot.title);
+  });
+
+  it('gives exactly one of two writers racing to create the same profile its first version', async ({ skip }) => {
+    if (!scratchName) skip();
+    const results = await Promise.all([save('salon', null), save('salon', null), save('salon', null)]);
+    expect(results.filter((v) => v === 1)).toHaveLength(1);
+    expect(results.filter((v) => v === null)).toHaveLength(2);
+    expect((await versionsOf('salon')).map((v) => v.version)).toEqual([1]);
+  });
+
+  it('numbers versions from the history, so a profile removed and made again never reuses a number', async ({ skip }) => {
+    if (!scratchName) skip();
+    expect(await save('manager', null, { by: 'seed' })).toBe(1);
+    expect(await save('manager', 1)).toBe(2);
+    await scratch.query(`delete from public.assistant_profiles where assistant_id = 'manager'`); // the history stays
+    expect(await save('manager', null, { by: 'owner' })).toBe(3);
+    expect((await versionsOf('manager')).map((v) => v.version)).toEqual([1, 2, 3]);
+  });
+
+  it('keeps the history append-only on a database that has committed versions', async ({ skip }) => {
+    if (!scratchName) skip();
+    await expect(scratch.query(`update public.assistant_profile_versions set reason = 'edited'`)).rejects.toThrow('append-only');
+    await expect(scratch.query('delete from public.assistant_profile_versions')).rejects.toThrow('append-only');
+    await expect(scratch.query('truncate public.assistant_profile_versions')).rejects.toThrow('append-only');
+    expect((await scratch.query('select count(*)::int as n from public.assistant_profile_versions')).rows[0].n).toBeGreaterThan(5);
+  });
+});
+
+describe('seeding profiles (a second throwaway database)', () => {
+  let admin: pg.Pool;
+  let scratch: pg.Pool;
+  let scratchName = '';
+
+  beforeAll(async () => {
+    if (!isLocal) return;
+    try {
+      admin = new pg.Pool({ connectionString: url, max: 1 });
+      scratchName = `profiles_seed_${randomBytes(4).toString('hex')}`;
+      await admin.query(`create database ${scratchName}`);
+      const target = new URL(url);
+      target.pathname = `/${scratchName}`;
+      scratch = new pg.Pool({ connectionString: target.toString(), max: 2 });
+      await scratch.query(`
+        create schema extensions;
+        create extension pgcrypto with schema extensions;
+        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
+        create table public.assistants (id public.assistant_id primary key);
+        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
+      await scratch.query(fs.readFileSync(MIGRATION, 'utf8'));
+    } catch (error) {
+      console.warn(`SKIPPED the seed tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
+      scratchName = '';
+    }
+  });
+
+  afterAll(async () => {
+    await scratch?.end().catch(() => undefined);
+    if (scratchName) await admin.query(`drop database ${scratchName} with (force)`).catch(() => undefined);
+    await admin?.end().catch(() => undefined);
+  });
+
+  const files = loadProfiles({});
+  const stored = async () => (await scratch.query('select * from public.assistant_profiles order by assistant_id')).rows;
+  const versionCount = async () => (await scratch.query('select count(*)::int as n from public.assistant_profile_versions')).rows[0].n as number;
+
+  it('stores the five file profiles once, each with a version made by "seed"', async ({ skip }) => {
+    if (!scratchName) skip();
+    const first = await seedProfiles(scratch, {});
+    expect(first.map((r) => [r.assistant, r.action, r.version, r.differsFromFiles])).toEqual(
+      AssistantId.options.map((id) => [id, 'created', 1, false]),
+    );
+    const versions = (await scratch.query(`select assistant_id, version, made_by, reason, snapshot from public.assistant_profile_versions order by assistant_id`)).rows;
+    expect(versions).toHaveLength(5);
+    for (const v of versions) {
+      const p = files[v.assistant_id as AssistantId];
+      expect(v.made_by).toBe('seed');
+      expect(v.reason).toBe('seeded from the files (skills and model defaults)');
+      expect(canonicalJson(v.snapshot)).toBe(canonicalJson({ title: p.title, skill: p.skill, reads: [...p.reads], models: p.models, lessons: [] }));
+    }
+    // What was stored is what the worker will read back.
+    const parsed = parseProfileRows(await stored(), READ_TOOL_NAMES);
+    expect(parsed.problems).toEqual([]);
+    expect([...parsed.rows.keys()].sort()).toEqual([...AssistantId.options].sort());
+  });
+
+  it('is idempotent: running it again changes nothing', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const before = JSON.stringify(await stored());
+    const versions = await versionCount();
+    const again = await seedProfiles(scratch, {});
+    expect(again.map((r) => [r.assistant, r.action, r.version])).toEqual(AssistantId.options.map((id) => [id, 'kept', 1]));
+    expect(JSON.stringify(await stored())).toBe(before);
+    expect(await versionCount()).toBe(versions);
+  });
+
+  it('leaves a profile the manager or the owner changed alone, and says it differs from the files', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const lesson = { text: 'Say which business a number is about.', source: 'rec-1', adoptedAt: '2026-10-27T09:00:00Z' };
+    const f = files.salon;
+    await scratch.query(
+      `select public.save_assistant_profile('salon', 1, 'Salon (edited)', $1, $2::text[], $3::jsonb, $4::jsonb, 'owner', 'adopted lesson', '{"kind":"lesson"}')`,
+      [f.skill + '\nExtra rule.', [...f.reads], JSON.stringify(f.models), JSON.stringify([lesson])],
+    );
+    const results = await seedProfiles(scratch, {});
+    const salon = results.find((r) => r.assistant === 'salon')!;
+    expect(salon).toEqual({ assistant: 'salon', action: 'kept', version: 2, differsFromFiles: true });
+    expect(results.filter((r) => r.differsFromFiles).map((r) => r.assistant)).toEqual(['salon']);
+    expect((await scratch.query(`select title from public.assistant_profiles where assistant_id = 'salon'`)).rows[0].title).toBe('Salon (edited)');
+  });
+
+  it('--force puts the files back as a new version and keeps the lessons a person adopted', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const before = await versionCount();
+    const results = await seedProfiles(scratch, {}, { force: true });
+    expect(results.every((r) => r.action === 'reseeded' && !r.differsFromFiles)).toBe(true);
+    expect(await versionCount()).toBe(before + 5);
+    const salon = (await scratch.query(`select version, title, skill, lessons from public.assistant_profiles where assistant_id = 'salon'`)).rows[0];
+    expect(salon.title).toBe(files.salon.title);
+    expect(salon.skill).toBe(files.salon.skill);
+    expect(salon.lessons).toEqual([{ text: 'Say which business a number is about.', source: 'rec-1', adoptedAt: '2026-10-27T09:00:00Z' }]);
+    const last = (await scratch.query(`select made_by, reason, change from public.assistant_profile_versions where assistant_id = 'salon' and version = $1`, [salon.version])).rows[0];
+    expect(last).toEqual({ made_by: 'seed', reason: 'reseeded from the files (--force)', change: { kind: 'reseed', from: salon.version - 1 } });
+  });
+
+  it('feeds the worker profile source: every assistant from its row, and the files for a row that is missing', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const source = () => createProfileSource({ env: {}, load: async () => (await scratch.query('select * from public.assistant_profiles')).rows, now: () => new Date(), onProblem: () => undefined });
+    const all = source();
+    const loaded = await all.refresh();
+    expect(loaded.fromDatabase.sort()).toEqual([...AssistantId.options].sort());
+    expect(loaded.problems).toEqual([]);
+    for (const id of AssistantId.options) {
+      expect(all.profile(id)).toMatchObject({ source: 'database', skill: files[id].skill, reads: [...files[id].reads], title: files[id].title, lessons: expect.any(Array) });
+      expect(all.profile(id).models).toEqual(files[id].models);
+    }
+    await scratch.query(`delete from public.assistant_profiles where assistant_id = 'salon'`);
+    const partial = source();
+    const result = await partial.refresh();
+    expect(result.fromFiles).toEqual(['salon']);
+    expect(partial.profile('salon')).toEqual(files.salon);
+    expect(partial.profile('finance').source).toBe('database');
+  });
+
+  it('runs as the two scripts: seed-profiles.ts, then issue-door-token.ts writing a token that opens the door', async ({ skip }) => {
+    if (!scratchName) skip();
+    const target = new URL(url);
+    target.pathname = `/${scratchName}`;
+    const repo = path.resolve(import.meta.dirname, '../..');
+    const run = (script: string, args: string[]) => spawnSync('npx', ['tsx', script, ...args, '--db', target.toString()], { cwd: repo, encoding: 'utf8', timeout: 60_000 });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-door-'));
+    try {
+      const seeded = run('scripts/seed-profiles.ts', []);
+      expect(seeded.status, seeded.stderr).toBe(0);
+      expect(seeded.stdout.trim().split('\n').map((l) => l.split(/\s+/)[0])).toEqual([...AssistantId.options]);
+      expect(seeded.stderr).toContain(`seeding ${target.hostname}:${target.port}/${scratchName}`);
+      expect(seeded.stderr).not.toContain(target.password); // the address is shown without its password
+
+      const issued = run('scripts/issue-door-token.ts', ['finance', 'Claude Code on the laptop', '--dir', dir]);
+      expect(issued.status, issued.stderr).toBe(0);
+      const tokenFile = path.join(dir, 'finance.token');
+      expect(issued.stdout).toBe(`${tokenFile}\n`); // the path, and nothing else
+      const token = fs.readFileSync(tokenFile, 'utf8').trim();
+      expect(token).toMatch(/^fahq_[A-Za-z0-9_-]{43}$/);
+      expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(issued.stdout + issued.stderr).not.toContain(token);
+
+      const rows = (await scratch.query(`select assistant_id, label, token_hash, revoked_at from public.door_tokens`)).rows;
+      expect(rows).toEqual([{ assistant_id: 'finance', label: 'Claude Code on the laptop', token_hash: tokenHash(token), revoked_at: null }]);
+      const opened = (await scratch.query('select public.door_profile($1) as profile', [token])).rows[0].profile;
+      expect(opened.assistant).toBe('finance');
+      expect(opened.reads).toEqual([...files.finance.reads]);
+
+      const again = run('scripts/issue-door-token.ts', ['finance', '--dir', dir]);
+      expect(again.status).toBe(2);
+      expect(again.stderr).toContain('already exists');
+      expect((await scratch.query('select count(*)::int as n from public.door_tokens')).rows[0].n).toBe(1);
+      const replaced = run('scripts/issue-door-token.ts', ['finance', '--dir', dir, '--replace']);
+      expect(replaced.status, replaced.stderr).toBe(0);
+      expect((await scratch.query('select count(*)::int as n from public.door_tokens')).rows[0].n).toBe(2);
+      expect(fs.readFileSync(tokenFile, 'utf8').trim()).not.toBe(token);
+
+      expect(run('scripts/issue-door-token.ts', ['nobody', '--dir', dir]).status).toBe(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
