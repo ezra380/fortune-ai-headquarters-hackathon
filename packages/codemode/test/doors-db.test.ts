@@ -8,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AssistantId } from '@fahq/contracts';
-import { issueDoorToken, loadProfiles, seedProfiles, tokenHash, type AssistantProfile } from '@fahq/profiles';
+import { issueDoorToken, loadProfiles, seedProfiles, tokenHash } from '@fahq/profiles';
 import { createBrainMcpServer, createCodeModeBrainServer, doorReads, type BrainMcpDeps } from '../src/index.ts';
 import { createDoorClient } from '../src/door-client.ts';
 import { openDoor, type DoorRequest } from '../src/door.ts';
@@ -313,16 +313,10 @@ describe('the Legal Team door', () => {
 describe('serve.ts', () => {
   const tsx = path.join(root, 'node_modules/.bin/tsx');
   const serve = path.join(root, 'packages/codemode/src/serve.ts');
-  // The door serves the STORED profile's reads: the shared database may hold an older version than this branch's files
-  // (lane D2 adds reads; the merge reseeds the profiles and compares with the file profile again). Drift the other way
-  // fails loud: a stored profile may lag the files, never serve a read this branch's files do not name.
-  const storedDoorTools = async (assistant: AssistantId) => {
-    const reads = (await pool.query('select reads from public.assistant_profiles where assistant_id = $1', [assistant])).rows[0].reads as AssistantProfile['reads'];
-    const stored = ['file_work_report', ...doorReads({ ...loadProfiles({})[assistant], reads })].sort();
-    const files = ['file_work_report', ...doorReads(loadProfiles({})[assistant])];
-    for (const t of stored) expect(files, `the stored ${assistant} profile serves ${t}, which this branch's files do not: reseed profiles`).toContain(t);
-    return stored;
-  };
+  // Merge wave 2 reseeded the shared database's profiles from the merged files (scripts/seed-profiles.ts --force), so the
+  // door started from the stored profile serves exactly the file profile's reads again (lane D2 had compared with the
+  // stored profile's reads until the merge reseeded).
+  const fileDoorTools = (assistant: AssistantId) => ['file_work_report', ...doorReads(loadProfiles({})[assistant])].sort();
   const run = (args: string[], env: Record<string, string>) =>
     spawnSync(tsx, [serve, ...args], { cwd: root, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...env }, encoding: 'utf8', timeout: 30_000, input: '' });
 
@@ -337,7 +331,7 @@ describe('serve.ts', () => {
       await client.connect(transport);
       const row = (await pool.query(`select version from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
       expect(log).toContain(`fortune-brain MCP ready (plain tools, profile finance version ${row.version} from the database)`);
-      expect(await toolNames(client)).toEqual(await storedDoorTools('finance'));
+      expect(await toolNames(client)).toEqual(fileDoorTools('finance'));
       const prompt = ((await client.getPrompt({ name: 'skill' })).messages[0]!.content as { text: string }).text;
       expect(prompt).toContain('call `file_work_report` once');
       const done = await client.callTool({ name: 'file_work_report', arguments: { summary: 'Started the finance door from serve.ts, called 5550101234.' } });
@@ -383,7 +377,7 @@ describe('serve.ts', () => {
     const client = new Client({ name: 'cursor', version: '1.0.0' });
     try {
       await client.connect(transport);
-      expect(await toolNames(client)).toEqual(await storedDoorTools('online'));
+      expect(await toolNames(client)).toEqual(fileDoorTools('online'));
     } finally {
       await client.close();
       fs.rmSync(dir, { recursive: true, force: true });
