@@ -52,6 +52,20 @@ Synthetic data only. The name Joey for the CEO assistant is the main session's, 
   enforced, the split, retire, the manager's own profile; the daily review; the database; the tests) and
   `packages/profiles/skills/manager/SKILL.md` (the kinds and the split; its read-only and "You never" sections kept).
 
+## Proof
+
+- `npm run typecheck`: clean.
+- Full suite under the lock (`flock ~/.fahq-db-test.lock npm test`, 14:16 ET): 1241 passed, 4 failed. Mine was the
+  manager skill growing past the six-section, 48-line skill test; fixed in the next commit and rerun green
+  (`packages/profiles/test/profiles.test.ts`, the door tests). The other three are not this lane's:
+  `apps/worker/test/profiles.test.ts` (2) fail on any branch without `legal` in `AssistantId` because the legal lane
+  stored a `legal` row in the shared local `assistant_profiles` ("assistant_id: Invalid option"); they pass once the
+  legal lane is merged. `departments.test.ts` "stops when asked, and a loop that finds nothing waits ..." is a timing
+  test of the claim loops: rerun on its own under the lock at 14:18 ET, 24 of 24 passed.
+- After the skill fix (`ebff9ff`): `packages/profiles/test/profiles.test.ts`, `packages/profiles/test/door.test.ts` and
+  `packages/codemode/test/doors.test.ts`, 75 of 75 passed.
+- `manager-decides.test.ts` (45, the 9 new ones among them) and `manager.test.ts` all green in the full run.
+
 ## Not done
 
 - The DB-backed tests in `manager-decides.test.ts` were written alongside the code, not run against the old code
