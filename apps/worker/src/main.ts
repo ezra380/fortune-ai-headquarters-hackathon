@@ -80,7 +80,8 @@ if (process.argv.includes('--once')) {
 } else {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { stopping = true; });
   console.error(`worker: running as ${deps.worker} with ${concurrency} claim loops`);
-  // The daily clock (briefs at 08:00 ET, the CEO digest at 08:30, the HQ Manager's review at 09:00); FAHQ_SCHEDULE=off turns it off.
+  // The daily clock (the division workers at 07:00 ET, briefs at 08:00, the CEO digest at 08:30, the HQ Manager's review at 09:00);
+  // FAHQ_SCHEDULE=off turns it off.
   const clock = scheduleEnabled(env) ? startScheduler(deps) : null;
   console.error(`worker: daily schedule ${clock ? 'on' : 'off'}`);
   await runConcurrently(deps, concurrency, () => stopping, { untilIdle: false });

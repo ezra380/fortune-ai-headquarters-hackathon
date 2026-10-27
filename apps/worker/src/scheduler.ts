@@ -4,9 +4,11 @@ import { errorText, receipt, type WorkerDeps } from './common.ts';
 import { ROUND_DEPARTMENTS } from './departments.ts';
 import { easternClock, enqueueDigest, enqueuePartialDigest } from './digest.ts';
 import { queueDailyReview } from './manager-daily.ts';
+import { enqueueWorkers } from './workers.ts';
 
 // The daily clock. Once a day, in New York time, the worker queues the day's work for the assistants:
-//   08:00  the three division briefs        08:30  the CEO digest        09:00  the HQ Manager's daily review
+//   07:00  the fifteen division workers     08:00  the three division briefs
+//   08:30  the CEO digest                   09:00  the HQ Manager's daily review
 // Queuing is idempotent by key (the same job for the same day is never a second task), so a worker that restarts,
 // two workers, or a missed minute cannot double anything. A job that was due while the worker was down is still queued
 // when it comes back, but only within a few hours of its time: a worker started in the evening does not send the
@@ -46,6 +48,8 @@ export async function enqueueDayDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, 
  * a name, a time and an `enqueue` that queues a task with a key that names the day.
  */
 export const SCHEDULE: ScheduledJob[] = [
+  // The fifteen daily workers (docs/wave2.md), each keyed by worker and day, ahead of the briefs.
+  { name: 'division-workers', at: '07:00', enqueue: (deps, date) => enqueueWorkers(deps, date) },
   { name: 'division-briefs', at: '08:00', enqueue: async (deps, date) => { for (const division of ROUND_DEPARTMENTS) await enqueueBrief(deps, division, date); } },
   { name: 'ceo-digest', at: '08:30', enqueue: (deps, date) => enqueueDayDigest(deps, date) },
   // The review's key is the New York day of `now` (the same day as `date`), so a second ask queues nothing; quiet on a

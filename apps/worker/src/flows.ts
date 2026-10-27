@@ -11,6 +11,7 @@ import { routeText } from './router.ts';
 import { planRound } from './rounds.ts';
 import { settleScreen, startScreen } from './screen.ts';
 import type { MessageRow, PersonRow, TaskRow } from './store.ts';
+import { dailyWorker } from './workers.ts';
 
 // The assistants' flows. Assistants send proposals; only a person's one-time code turns a proposal
 // into a forward, a decision or an adopted lesson. Every step leaves a receipt.
@@ -30,6 +31,7 @@ async function scheduled(task: TaskRow, deps: WorkerDeps, runId: string): Promis
   const job = String((task.payload as { job?: unknown }).job ?? '');
   if (task.assistant_id === 'manager' && job === 'manager_review') return managerReview(task, deps, runId);
   if (job === 'division_brief') return divisionBrief(task, deps, runId);
+  if (job === 'division_worker') return dailyWorker(task, deps, runId);
   if (task.assistant_id === 'owner' && job === 'ceo_digest') return ceoDigest(task, deps, runId);
   return fail(`unsupported scheduled job "${job}" for the ${task.assistant_id} assistant`);
 }

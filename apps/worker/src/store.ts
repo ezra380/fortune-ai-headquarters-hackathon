@@ -1,5 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
-import type { AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagerReview, Receipt, Recommendation, RecommendationDetail, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
+import { workerDivision } from '@fahq/contracts';
+import type {
+  AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagedDivision, ManagerReview, Receipt, Recommendation, RecommendationDetail, ReportStatus, Suggestion,
+  WorkerId, WorkerReport, WorkReport, WorkStep,
+} from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
 // happen once goes through a unique key (dedupe_key, idempotency_key) or a conditional update.
@@ -521,7 +525,40 @@ export function createStore(url: string, serviceKey: string) {
       const row = must(await db.from('tasks').select('status').eq('idempotency_key', key).maybeSingle(), 'task') as { status: string } | null;
       return row?.status ?? null;
     },
+
+    // ---- worker and weekly reports (W1) ------------------------------------------------------------
+
+    /** Inserts a worker's report once per key (a retried task finds its own report again) and reads it back. */
+    async saveWorkerReport(r: { key: string; report: WorkerReport; taskId: string | null }): Promise<WorkerReportRow> {
+      must(await db.from('worker_reports').upsert({
+        worker_id: r.report.workerId, division: workerDivision(r.report.workerId), report_key: r.key, report_date: r.report.day, period: r.report.period,
+        status: r.report.status, written_by: r.report.writtenBy, report: r.report, data_source: r.report.dataSource, task_id: r.taskId,
+      }, { onConflict: 'report_key', ignoreDuplicates: true }), 'save worker report');
+      return must(await db.from('worker_reports').select('*').eq('report_key', r.key).single(), 'read worker report') as WorkerReportRow;
+    },
+    /** The report a worker's task already wrote, if any: a retried task reuses it instead of asking the model again. */
+    async workerReportByKey(key: string): Promise<WorkerReportRow | null> {
+      return must(await db.from('worker_reports').select('*').eq('report_key', key).maybeSingle(), 'read worker report') as WorkerReportRow | null;
+    },
   };
 }
 
 export type Store = ReturnType<typeof createStore>;
+
+// ---- worker and weekly reports (W1) ------------------------------------------------------------------
+
+/** One worker's report of one day. `status` is set by the program; `written_by` is 'rule' when the model's words did not pass their check. */
+export type WorkerReportRow = {
+  id: string;
+  worker_id: WorkerId;
+  division: ManagedDivision;
+  report_key: string;
+  report_date: string;
+  period: string;
+  status: ReportStatus;
+  written_by: 'model' | 'rule';
+  report: WorkerReport;
+  data_source: string | null;
+  task_id: string | null;
+  created_at: string;
+};
