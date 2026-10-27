@@ -317,18 +317,28 @@ describe('the Divisions view: where each path or action of a weekly report stand
 });
 
 describe('the Divisions view: scrubbing and limits for the reports', () => {
-  it('lets no phone number, code, key or hash out in any text of a report, and never the row\'s own bookkeeping', () => {
+  it('lets no phone number, address, code, key or hash out in any text of a report, and never the row\'s own bookkeeping', () => {
     const dirty = workerReport('finance.meta', {
-      headline: 'Call +15559876543 about code 482915 and key sb_secret_abc123',
-      findings: [{ text: 'Reach 555-123-4567 with code 99887766', cites: ['m:online.ads.meta.roas'] }],
-      attention: [{ metricId: 'm:online.ads.meta.roas', level: 'act', rule: 'Ring (555) 987-6543 now' }],
+      headline: 'Call +15559876543 about code 482915 and key sb_secret_abc123, or write ezra@example.com',
+      findings: [{ text: 'Reach 555-123-4567 with code 99887766 or mail someone.else@example.org', cites: ['m:online.ads.meta.roas'] }],
+      attention: [{ metricId: 'm:online.ads.meta.roas', level: 'act', rule: 'Ring (555) 987-6543 now or email boss@example.com' }],
       dataSource: 'fortune_demo_marts#cccccccccccc',
     });
-    const v = view(withReports('finance', { workerReports: [workerRow('finance.meta', '2026-10-27', dirty, { status: 'normal' })] }));
+    const dirtyWeekly = weeklyReport('finance', {
+      summary: 'Write to alan@example.com about the week.',
+      goal: { ...weeklyReport('finance').goal!, why: 'Because george@example.net asked.' },
+      asked: [{ division: 'online', question: 'Who is cust@example.com?', answer: 'Answered by emma@example.com.', ok: true }],
+    });
+    const v = view(withReports('finance', {
+      workerReports: [workerRow('finance.meta', '2026-10-27', dirty, { status: 'normal' })],
+      weekly: weeklyRow('finance', dirtyWeekly),
+    }));
     const text = everything(v);
     expect(text).not.toMatch(/\d{6}/);
     expect(text).not.toMatch(PHONE_LIKE);
     expect(text).not.toMatch(/sb_secret|service_role|code_hash|eyJ/);
+    expect(text).not.toMatch(/@/);
+    expect(text).toContain('[email]');
     expect(text).not.toContain('task_id');
     // The status comes from the report itself, not from a column that could disagree with it.
     expect(slot(v, 'finance', 'finance.meta').latest!.status).toBe('act');
