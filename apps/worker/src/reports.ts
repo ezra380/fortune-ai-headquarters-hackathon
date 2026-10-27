@@ -90,7 +90,7 @@ function summarize(task: ReportTask, outcome: 'done' | 'failed' | 'retrying', er
   const seconds = Math.round((endedAt.getTime() - startedAt.getTime()) / 1000);
   const word = outcome === 'retrying' ? 'will retry' : outcome;
   const parts = steps.map((s) => {
-    const planAttempt = s.step === 'finance.plans' ? /\battempts (\d+)\b/.exec(s.detail ?? '')?.[1] : undefined;
+    const planAttempt = s.step === 'finance.plans' || s.step === 'manager.review' ? /\battempts (\d+)\b/.exec(s.detail ?? '')?.[1] : undefined;
     return `${s.step} ${s.outcome}${planAttempt ? ` (attempt ${planAttempt} of 2)` : ''}`;
   });
   const shown = parts.length > 6 ? [...parts.slice(0, 6), `and ${parts.length - 6} more`] : parts;
@@ -122,11 +122,13 @@ function suggest(task: ReportTask, outcome: 'done' | 'failed' | 'retrying', erro
       else if (r.model !== null) add('prompt', about, `${r.step} was refused: ${detail || 'no detail was recorded'}`);
     }
 
-    if (r.step === 'finance.plans' && r.outcome === 'ok') {
+    // The two steps that get one correction round with the checker's exact objections.
+    if ((r.step === 'finance.plans' || r.step === 'manager.review') && r.outcome === 'ok') {
       const attempts = Number(/\battempts (\d+)\b/.exec(detail)?.[1] ?? 1);
       if (attempts >= 2) {
-        const first = /first objection: (.*)$/.exec(detail)?.[1];
-        add('prompt', 'finance', `The plan writer needed a correction round. First objection: ${first ?? 'not recorded'}`);
+        const first = /first objection: (.*)$/.exec(detail)?.[1] ?? 'not recorded';
+        if (r.step === 'finance.plans') add('prompt', 'finance', `The plan writer needed a correction round. First objection: ${first}`);
+        else add('prompt', 'manager', `The review writer needed a correction round. First objection: ${first}`);
       }
     }
     if (code && code.attempts >= 2 && r.outcome === 'ok') {

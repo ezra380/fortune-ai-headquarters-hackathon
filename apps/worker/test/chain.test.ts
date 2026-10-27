@@ -56,6 +56,8 @@ describe.skipIf(!api)('finance chain end to end (real DB + real Meterless; model
       models: { nvidia: modelMock(), planModel: 'nvidia/nemotron-3-ultra-550b-a55b', routerModel: 'nvidia/nemotron-3.5-lightning-30b-a3b' },
       data: dataMock,
       delivery: null,
+      codeMode: null, // the finance chain needs no Code Mode; manager.test.ts covers the steps that do
+      profiles: { skill: () => '', model: () => 'MOCK', reads: () => [] },
       now: () => new Date(),
       worker: 'chain-test-worker',
       live: false,
@@ -108,6 +110,13 @@ describe.skipIf(!api)('finance chain end to end (real DB + real Meterless; model
     expect(stored.rows[0].body).not.toMatch(/\d{6}/);
     const steps = await pool.query(`select step, outcome from public.receipts where step in ('front-door','finance.plans','approval.forward','approval.decide') order by id desc limit 10`);
     expect(steps.rows.map((r: { step: string }) => r.step)).toEqual(expect.arrayContaining(['front-door', 'finance.plans', 'approval.forward', 'approval.decide']));
+
+    // Every task the worker ran left an end-of-work report; the plan writer's carries its tokens.
+    const report = await pool.query(
+      `select assistant_id, task_kind, outcome, input_tokens, output_tokens, model_calls, suggestions from public.work_reports
+        where summary like '%finance.plans ok (attempt 1 of 2)%' order by ended_at desc limit 1`,
+    );
+    expect(report.rows[0]).toMatchObject({ assistant_id: 'finance', task_kind: 'mailbox', outcome: 'done', input_tokens: 100, output_tokens: 200, model_calls: 1, suggestions: [] });
   });
 
   it('re-running a step after a crash keeps the plans, the code already sent and the approval', async () => {

@@ -248,6 +248,10 @@ export function createStore(url: string, serviceKey: string) {
       }, { onConflict: 'review_key', ignoreDuplicates: true }), 'save review');
       return must(await db.from('manager_reviews').select('*').eq('review_key', r.key).single(), 'read review') as ReviewRow;
     },
+    /** The review a task already wrote, if any: a retried task reuses it instead of asking the models again. */
+    async reviewByKey(key: string): Promise<ReviewRow | null> {
+      return must(await db.from('manager_reviews').select('*').eq('review_key', key).maybeSingle(), 'read review') as ReviewRow | null;
+    },
     async setReviewMessage(reviewId: string, messageId: string) {
       must(await db.from('manager_reviews').update({ message_id: messageId }).eq('id', reviewId), 'review message');
     },

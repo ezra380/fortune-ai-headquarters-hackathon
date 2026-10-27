@@ -43,6 +43,15 @@ const deps: WorkerDeps = {
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
   data: await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)'),
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
+  // TEMP: Code Mode and the assistants' profiles are wired here after the profiles lane merges
+  // (packages/profiles). Until then the steps that need Code Mode (questions, the manager's review)
+  // fail with a plain sentence, and no assistant has a read tool.
+  codeMode: null,
+  profiles: {
+    skill: () => '',
+    model: () => models.planModel,
+    reads: () => [],
+  },
   now: () => new Date(),
   worker: `worker@${os.hostname()}:${process.pid}`,
   live: true,

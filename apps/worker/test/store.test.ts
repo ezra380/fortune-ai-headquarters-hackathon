@@ -10,7 +10,20 @@ import { dbUrl, localApi } from './localdb.ts';
 const api = localApi();
 if (!api) console.warn('SKIPPED store tests: needs local Supabase (npm run db:start)');
 const pool = new pg.Pool({ connectionString: dbUrl, max: 2 });
-afterAll(async () => pool.end());
+
+// What these tests write is removed again: reports in a far-future year, and reviews with their
+// recommendations, would otherwise show up in every later test that reads "the last 24 hours" or the
+// adopted lessons.
+const madeTasks: string[] = [];
+afterAll(async () => {
+  try {
+    if (madeTasks.length > 0) await pool.query('delete from public.work_reports where task_id = any($1)', [madeTasks]);
+    await pool.query(`delete from public.recommendations where review_id in (select id from public.manager_reviews where review_key like 'store-test-review:%')`);
+    await pool.query(`delete from public.manager_reviews where review_key like 'store-test-review:%'`);
+  } finally {
+    await pool.end();
+  }
+});
 
 const T0 = '2026-10-26T12:00:00Z';
 const T1 = '2026-10-26T12:00:09Z';
@@ -20,6 +33,7 @@ async function newTask(assistant = 'finance', status = 'done'): Promise<string> 
     `insert into public.tasks (assistant_id, kind, idempotency_key, payload, status) values ($1, 'mailbox', $2, '{}'::jsonb, $3) returning id`,
     [assistant, 'store-test:' + randomUUID(), status],
   );
+  madeTasks.push(rows[0].id as string);
   return rows[0].id as string;
 }
 
@@ -58,21 +72,26 @@ describe.skipIf(!api)('store: reports, reviews, recommendations (real local data
   });
 
   it('keeps one report per task (the latest attempt wins) and reads them newest first', async () => {
+    // Reports in a year of their own, so the newest-200 window other tests fill up never hides them.
+    const year = 3000 + Math.floor(Math.random() * 6000);
+    const at = (hms: string) => `${year}-01-01T${hms}Z`;
+    const since = new Date(at('11:00:00'));
     const task = await newTask();
-    await store.saveWorkReport(report(task, { outcome: 'retrying', summary: 'first attempt' }));
-    await store.saveWorkReport(report(task, { outcome: 'done', summary: 'second attempt', usage: { modelCalls: 2, inputTokens: 300, outputTokens: 400 } }));
-    const mine = (await store.workReports({ since: new Date('2026-10-26T11:00:00Z'), limit: 200 })).filter((r) => r.task_id === task);
+    await store.saveWorkReport(report(task, { outcome: 'retrying', summary: 'first attempt', startedAt: at('12:00:00'), endedAt: at('12:00:09') }));
+    await store.saveWorkReport(report(task, { outcome: 'done', summary: 'second attempt', startedAt: at('12:00:00'), endedAt: at('12:00:09'), usage: { modelCalls: 2, inputTokens: 300, outputTokens: 400 } }));
+    const mine = (await store.workReports({ since, limit: 200 })).filter((r) => r.task_id === task);
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ outcome: 'done', summary: 'second attempt', input_tokens: 300, output_tokens: 400, model_calls: 2, assistant_id: 'finance' });
 
     const later = await newTask('owner');
-    await store.saveWorkReport(report(later, { assistant: 'owner', endedAt: '2026-10-26T12:30:00Z' }));
-    const all = await store.workReports({ since: new Date('2026-10-26T11:00:00Z') });
+    await store.saveWorkReport(report(later, { assistant: 'owner', startedAt: at('12:30:00'), endedAt: at('12:30:09') }));
+    const all = await store.workReports({ since });
     expect(all.findIndex((r) => r.task_id === later)).toBeLessThan(all.findIndex((r) => r.task_id === task)); // newest first
-    const ownerOnly = await store.workReports({ since: new Date('2026-10-26T11:00:00Z'), assistant: 'owner' });
+    const ownerOnly = await store.workReports({ since, assistant: 'owner' });
+    expect(ownerOnly.length).toBeGreaterThan(0);
     expect(ownerOnly.every((r) => r.assistant_id === 'owner')).toBe(true);
-    expect(await store.workReports({ since: new Date('2026-10-26T12:20:00Z'), limit: 1 })).toHaveLength(1);
-    expect((await store.workReports({ since: new Date('2099-01-01T00:00:00Z') }))).toEqual([]);
+    expect(await store.workReports({ since: new Date(at('12:20:00')), limit: 1 })).toHaveLength(1);
+    expect(await store.workReports({ since: new Date('9999-12-31T00:00:00Z') })).toEqual([]);
   });
 
   it('saves a review once per key, its recommendations once per rank, and adopts them idempotently', async () => {
@@ -83,6 +102,8 @@ describe.skipIf(!api)('store: reports, reviews, recommendations (real local data
     expect(again.id).toBe(first.id);
     expect(again.report_count).toBe(2); // the first write stands
     expect(first.review.recommendations).toHaveLength(2);
+    expect((await store.reviewByKey(key))?.id).toBe(first.id);
+    expect(await store.reviewByKey(key + ':never-written')).toBeNull();
 
     const wrapped = await store.saveManagerReview({ ...input, key: key + ':list', digest: [1, 2] });
     expect(wrapped.digest).toEqual({ result: [1, 2] });
