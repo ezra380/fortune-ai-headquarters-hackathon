@@ -36,7 +36,10 @@ export const InboundText = z.object({
 });
 export type InboundText = z.infer<typeof InboundText>;
 
-export const Intent = z.enum(['request', 'status', 'unknown']);
+// 'plans' = asks for plans, ideas or proposals to act on; 'question' = asks for facts or an explanation
+// ("why did you propose plan 2?" is a question); 'status' = asks how things stand.
+export const Intent = z.enum(['plans', 'question', 'status', 'unknown']);
+export type Intent = z.infer<typeof Intent>;
 export const Risk = z.enum(['money', 'customer', 'ads', 'schedule']);
 export type Risk = z.infer<typeof Risk>;
 

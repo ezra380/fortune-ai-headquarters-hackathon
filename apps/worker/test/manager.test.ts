@@ -63,7 +63,7 @@ function fakeCodeMode() {
   return { runner, calls, respond: (fn: typeof respond) => { respond = fn; } };
 }
 
-const router = (target: string, intent = 'request') => JSON.stringify({ intent, risks: [], targetAssistant: target, confidence: 0.9, reason: 'scripted' });
+const router = (target: string, intent = 'plans') => JSON.stringify({ intent, risks: [], targetAssistant: target, confidence: 0.9, reason: 'scripted' });
 
 const digest = {
   byAssistant: [

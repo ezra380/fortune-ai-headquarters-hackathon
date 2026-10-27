@@ -70,7 +70,7 @@ export function modelMock(planReplies: string[] = [JSON.stringify(validPlans)]):
       calls.push(input.purpose);
       inputs.push({ purpose: input.purpose, system: input.system, user: input.user });
       const text = input.purpose === 'front-door'
-        ? JSON.stringify({ intent: 'request', risks: ['money', 'ads'], targetAssistant: 'finance', confidence: 0.92, reason: 'profit plans' })
+        ? JSON.stringify({ intent: 'plans', risks: ['money', 'ads'], targetAssistant: 'finance', confidence: 0.92, reason: 'profit plans' })
         : planReplies[Math.min(planIndex++, planReplies.length - 1)] ?? '';
       return { text, model: `MOCK/${input.model}`, inputTokens: 100, outputTokens: 200, costUsd: 0 };
     },
