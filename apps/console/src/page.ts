@@ -63,6 +63,26 @@ section section{margin:22px 0 0}
 .chip.fail{background:var(--red-bg);color:var(--red)}
 .empty{padding:16px 14px;color:var(--muted);font-size:.9375rem}
 .digest{margin:2px 0 0}
+.subs{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0 0}
+.sub{font:inherit;font-size:.875rem;font-weight:700;line-height:1.3;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);cursor:pointer;min-height:40px}
+.sub[aria-pressed=true]{color:var(--ink);background:var(--paper);border-color:var(--ink)}
+.sub:hover{color:var(--ink)}
+.sub:focus-visible,.link:focus-visible,summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.chips .sub{min-height:36px;padding:6px 12px}
+.link{display:inline-block;color:var(--ink);font-size:.875rem;font-weight:700;text-decoration:underline;text-underline-offset:3px;margin:2px 12px 2px 0;overflow-wrap:anywhere}
+h3.sec{margin:14px 0 4px}
+.label{margin:10px 0 2px;color:var(--muted);font-size:.8125rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+details.worker summary{cursor:pointer;display:grid;gap:4px;list-style:none}
+details.worker summary::-webkit-details-marker{display:none}
+details.worker .wline{font-size:.9375rem;overflow-wrap:anywhere}
+details.worker .wbody{margin:10px 0 0;padding-top:8px;border-top:1px solid var(--line)}
+.nums{margin:2px 0 0;padding:0;list-style:none;display:grid;gap:2px}
+.nums li{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;font-size:.9375rem;min-width:0}
+.nums .nl{overflow-wrap:anywhere}
+.nums .nv{font-variant-numeric:tabular-nums}
+.week{margin:2px 0 0;padding:0;list-style:none;display:grid;gap:6px}
+.week li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;min-width:0}
+.week .wk{font-size:.9375rem;overflow-wrap:anywhere;min-width:0}
 footer{margin:48px 0 0;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:.8125rem}
 footer.stale #updated{color:var(--red)}
 .loading{margin:32px 0 0;color:var(--muted)}
@@ -81,6 +101,15 @@ const SCRIPT = `
   var current = '';
   var lastKey = '';
   var inflight = 0;
+  // A head's own page (/?division=finance) shows that division only, and asks the server for it alone.
+  var HEAD = (function () {
+    var m = /(?:^|[?&])division=(finance|online|salon)(?:&|$)/.exec(location.search || '');
+    return m ? m[1] : '';
+  })();
+  var SUBS = [['overview', 'Company'], ['finance', 'Finance'], ['online', 'Online'], ['salon', 'Salon']];
+  // Which part of the Divisions view is open: the company at a glance, or one division's tab.
+  var sub = HEAD || 'overview';
+  var lastBody = null;
 
   var NAMES = { owner: 'Owner HQ', finance: 'Finance', online: 'Online customer service', manager: 'HQ Manager', salon: 'Salon (Cindy)' };
   var TONE = {
@@ -105,7 +134,7 @@ const SCRIPT = `
     request: 'Request', proposal: 'Proposal', decision: 'Decision', report: 'Report'
   };
   var ACTIONS = { forward_plan: 'Send a plan to the finance owner', decide_plan: 'Decide on a plan', adopt_change: 'Adopt a change', approve_action: 'Approve a brief action' };
-  var DIVISION = { salon: 'Salon', finance: 'Finance', online: 'Online' };
+  var DIVISION = { salon: 'Salon', finance: 'Finance', online: 'Online', hq: 'HQ' };
   var ABOUT = {
     salon: 'The salon assistant is a stand-in for Cindy, working on synthetic salon data. Cindy\\u2019s own app keeps her family and personal data; none of it is read here.'
   };
@@ -239,14 +268,17 @@ const SCRIPT = `
   function has(list, part) { return !!list && list.indexOf(part) >= 0; }
   function basedOn(cites) { return cites && cites.length ? 'Based on ' + cites.join(', ') : ''; }
 
-  function actionNote(ap) {
+  // what: the document the code belongs to, "brief" or "report" (a weekly report's paths and actions are approved the same way).
+  function actionNote(ap, what) {
+    var noun = what || 'brief';
+    var thing = noun === 'brief' ? 'action' : 'choice';
     if (ap.state === 'approved') return 'Approved ' + when(ap.at);
     if (ap.state === 'awaiting') return 'A code is waiting. It expires ' + when(ap.at);
-    if (ap.state === 'code_expired') return 'The code expired ' + when(ap.at) + ' and this action was not approved';
+    if (ap.state === 'code_expired') return 'The code expired ' + when(ap.at) + ' and this ' + thing + ' was not approved';
     if (ap.state === 'code_locked') return 'The code was locked after wrong tries';
-    if (ap.state === 'not_approved') return 'The code was used for other actions ' + when(ap.at);
-    if (ap.state === 'no_code') return 'No code was sent for this brief';
-    return 'Where this action stands could not be read right now';
+    if (ap.state === 'not_approved') return 'The code was used for other ' + thing + 's ' + when(ap.at);
+    if (ap.state === 'no_code') return 'No code was sent for this ' + noun;
+    return 'Where this ' + thing + ' stands could not be read right now';
   }
 
   function briefRow(li, b) {
@@ -283,13 +315,262 @@ const SCRIPT = `
     }, empty, 'h3');
   }
 
-  function divisionSection(v, requestsUnread) {
+  // ---- Wave 2: each division's manager, its workers' reports and its weekly report ----
+
+  function managerLine(v) { return v.manager.name + ', ' + v.manager.title + ', reports to ' + v.manager.reportsTo; }
+  function button(label, onClick) {
+    var b = h('button', 'sub', label);
+    b.setAttribute('type', 'button');
+    b.addEventListener('click', onClick);
+    return b;
+  }
+  function link(text, href) {
+    var a = h('a', 'link', text);
+    a.setAttribute('href', href);
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', 'noopener');
+    return a;
+  }
+  // A report's PDF is made by the console when this is opened. On a head's page the link names the division, so the server
+  // refuses any other division's report.
+  function pdfHref(kind, id) { return '/report/' + kind + '/' + encodeURIComponent(id) + '.pdf' + (HEAD ? '?division=' + HEAD : ''); }
+  function day(s) {
+    if (!s) return '';
+    var d = new Date(s + 'T12:00:00Z');
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  }
+  function label(text) { return h('div', 'label', text); }
+  function numbersList(list) {
+    var ul = h('ul', 'nums');
+    list.forEach(function (n) {
+      var li = h('li', null);
+      li.appendChild(h('span', 'nl', n.label));
+      if (n.shown) li.appendChild(h('b', 'nv', n.shown));
+      li.appendChild(h('span', 'meta', n.id));
+      ul.appendChild(li);
+    });
+    return ul;
+  }
+  function plainList(items) {
+    var ul = h('ul', 'plans');
+    items.forEach(function (t) { ul.appendChild(h('li', null, t)); });
+    return ul;
+  }
+
+  function standingLine(wk) {
+    if (!wk.sent) return 'this report has not been sent to the head yet, so there is no code to approve against.';
+    var yes = wk.options.filter(function (o) { return o.approval.state === 'approved'; }).map(function (o) { return o.kind + ' ' + o.rank; });
+    if (yes.length) return (yes.length === 1 ? yes[0] : yes.slice(0, -1).join(', ') + ' and ' + yes[yes.length - 1]) + ' approved.';
+    var ap = wk.options[0].approval;
+    if (ap.state === 'awaiting') return 'a code is waiting for the head. It expires ' + when(ap.at) + '.';
+    if (ap.state === 'code_expired') return 'the code expired ' + when(ap.at) + ' and nothing was approved.';
+    if (ap.state === 'code_locked') return 'the code was locked after wrong tries.';
+    if (ap.state === 'not_approved') return 'the code was used, but not for any of these.';
+    if (ap.state === 'no_code') return 'no code has been sent for this report yet.';
+    return 'it could not be read right now.';
+  }
+
+  function optionBox(o) {
+    var box = h('div', 'rec');
+    head(box, (o.kind === 'path' ? 'Path ' : 'Action ') + o.rank + '. ' + o.title, o.approval.state);
+    box.appendChild(h('div', 'text', o.why));
+    if (o.steps.length) {
+      box.appendChild(label(o.kind === 'path' ? 'What to do' : 'How'));
+      box.appendChild(plainList(o.steps));
+    }
+    if (o.numbers.length) {
+      box.appendChild(label('The numbers behind it'));
+      box.appendChild(numbersList(o.numbers));
+    }
+    o.projections.forEach(function (p) {
+      box.appendChild(h('div', 'text', p.text));
+      box.appendChild(h('div', 'meta', 'Assumption: ' + p.assumption));
+    });
+    if (o.test) box.appendChild(h('div', 'text', 'Test: ' + o.test));
+    if (o.stopLoss) box.appendChild(h('div', 'text', 'Stop-loss: ' + o.stopLoss));
+    if (o.risks.length) box.appendChild(h('div', 'meta', 'Risks: ' + o.risks.join('; ')));
+    box.appendChild(h('div', 'meta', actionNote(o.approval, 'report')));
+    return box;
+  }
+
+  function weeklyRow(li, v, wk) {
+    var top = h('div', 'head');
+    top.appendChild(h('div', 'title', 'Week of ' + day(wk.weekOf)));
+    if (wk.writtenBy === 'rule') top.appendChild(chip('rule'));
+    li.appendChild(top);
+    li.appendChild(h('div', 'meta', join(['Written ' + when(wk.createdAt), 'Numbers from ' + wk.period])));
+    if (wk.id) li.appendChild(link('Open the PDF packet', pdfHref('weekly', wk.id)));
+    li.appendChild(h('div', 'text', wk.summary));
+    if (wk.writtenBy === 'rule') {
+      li.appendChild(h('div', 'meta', "A program wrote this report from the rules, because the model's words did not pass their number check" + (v.id === 'finance' ? ', so it has no goal and no paths.' : '.')));
+    }
+    if (wk.goal) {
+      var g = h('div', 'rec');
+      g.appendChild(h('h3', 'sec', 'Goal of the week'));
+      g.appendChild(h('div', 'title', wk.goal.title));
+      g.appendChild(h('div', 'text', wk.goal.metric + ': from ' + wk.goal.from + ' to ' + wk.goal.to + ' by ' + wk.goal.by));
+      g.appendChild(h('div', 'text', wk.goal.why));
+      li.appendChild(g);
+    }
+    if (wk.options.length) {
+      li.appendChild(h('h3', 'sec', wk.goal ? 'Three paths to the goal' : 'Actions for ' + v.manager.reportsTo));
+      wk.options.forEach(function (o) { li.appendChild(optionBox(o)); });
+      li.appendChild(h('div', 'meta', 'Where it stands: ' + standingLine(wk)));
+    }
+    if (wk.asked.length) {
+      li.appendChild(h('h3', 'sec', 'Asked of other divisions'));
+      wk.asked.forEach(function (a) {
+        var box = h('div', 'rec');
+        box.appendChild(h('div', 'title', 'To ' + (DIVISION[a.division] || a.division) + ': ' + a.question));
+        box.appendChild(h('div', 'text', a.ok ? a.answer : 'No answer. ' + a.answer));
+        li.appendChild(box);
+      });
+    }
+    li.appendChild(h('h3', 'sec', 'What each worker found'));
+    wk.sections.forEach(function (x) {
+      var box = h('div', 'rec');
+      head(box, x.label, x.status);
+      box.appendChild(h('div', 'text', x.summary));
+      if (x.numbers.length) box.appendChild(numbersList(x.numbers));
+      li.appendChild(box);
+    });
+    li.appendChild(h('div', 'meta', 'Line to the CEO division: ' + wk.ceoLine));
+    li.appendChild(h('div', 'meta', 'Source: ' + wk.source));
+  }
+
+  function weeklySection(v) {
+    var wk = v.reports.weekly;
     var s = h('section');
     var top = h('div', 'head');
-    top.appendChild(h('h2', null, v.name + ' division'));
+    top.appendChild(h('h2', null, 'Weekly report'));
+    if (wk) top.appendChild(chip(wk.status));
+    s.appendChild(top);
+    s.appendChild(h('p', 'hint', 'Written by ' + v.manager.name + ' for ' + v.manager.reportsTo + " from the workers' reports. " + v.manager.reportsTo
+      + ' chooses by texting APPROVE and a number, with the one-time code; nothing is carried out by the program.'));
+    if (!wk) {
+      s.appendChild(h('div', 'list empty', has(v.reports.unread, 'weekly')
+        ? 'The latest weekly report could not be read right now. See the notes above.'
+        : 'No weekly report yet. It is written on Mondays at 7:30, or when the owner or the head texts REPORT.'));
+      return s;
+    }
+    var ul = h('ul', 'list');
+    var li = h('li', 'row');
+    weeklyRow(li, v, wk);
+    ul.appendChild(li);
+    s.appendChild(ul);
+    return s;
+  }
+
+  function workerLine(slot) {
+    if (slot.state === 'ok') return slot.latest.headline;
+    if (slot.state === 'none') return 'No report yet. This worker reports each morning at 7:00.';
+    if (slot.state === 'unreadable') return 'Its latest report could not be read in full. See the notes above.';
+    return 'Its reports could not be read right now. See the notes above.';
+  }
+
+  function workerCard(slot) {
+    var r = slot.latest;
+    var d = h('details', 'worker');
+    // A worker that found something is open; one that found nothing is one line.
+    if (r && r.status !== 'normal') d.setAttribute('open', '');
+    var s = h('summary', null);
+    var top = h('span', 'head');
+    top.appendChild(h('span', 'title', slot.label));
+    if (r) top.appendChild(chip(r.status));
+    s.appendChild(top);
+    s.appendChild(h('span', 'wline', workerLine(slot)));
+    d.appendChild(s);
+    var body = h('div', 'wbody');
+    if (r) {
+      body.appendChild(h('div', 'meta', join(['Report for ' + day(r.day), 'numbers from ' + r.period, slot.stale ? 'older than seven days' : '', 'written ' + when(r.createdAt),
+        r.writtenBy === 'rule' ? 'written by rules' : ''])));
+      if (r.findings.length) {
+        body.appendChild(label('What it found'));
+        var ul = h('ul', 'plans');
+        r.findings.forEach(function (x) {
+          var item = h('li', null, x.text);
+          if (x.cites.length) item.appendChild(h('div', 'meta', basedOn(x.cites)));
+          ul.appendChild(item);
+        });
+        body.appendChild(ul);
+      }
+      if (r.rules.length) {
+        body.appendChild(label('Rules that fired'));
+        body.appendChild(plainList(r.rules.map(function (x) { return (x.level === 'act' ? 'Needs action' : 'Worth a look') + ': ' + x.rule + ' (' + x.metricId + ')'; })));
+      }
+      body.appendChild(label('Key numbers'));
+      body.appendChild(numbersList(r.numbers));
+      if (r.moreNumbers) body.appendChild(h('div', 'meta', plural(r.moreNumbers, 'more number', 'more numbers') + ' in the data.'));
+      r.rows.forEach(function (row) {
+        body.appendChild(label('Row totals: ' + row.read));
+        var rl = h('ul', 'nums');
+        row.totals.forEach(function (t) {
+          var item = h('li', null);
+          item.appendChild(h('span', 'nl', t.label));
+          item.appendChild(h('b', 'nv', t.shown));
+          rl.appendChild(item);
+        });
+        body.appendChild(rl);
+      });
+      body.appendChild(h('div', 'meta', 'Source: ' + r.source));
+      if (r.id) body.appendChild(link('Open this report as a PDF', pdfHref('worker', r.id)));
+    }
+    if (slot.week.length) {
+      body.appendChild(label('Last seven days'));
+      var days = h('ul', 'week');
+      slot.week.forEach(function (x) {
+        var item = h('li', null);
+        item.appendChild(h('span', 'meta', day(x.day)));
+        item.appendChild(chip(x.status));
+        item.appendChild(h('span', 'wk', x.headline));
+        days.appendChild(item);
+      });
+      body.appendChild(days);
+    }
+    d.appendChild(body);
+    return d;
+  }
+
+  function workersSection(v) {
+    return section('Daily workers', 'Each worker reads one part of the division’s numbers every morning at 7:00 and reports. Open one for its findings, its key numbers and the last seven days.',
+      v.reports.workers, function (li, slot) { li.appendChild(workerCard(slot)); }, 'This division has no workers.');
+  }
+
+  function crewLine(v) {
+    return plural(v.reports.workers.length, 'worker', 'workers') + " read their part of the division's numbers each morning at 7:00. " + v.manager.name + ' writes the weekly report for '
+      + v.manager.reportsTo + ' on Mondays at 7:30 from what they found.';
+  }
+
+  // One division's tab: its manager, the weekly report, the workers, then the daily brief and the questions.
+  function divisionTab(v, requestsUnread, notes) {
+    var f = document.createDocumentFragment();
+    f.appendChild(h('p', 'who', managerLine(v)));
+    f.appendChild(h('p', 'hint', crewLine(v)));
+    notesBlock(f, notes);
+    f.appendChild(weeklySection(v));
+    f.appendChild(workersSection(v));
+    f.appendChild(divisionSection(v, requestsUnread, true));
+    return f;
+  }
+
+  function divisionSection(v, requestsUnread, inTab) {
+    var s = h('section');
+    var top = h('div', 'head');
+    top.appendChild(h('h2', null, inTab ? 'Daily brief' : v.name + ' division'));
     if (v.brief) top.appendChild(chip(v.brief.status));
     s.appendChild(top);
     s.appendChild(h('p', 'hint', 'Its assistant writes to ' + v.head + '. The head approves an action by texting back the one-time code.'));
+    if (!inTab) {
+      var wk = v.reports && v.reports.weekly;
+      var standing = wk ? 'Weekly report for the week of ' + day(wk.weekOf) + ': ' + (WORDS[wk.status] || wk.status) + '.'
+        : has(v.reports && v.reports.unread, 'weekly') ? 'The weekly report could not be read right now.' : 'No weekly report yet.';
+      s.appendChild(h('p', 'hint', managerLine(v) + '. ' + standing));
+      var go = h('div', 'chips');
+      go.appendChild(button('Open the ' + v.name + ' tab', function () { openSub(v.id); }));
+      go.appendChild(link('Open the head’s view', '/?division=' + v.id));
+      s.appendChild(go);
+    }
     if (v.brief) {
       var ul = h('ul', 'list');
       var li = h('li', 'row');
@@ -326,13 +607,48 @@ const SCRIPT = `
         : 'No digest yet. Owner HQ writes one each morning once the divisions have reported.');
   }
 
+  function subnav() {
+    var nav = h('div', 'subs');
+    nav.setAttribute('role', 'group');
+    nav.setAttribute('aria-label', 'Company or one division');
+    SUBS.forEach(function (x) {
+      var b = button(x[1], function () { openSub(x[0]); });
+      b.setAttribute('aria-pressed', sub === x[0] ? 'true' : 'false');
+      nav.appendChild(b);
+    });
+    return nav;
+  }
+
   function renderDivisions(d) {
     var f = document.createDocumentFragment();
+    var block = null;
+    d.divisions.forEach(function (v) { if (v.id === sub) block = v; });
+    if (!HEAD) f.appendChild(subnav());
+    if (block) {
+      f.appendChild(divisionTab(block, has(d.unread, 'requests'), d.notes));
+      return f;
+    }
+    if (HEAD) {
+      f.appendChild(h('p', 'who', 'This division could not be read right now.'));
+      notesBlock(f, d.notes);
+      return f;
+    }
     f.appendChild(h('p', 'who', 'The company at a glance: each division\\u2019s latest brief and where its actions stand, the questions the divisions asked each other, and the CEO digest. Read-only: approvals are made by text with a one-time code, never here.'));
     notesBlock(f, d.notes);
     f.appendChild(digestSection(d));
-    d.divisions.forEach(function (v) { f.appendChild(divisionSection(v, has(d.unread, 'requests'))); });
+    d.divisions.forEach(function (v) { f.appendChild(divisionSection(v, has(d.unread, 'requests'), false)); });
     return f;
+  }
+
+  // What was drawn last is kept, so pressing a tab draws from it without asking the server again.
+  function keyOf(body) { return sub + '|' + JSON.stringify(body, function (k, v) { return k === 'generatedAt' ? undefined : v; }); }
+  function openSub(id) {
+    sub = id;
+    try { history.replaceState(null, '', id === 'overview' ? '#divisions' : '#divisions/' + id); } catch (e) { /* the address bar is optional */ }
+    if (lastBody) {
+      panel.replaceChildren(renderDivisions(lastBody));
+      lastKey = keyOf(lastBody);
+    }
   }
 
   function render(d) {
@@ -430,7 +746,7 @@ const SCRIPT = `
     var id = current;
     var mine = ++inflight;
     if (fresh) { lastKey = ''; panel.replaceChildren(h('p', 'loading', 'Loading\\u2026')); }
-    var url = id === 'divisions' ? '/api/divisions' : '/api/department/' + encodeURIComponent(id);
+    var url = id === 'divisions' ? '/api/divisions' + (HEAD ? '?division=' + HEAD : '') : '/api/department/' + encodeURIComponent(id);
     fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } })
       .then(function (res) {
         return res.json().then(function (body) { return { ok: res.ok, body: body }; });
@@ -438,7 +754,8 @@ const SCRIPT = `
       .then(function (r) {
         if (id !== current || mine !== inflight) return;
         if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : 'The console could not load this view.');
-        var key = JSON.stringify(r.body, function (k, v) { return k === 'generatedAt' ? undefined : v; });
+        lastBody = id === 'divisions' ? r.body : null;
+        var key = id === 'divisions' ? keyOf(r.body) : JSON.stringify(r.body, function (k, v) { return k === 'generatedAt' ? undefined : v; });
         if (key !== lastKey) { panel.replaceChildren(id === 'divisions' ? renderDivisions(r.body) : render(r.body)); lastKey = key; }
         stamp(true);
       })
@@ -457,7 +774,7 @@ const SCRIPT = `
       t.tabIndex = on ? 0 : -1;
     });
     panel.setAttribute('aria-labelledby', 'tab-' + id);
-    try { history.replaceState(null, '', '#' + id); } catch (e) { /* the address bar is optional */ }
+    try { history.replaceState(null, '', '#' + id + (id === 'divisions' && sub !== 'overview' ? '/' + sub : '')); } catch (e) { /* the address bar is optional */ }
     load(fresh);
   }
 
@@ -473,9 +790,17 @@ const SCRIPT = `
     });
   });
 
-  var wanted = location.hash.replace('#', '');
-  var first = tabs.filter(function (t) { return t.getAttribute('data-id') === wanted; })[0] || tabs[0];
-  select(first.getAttribute('data-id'), true);
+  if (HEAD) {
+    // A head's page has no tabs: it asks for its own division and draws that.
+    current = 'divisions';
+    load(true);
+  } else {
+    // #divisions/finance opens the Finance tab of the Divisions view.
+    var wanted = location.hash.replace('#', '').split('/');
+    var first = tabs.filter(function (t) { return t.getAttribute('data-id') === wanted[0]; })[0] || tabs[0];
+    if (first.getAttribute('data-id') === 'divisions' && ['finance', 'online', 'salon'].indexOf(wanted[1]) >= 0) sub = wanted[1];
+    select(first.getAttribute('data-id'), true);
+  }
 
   setInterval(function () { if (!document.hidden) load(false); }, 10000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) load(false); });

@@ -11,6 +11,7 @@ import { dbUrl, localApi } from '../../worker/test/localdb.ts';
 // with SQL, shaped like the ones the worker writes, and removed afterwards. They sit in the year 8000s (briefs) and the year
 // 9000 (everything with a creation time), so they are the newest in every list and no other test's rows are read or changed.
 
+// The wave-2 reads (reports-db.test.ts) are given a clock on this test's own day, so the report rows other tests leave in the shared database are not read here.
 const api = localApi();
 if (!api) console.warn('SKIPPED console divisions database test: needs local Supabase (npm run db:start)');
 
@@ -110,14 +111,14 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
   const db = () => createClient(api!.url, api!.key, { auth: { persistSession: false, autoRefreshToken: false } });
 
   it('reads every part without a note, and the newest brief of each division is the one just written', async () => {
-    const loaded = await createDivisionsLoader({ db: db() })();
+    const loaded = await createDivisionsLoader({ db: db(), now: () => new Date(`${DAY}T12:00:00Z`) })();
     expect(loaded.notes).toEqual([]);
     expect(loaded.unread).toEqual([]);
     expect(loaded.divisions.map((d) => [d.division, d.brief?.brief_key, d.unread])).toEqual(briefKeys.map((key) => [key.split(':')[1], key, []]));
   });
 
   it('shows where each action stands: the used code, the action the head approved, a locked code, and no code', async () => {
-    const view = shapeDivisions(await createDivisionsLoader({ db: db() })(), new Date());
+    const view = shapeDivisions(await createDivisionsLoader({ db: db(), now: () => new Date(`${DAY}T12:00:00Z`) })(), new Date());
     const by = Object.fromEntries(view.divisions.map((d) => [d.id, d]));
     expect(by.finance!.brief).toMatchObject({ date: DAY, status: 'watch', writtenBy: 'model', headline: 'finance headline', ceoLine: 'finance line' });
     // The newest code was used (the older, expired one does not count), and the head approved action 2 only.
@@ -129,7 +130,7 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
   });
 
   it('pairs each question with its answer, and reads an answer as its outcome and reason only', async () => {
-    const loaded = await createDivisionsLoader({ db: db() })();
+    const loaded = await createDivisionsLoader({ db: db(), now: () => new Date(`${DAY}T12:00:00Z`) })();
     const view = shapeDivisions(loaded, new Date());
     const finance = view.divisions.find((d) => d.id === 'finance')!;
     const mine = finance.asked.filter((q) => ['What did online do?', 'What did salon do?'].includes(q.question));
@@ -145,7 +146,7 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
   });
 
   it('reads the newest CEO digest', async () => {
-    const view = shapeDivisions(await createDivisionsLoader({ db: db() })(), new Date());
+    const view = shapeDivisions(await createDivisionsLoader({ db: db(), now: () => new Date(`${DAY}T12:00:00Z`) })(), new Date());
     expect(view.digest).toMatchObject({ date: DAY, text: `Company status for ${DAY}:\nSalon: running normally.` });
     expect(view.digest!.reports).toEqual([
       { division: 'salon', state: 'in', status: 'normal' },
@@ -154,7 +155,7 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
   });
 
   it('reads nothing another table holds: the view holds no phone number, code hash or person id', async () => {
-    const text = JSON.stringify(shapeDivisions(await createDivisionsLoader({ db: db() })(), new Date()));
+    const text = JSON.stringify(shapeDivisions(await createDivisionsLoader({ db: db(), now: () => new Date(`${DAY}T12:00:00Z`) })(), new Date()));
     expect(text).not.toMatch(/demo-p-|code_hash|\+1\d{10}/);
   });
 });
