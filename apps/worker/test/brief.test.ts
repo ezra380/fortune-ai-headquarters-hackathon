@@ -306,7 +306,7 @@ describe('the text to the head', () => {
   it('carries the status, headline, findings and actions, then the tail', () => {
     const sms = briefSms(row(goodBrief as DivisionBrief), 'Finance', tail);
     expect(sms).toBe([
-      'Finance brief for 2026-10-27 (status WATCH)',
+      'George: Finance brief for 2026-10-27 (status WATCH)',
       goodBrief.headline,
       'Findings:',
       `- ${goodBrief.findings[0]!.text}`,
@@ -319,7 +319,15 @@ describe('the text to the head', () => {
 
   it('says so when a program wrote the brief', () => {
     const sms = briefSms(row(fallbackBrief('Finance', { metrics: mockMetrics, attention: [] }, 'normal'), { written_by: 'rule', status: 'normal' }), 'Finance', 'Nothing needs your approval today.');
-    expect(sms.split('\n')[0]).toBe('Finance brief for 2026-10-27 (status NORMAL) - written by rules: the usual write-up did not pass its number check');
+    expect(sms.split('\n')[0]).toBe('George: Finance brief for 2026-10-27 (status NORMAL) - written by rules: the usual write-up did not pass its number check');
+  });
+
+  it('starts with the name of the division\'s manager, whoever the head is', () => {
+    const first = (division: DivisionBriefRow['division'], label: string) =>
+      briefSms(row(goodBrief as DivisionBrief, { division }), label, tail).split('\n')[0];
+    expect(first('finance', 'Finance')).toBe('George: Finance brief for 2026-10-27 (status WATCH)');
+    expect(first('online', 'Online')).toBe('Georgette: Online brief for 2026-10-27 (status WATCH)');
+    expect(first('salon', 'Salon')).toBe('Cindy: Salon brief for 2026-10-27 (status WATCH)');
   });
 
   it('shortens to fit one message and never loses the tail', () => {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  DataRequest, DivisionBrief, DIVISION_ASSISTANT,
+  DataRequest, DivisionBrief, DIVISION_ASSISTANT, MANAGERS,
   type AssistantId, type Attention, type BriefStatus, type CodeModeResult, type Division, type DivisionData, type Metric, type WeeklyReport,
 } from '@fahq/contracts';
 import { untracedResultNumbers } from '@fahq/codemode';
@@ -571,11 +571,14 @@ async function writeOrFallback(run: Run, read: DivisionData, status: BriefStatus
 
 const STATUS_WORD: Record<BriefStatus, string> = { normal: 'NORMAL', watch: 'WATCH', act: 'ACT' };
 
-/** The text to the head: the status, headline, findings and actions (fewer words if it would not fit), then the tail. */
+/**
+ * The text to the head: the status, headline, findings and actions (fewer words if it would not fit), then the tail.
+ * It starts with the division manager's name (George, Georgette, Cindy): a text from a division is the manager's.
+ */
 export function briefSms(row: DivisionBriefRow, label: string, tail: string): string {
   const { brief } = row;
   const head = (words: 'full' | 'short') => [
-    `${label} brief for ${row.brief_date} (status ${STATUS_WORD[row.status]})${row.written_by === 'rule' ? ' - written by rules: the usual write-up did not pass its number check' : ''}`,
+    `${MANAGERS[row.division].manager}: ${label} brief for ${row.brief_date} (status ${STATUS_WORD[row.status]})${row.written_by === 'rule' ? ' - written by rules: the usual write-up did not pass its number check' : ''}`,
     brief.headline,
     ...(words === 'full' && brief.findings.length > 0 ? ['Findings:', ...brief.findings.map((f) => `- ${f.text}`)] : []),
     ...(brief.actions.length > 0 ? ['Actions:', ...brief.actions.map((a) => `Action ${a.rank}: ${a.title}${words === 'full' ? ` - ${a.why}` : ''}`)] : []),
