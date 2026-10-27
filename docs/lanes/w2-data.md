@@ -168,9 +168,12 @@ All three items were built (4 and 5 first, then 6) and proved live in one rebuil
   "Cannot reach Zetaris" after about five minutes. Row reads stay quick. **Timed per source** (14:09 ET, each source's
   part of the period view alone): 2.5 to 7 s each, the page days 6.9 s, ads (unchanged since version 1) 3.9 s: no new
   source stands out; every Zetaris read now pays about 2.5 s of fixed cost (slice 1's whole period read took 12 s), on a
-  machine at load 4 to 5. So the fix is not in the data: check the Zetaris containers' health and load (restarting them
-  is the orchestrator's call: the live worker reads version 1 there), or have the version 2 reads ask fewer statements
-  (a division read's derived table re-runs the whole period view). Version 1 (what the live worker reads) is untouched.
+  machine at load 4 to 5. **Narrowed at 14:19:** the online mart's period table for `2026-10-mtd` answered 82 of 82 in
+  28 s and its standing table 6 of 6 in 13 s, both equal to the oracle; only its **derived** table (the derived view
+  pivots the period view over all thirteen periods) passes five minutes. Fix options, each to be proved live: give the
+  Zetaris client a way to keep the connection (or ask the derived layer with a period filter the view can push down),
+  make the derived view read only the inputs it needs per period, or check the Zetaris containers' load (restarting
+  them is the orchestrator's call: the live worker reads version 1 there). Version 1 is untouched.
 - **Zetaris drops the connection on a long `ADD DATAMART TABLE`** (about five minutes, the derived tables): the table
   is still created; re-list with `SHOW DATAMART TABLES` before retrying (the setup script's `ensureMartsV2` stops on
   the dropped connection; rerunning it carries on).
@@ -182,7 +185,8 @@ All three items were built (4 and 5 first, then 6) and proved live in one rebuil
   cases fix); `npx vitest run packages/data` again after it: 15 files, 146 tests, all passed (13:51 ET).
 - Live, 12:19–14:08 ET: see `docs/data.md`, "Live run, 2026-10-27 12:19–14:08 ET": the period view 121 of 121 in four
   periods, the standing view 23 of 23, the six row reads and two series (duplicates, slow pages) equal to the oracle
-  after the return-cases fix. **Failed:** the online division read (dropped connection after five minutes). Not run in
-  the time box: the other nine periods, the derived view, the full `zetaris-setup.ts` comparison.
+  after the return-cases fix; the online mart's period table (82 of 82) and standing table (6 of 6) for `2026-10-mtd`.
+  **Failed:** the online division read and the online mart's derived table alone (dropped connection after five minutes).
+  Not run in the time box: the other nine periods of the period view, the full `zetaris-setup.ts` comparison.
 - Not run: the full `flock ~/.fahq-db-test.lock npm test` (it would have competed with the live proof for the machine
   and the source port 18121); run it at the merge.

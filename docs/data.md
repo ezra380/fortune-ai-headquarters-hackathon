@@ -565,7 +565,7 @@ links (act). On the synthetic year in `2026-10-mtd`: 7 repeat returners, 8 dupli
 for the owner and Online. Their lines are in the skills (Online stays at 48 body lines: two pairs of reads share a
 line each).
 
-**Live run, 2026-10-27 12:19–14:08 ET** (log `.local/live-s2.log` in the worktree):
+**Live run, 2026-10-27 12:19–14:19 ET** (logs `.local/live-s2.log`, `time-s2.log`, `online-s2.log` in the worktree):
 - **Rebuilt only what changed** (a scratch script over `v2DropStatements`, version 1 never on its list): the four
   marts, the twelve filter views, the three layer views, and the orders, refunds and messages row views and REST tables
   (their columns grew), 25 drops, 12:19–12:38 (a filter or layer view drop took 15 s to 4 min). Then `--v2` created
@@ -599,6 +599,12 @@ line each).
   (slice 1's whole 17-source period read took about 12 s), and the period view's 21 parts add up to the minutes seen.
   The machine was loaded (load average 4 to 5); Zetaris itself was not restarted (the live worker reads version 1
   from it).
+- **The derived layer is the one that does not answer** (14:13–14:19 ET, the online mart's three statements asked one
+  after another): `period_metrics` for `2026-10-mtd`, **82 of 82 in 28 s**; `standing_metrics`, **6 of 6 in 13 s**;
+  `derived_metrics`, dropped connection after five minutes. The derived view pivots the period view over all thirteen
+  periods (with the season index's windows) and so reads every source's every row; the one-period reads stay well
+  inside the limit. Until it is fixed, a version 2 division read (`getDivisionMetrics`, which asks all three together)
+  and the unsliced `getFinanceMetrics` can fail on Zetaris's five-minute connection.
 
 ## Future work, by owner decision
 
