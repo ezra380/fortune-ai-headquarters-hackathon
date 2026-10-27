@@ -149,3 +149,81 @@ Spec of record: docs/wave2.md ("The workers", "Reports"). How it works in plain 
   and listed in the full SCHEDULE). No contract or migration change; no new migration.
 - The weekly writer's purposes are `<division>.weekly_needs`, `<division>.weekly` and (finance) `finance.plans` (writePlans
   sets its own purpose). `WEEKLY_MAX_TOKENS` (default 12000) caps the writer.
+
+## Slice 3 of 3: personas and the digest (2026-10-27)
+
+### What works (with the tests that prove it)
+
+- **Personas** (`packages/profiles/skills/{finance,online,salon}/SKILL.md`, commit 51b3d21). Each Job section opens "You
+  are George, the finance manager. You report to Alan, ...", "You are Georgette, the online manager. You report to Emma,
+  ...", "You are Cindy, the salon manager. You report to Esther, ..." (each serves that head alone), then one line naming
+  every daily worker's segment; George's second line is his duty to know the salon's money and the online store's money
+  and keep them apart. A new last section, **Your weekly report**, says what it holds (summary, one section per worker
+  citing only its own ids, what was asked and answered, the CEO sentence; George: the profit goal of the week and three
+  paths; the others: up to three ranked actions), the asks on both sides, and that the head approves by one-time code.
+  "You never" and "End of work" are the same words on fewer lines, so the bodies are 47 / 44 / 43 lines (limit 48): room
+  for the data lane's read lines (finance net 0, online +1 so far, salon none yet). The "You can read" sections are
+  untouched. Tests: `packages/profiles/test/personas.test.ts` (13, no database; 12 seen failing first): "%s opens with
+  its manager, whom the manager reports to, and serves that head alone", "%s names the segment of every one of its daily
+  workers, and no other division's", "%s says what its weekly report holds, who asks whom, and that the head decides by
+  one-time code", "puts the weekly report after the daily brief ...", "names the asks between the managers on both
+  sides", "gives George the duty to know both businesses' money and keep it apart", "keeps Online and the Salon each to
+  their own business in the persona". profiles.test.ts and door.test.ts stay green (line limit, tool names, headings,
+  the "Numbers" section word for word, End of work).
+- **Texts start with the manager's name** (commit 096cd6c): `briefSms` opens "George: Finance brief for <date> (status
+  ...)" (Georgette: Online, Cindy: Salon); the weekly text already opened "George, Finance: your weekly report is in".
+  Test: brief.test.ts "the text to the head" (3 red first, incl. "starts with the name of the division's manager,
+  whoever the head is").
+- **Weekly CEO digest** (commit fb8cd32): the third weekly report of a run (Monday's, or a REPORT ALL text's) queues
+  `digest:<date>:weekly` (`:weekly:<text id>` for a text) for Owner HQ, payload `{ job: 'ceo_digest', date, weekOf,
+  request? }`. `buildWeeklyDigest` reuses the daily digest's lines, rules and `DIGEST_MAX` (480) under "Weekly reports,
+  week of <Monday>:", built from the day's `weekly_status` rows only (`store.weeklyStatusMessages`); the day's own digest
+  still reads only `division_status`. Kept as `digestdoc:<key>`, texted once as `digest-sms:<key>`; a weekly digest is
+  never partial (refused plainly). Tests: weekly.test.ts "the weekly CEO digest" (3: one line per division by the daily
+  rules; no line and the length limit; its own key); weekly-flow.test.ts "the third weekly report of the day queues the
+  weekly CEO digest: one line per division from the managers' CEO lines, texted to the owner once" (two of three queue
+  nothing; a brief's line that day is ignored; the deliver receipt says so; one doc, one text, a re-run sends nothing
+  new; no model call). Mutations, each red then reverted: no queue; queue on every report; reading the briefs' lines;
+  another heading.
+- **Seed** (commit 9c4a786): `supabase/seed.sql` names the assistants `George (finance)`, `Georgette (online)`, `Cindy
+  (salon)` and the heads `Demo Alan`, `Demo Emma`, `Demo Esther` (fictional 555 numbers, no email). Test:
+  `supabase/tests/seed.test.ts` (4, reads the file, no database; 3 red on the old seed).
+- **docs/workers.md** rewritten: the managers and their personas, the clock table, a worker's day, the weekly report,
+  the asks between the managers (table), approvals, the weekly CEO digest with an example, how to run a worker or a
+  report by hand (REPORT texts, or a keyed SQL insert with a request id), and what is still to come.
+- Proof: `npm run typecheck` clean; full suite under the lock (`flock ~/.fahq-db-test.lock npm test`): 62 files passed,
+  9 skipped (no Meterless engines in this worktree), 1121 tests passed, 173 skipped, no unhandled errors (slice 2 ended
+  at 60 files and 1099 tests: +2 files, +22 tests).
+
+### Not done in this slice
+
+- Replies to a command (APPROVE confirmations, REPORT acknowledgments, the finance proposal texts in flows.ts) keep their
+  wording and do not start with the manager's name. Doing it centrally in common.ts `text()` would change dozens of exact
+  reply assertions in brief-flow, digest-flow, chain and departments tests, most of which need the Meterless engines and
+  cannot run in this worktree. Only the brief and weekly report texts carry the name.
+- No partial weekly digest: if one division's weekly report stops for good, no weekly digest is sent (the receipts and
+  the console show which is missing). The owner's STATUS still shows the day's digest only.
+- The shared local database was not re-seeded: its assistants still read 'Finance assistant' / 'Online assistant', its
+  people 'Demo Finance Owner' and the like, and its stored profiles keep the old skills (see the merge notes).
+
+### What the merge must know
+
+- Files outside the lane's list, each minimal: `apps/worker/test/brief-flow.test.ts` (the exact brief text's first line
+  now "George: Finance brief for ..."), `apps/worker/test/chain.test.ts` and `apps/worker/test/digest-flow.test.ts` (the
+  owner's and Alan's names read from `public.people` instead of the literals 'Demo Owner' / 'Demo Finance Owner', so they
+  pass on the shared database as it is and after a reset with the new seed), `supabase/seed.sql`, new
+  `supabase/tests/seed.test.ts`. These three test files need the Meterless engines and are skipped here: they typecheck,
+  but run them once at the merge (`flock ~/.fahq-db-test.lock npx vitest run apps/worker/test/brief-flow.test.ts
+  apps/worker/test/chain.test.ts apps/worker/test/digest-flow.test.ts`). digest-flow's `toContain('Finance brief for')`
+  still holds.
+- The SKILL.md personas reach a worker that reads profiles from the database only after `npx tsx scripts/seed-profiles.ts
+  --force` (it keeps what the owner approved). The data lane's "You can read" lines merge beside them without touching the
+  same lines; keep each body at 48 lines or fewer (finance 47 here).
+- The console's "latest CEO digest" reads the newest `digestdoc:%` row, so on a weekly day it shows the weekly digest
+  (type `ceo_digest`, plus `weekOf`) once it is in. If the console should keep showing the day's digest, filter
+  `body->>weekOf is null` there (delivery lane's file).
+- To show the managers' names on the shared stack without a reset (optional, the owner's call): `update public.assistants
+  set display_name = 'George (finance)' where id = 'finance'; update public.assistants set display_name = 'Georgette
+  (online)' where id = 'online';`. People names on the shared stack are better left until a reset, since other lanes'
+  tests in their own worktrees still expect 'Demo Finance Owner'.
+- No contract or migration change; no new migration.
