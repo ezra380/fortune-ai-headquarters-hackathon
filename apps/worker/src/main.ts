@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { DataPort, DeliveryPort } from '@fahq/contracts';
+import { Period, type DataPort, type DeliveryPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { createCodeModeRunner } from '@fahq/codemode';
 import { modelsFromEnv, positiveInt } from '@fahq/models';
@@ -67,7 +67,7 @@ const deps: WorkerDeps = {
   now: () => new Date(),
   worker: `worker@${os.hostname()}:${process.pid}`,
   live: true,
-  period: env.FINANCE_PERIOD === '2026-10-mtd' ? '2026-10-mtd' : '2026-09',
+  period: Period.safeParse(env.FINANCE_PERIOD).data ?? '2026-09',
   smsLive: Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_API_KEY_SID && env.TWILIO_API_KEY_SECRET),
   printers: { owner: env.PRINTNODE_PRINTER_OWNER || undefined, finance: env.PRINTNODE_PRINTER_FINANCE || undefined },
   printDir: path.join(root, '.local/print'),

@@ -1,4 +1,4 @@
-import type { Division, Metric, ProposalDocument } from './schemas.ts';
+import type { Division, Metric, Period, ProposalDocument } from './schemas.ts';
 
 // Ports are the seams between lanes. A lane implements a port; lane A's worker consumes it.
 
@@ -40,6 +40,11 @@ export interface DataPort {
    * leaving a script to guess labels. Optional: a port without it just gets a shorter description.
    */
   readonly catalog?: readonly MetricInfo[];
+  /**
+   * The periods this port serves, oldest first, so a read tool offers exactly those. Optional: a port
+   * without it serves DEFAULT_PERIODS.
+   */
+  readonly periods?: readonly Period[];
 }
 
 export type MetricInfo = Pick<Metric, 'id' | 'label' | 'unit' | 'business'> & {

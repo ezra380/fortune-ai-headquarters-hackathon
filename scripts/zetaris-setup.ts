@@ -10,11 +10,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  CONTAINER, FINANCE_VIEW, MART, MART_TABLE, MART_VIEW, METRIC_BY_ID, computeFinanceMetricsLocally, financeQuery, financeViewBody,
+  CONTAINER, FINANCE_VIEW, MART, MART_TABLE, MART_VIEW, METRIC_BY_ID, VERSIONS, computeAll, financeQuery, financeViewBody,
   martQuery, martSql,
 } from '../packages/data/src/finance-sql.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from '../packages/data/src/source-server.ts';
-import { PERIODS, generateBusiness, type Period } from '../packages/data/src/synthetic.ts';
+import { generateBusiness, type Period } from '../packages/data/src/synthetic.ts';
 import { createZetarisClient, zetarisConfigFromEnv } from '../packages/data/src/zetaris-client.ts';
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -117,11 +117,12 @@ try {
   const business = generateBusiness();
   async function prove(label: string, queryFor: (period: Period) => string, detail: boolean): Promise<number> {
     let failures = 0;
-    for (const period of Object.keys(PERIODS) as Period[]) {
+    const oracle = computeAll(business, 1);
+    for (const period of VERSIONS[1].periods) {
       const t = Date.now();
       const rows = await client.run(queryFor(period), 500);
       const got = new Map(rows.map(([id, v]) => [id ?? '', Number(v)]));
-      const want = computeFinanceMetricsLocally(business, period);
+      const want = oracle.get(period)!;
       const problems: string[] = [];
       for (const [id, w] of want) {
         const g = got.get(id);

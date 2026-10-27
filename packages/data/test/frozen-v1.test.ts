@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { computeFinanceMetricsLocally, financeViewBody } from '../src/finance-sql.ts';
-import { generateBusiness } from '../src/synthetic.ts';
+import { computeAll, financeViewBody } from '../src/finance-sql.ts';
+import { generateBusiness, generateYear } from '../src/synthetic.ts';
 
 // The numbers of hq/foundation @ bb29578, frozen. Version 1 of the data is what the live worker reads
 // (the view fortune_hq.finance_metrics), and run logs, plans and docs/submission quote these values.
@@ -53,11 +53,35 @@ describe('version 1 is frozen at bb29578', () => {
   });
 
   it('keeps all 33 metric values of 2026-09 and 2026-10-mtd', () => {
-    const b = generateBusiness();
+    const all = computeAll(generateBusiness(), 1);
+    expect([...all.keys()]).toEqual(['2026-09', '2026-10-mtd']);
     for (const period of ['2026-09', '2026-10-mtd'] as const) {
-      const got = Object.fromEntries(computeFinanceMetricsLocally(b, period));
       expect(Object.keys(FROZEN_V1[period])).toHaveLength(33);
-      expect(got).toEqual(FROZEN_V1[period]);
+      expect(Object.fromEntries(all.get(period)!)).toEqual(FROZEN_V1[period]);
+    }
+  });
+});
+
+describe('version 2 leaves those numbers where they were', () => {
+  const year = generateYear();
+
+  it("carries version 1's rows unchanged among its own", () => {
+    const v1 = generateBusiness();
+    const pairs: [readonly object[], readonly object[]][] = [
+      [v1.online.orders, year.online.orders], [v1.salon.appointments, year.salon.appointments],
+      [v1.marketing.ads, year.marketing.ads], [v1.marketing.email, year.marketing.email],
+    ];
+    for (const [rows, all] of pairs) {
+      const inYear = new Set(all.map((r) => JSON.stringify(r)));
+      expect(rows.filter((r) => !inYear.has(JSON.stringify(r)))).toEqual([]);
+    }
+  });
+
+  it('computes the same 33 values for 2026-09 and 2026-10-mtd from thirteen months of rows', () => {
+    const all = computeAll(year, 2);
+    for (const period of ['2026-09', '2026-10-mtd'] as const) {
+      const got = all.get(period)!;
+      expect(Object.fromEntries(Object.keys(FROZEN_V1[period]).map((id) => [id, got.get(id)]))).toEqual(FROZEN_V1[period]);
     }
   });
 });

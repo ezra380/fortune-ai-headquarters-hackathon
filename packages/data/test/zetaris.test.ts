@@ -3,10 +3,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Metric } from '@fahq/contracts';
 import { createZetarisDataPort } from '../src/index.ts';
 import {
-  FINANCE_VIEW, FINANCE_VIEW_COLUMNS, MART, MART_TABLE, MART_VIEW, METRICS, computeFinanceMetricsLocally, financeQuery, financeViewBody, martQuery, martSql,
+  FINANCE_VIEW, FINANCE_VIEW_COLUMNS, MART, MART_TABLE, MART_VIEW, METRICS, METRIC_BY_ID, VERSIONS, computeAll, financeQuery, financeViewBody, martQuery,
+  martSql,
 } from '../src/finance-sql.ts';
 import { createSourceServer } from '../src/source-server.ts';
-import { generateBusiness } from '../src/synthetic.ts';
+import { generateBusiness, generateYear } from '../src/synthetic.ts';
 import { createZetarisClient, zetarisConfigFromEnv } from '../src/zetaris-client.ts';
 
 const KEY = 'test-api-key-never-logged';
@@ -42,6 +43,15 @@ describe('source server', () => {
     expect((await fetch(`${base}/online/orders`, { method: 'POST' })).status).toBe(405);
     expect((await fetch(`${base}/customers`)).status).toBe(404);
     expect((await fetch(`${base}/health`)).status).toBe(200);
+  });
+
+  it("serves version 2 under /v2 and leaves version 1's routes as they were", async () => {
+    const year = generateYear();
+    const get = async (path: string) => ((await (await fetch(`${base}${path}`)).json()) as { data: unknown[] }).data;
+    expect(await get('/v2/online/orders')).toHaveLength(year.online.orders.length);
+    expect(await get('/v2/marketing/ads')).toHaveLength(year.marketing.ads.length);
+    expect(await get('/v2/finance/budgets')).toEqual(year.finance.budgets);
+    expect(JSON.stringify(await get('/marketing/ads'))).toBe(JSON.stringify(generateBusiness().marketing.ads));
   });
 });
 
@@ -81,7 +91,9 @@ describe('finance view', () => {
   const sql = financeViewBody();
 
   it('defines every metric once, with the data-quality rule and no statement breaks', () => {
-    for (const m of METRICS) expect(sql.split(`'${m.id}'`).length - 1).toBe(1);
+    expect(VERSIONS[1].metrics).toHaveLength(33);
+    for (const m of VERSIONS[1].metrics) expect(sql.split(`'${m.id}'`).length - 1).toBe(1);
+    for (const m of METRICS.filter((d) => d.since === 2)) expect(sql).not.toContain(`'${m.id}'`);
     expect(sql).not.toContain(';');
     expect(sql).toContain("product_line IN ('fortune', 'mazali', 'tuni', 'accessories')");
     expect(sql).toContain('price_usd >= 0');
@@ -90,12 +102,27 @@ describe('finance view', () => {
       expect(sql.split(`fortune_hq.${v} `).length - 1).toBe(1);
     }
     expect(() => financeQuery('2026-13' as never)).toThrow('unknown period');
+    expect(() => financeQuery('2026-08')).toThrow('unknown period'); // version 1 serves two periods
+  });
+
+  it('version 2 lives in its own container: thirteen periods, five sources, every metric once', () => {
+    const v2 = financeViewBody(2);
+    expect(v2).not.toContain('fortune_hq.');
+    for (const m of METRICS) expect(v2.split(`'${m.id}'`).length - 1).toBe(1);
+    for (const v of ['online_orders', 'salon_appointments', 'marketing_ads', 'marketing_email', 'finance_budgets']) {
+      expect(v2.split(`fortune_hq_v2.${v} `).length - 1).toBe(1);
+    }
+    expect(v2).toContain("month_start BETWEEN '2025-10-01' AND '2026-10-26'");
+    expect(v2).toContain("WHEN order_date BETWEEN '2026-02-01' AND '2026-02-28' THEN '2026-02'");
+    expect(v2).toContain("channel = 'google' AND status = 'approved'");
+    expect(v2).not.toContain(';');
+    expect(financeQuery('2025-10', 2)).toBe("SELECT metric_id, value FROM fortune_hq_v2.period_metrics WHERE period = '2025-10'");
   });
 
   it('keeps the planted bad rows out of revenue and counts them as rejected', () => {
     const b = generateBusiness();
-    const sept = computeFinanceMetricsLocally(b, '2026-09');
-    const oct = computeFinanceMetricsLocally(b, '2026-10-mtd');
+    const sept = computeAll(b, 1).get('2026-09')!;
+    const oct = computeAll(b, 1).get('2026-10-mtd')!;
     expect(sept.get('m:online.dq.rejected_orders')).toBe(1); // demo-o-bad-negative, Sept 14
     expect(oct.get('m:online.dq.rejected_orders')).toBe(1); // demo-o-bad-line, Oct 3
     expect(sept.get('m:salon.dq.rejected_appointments')).toBe(1); // demo-a-bad-price, Sept 22
@@ -138,7 +165,7 @@ describe('Virtual Data Mart', () => {
   });
 
   it('is read through the same Zetaris client as the view: one statement, rows as strings', async () => {
-    const oracle = computeFinanceMetricsLocally(generateBusiness(), '2026-09');
+    const oracle = computeAll(generateBusiness(), 1).get('2026-09')!;
     const z = fakeZetaris((sql) => {
       expect(sql).toBe(martQuery('2026-09'));
       return { body: { data: [...oracle].map(([id, v]) => [id, v]) } };
@@ -150,7 +177,7 @@ describe('Virtual Data Mart', () => {
 
 describe('Zetaris DataPort', () => {
   const b = generateBusiness();
-  const oracle = computeFinanceMetricsLocally(b, '2026-09');
+  const oracle = computeAll(b, 1).get('2026-09')!;
   const rows = [...oracle].map(([id, v]) => [id, String(v)]);
   const noSources = async () => {};
 
@@ -174,7 +201,35 @@ describe('Zetaris DataPort', () => {
     expect(again.queryHash).toBe(r.queryHash);
     // The catalog a read tool lists is exactly what the view returns, with the same labels.
     expect(port.catalog!.map((c) => c.id).sort()).toEqual(r.metrics.map((m) => m.id).sort());
-    for (const m of r.metrics) expect(port.catalog!.find((c) => c.id === m.id)).toEqual({ id: m.id, label: m.label, unit: m.unit, business: m.business });
+    for (const m of r.metrics) {
+      expect(port.catalog!.find((c) => c.id === m.id)).toEqual({ id: m.id, label: m.label, unit: m.unit, business: m.business, divisions: METRIC_BY_ID.get(m.id)!.divisions });
+    }
+    expect(port.periods).toEqual(['2026-09', '2026-10-mtd']);
+  });
+
+  it('reads version 2 only when FAHQ_DATA_VERSION=2, from its own view, for any of its thirteen periods', async () => {
+    const year = generateYear();
+    const oracle = computeAll(year, 2).get('2025-12')!;
+    const z = fakeZetaris((sql) => {
+      expect(sql).toBe("SELECT metric_id, value FROM fortune_hq_v2.period_metrics WHERE period = '2025-12'");
+      return { body: { data: [...oracle].map(([id, v]) => [id, String(v)]) } };
+    });
+    const port = createZetarisDataPort({ ...env, FAHQ_DATA_VERSION: '2' }, { fetch: z.fetchFn, ensureSources: noSources });
+    expect(port.periods).toHaveLength(13);
+    expect(port.catalog!.map((c) => c.id)).toContain('m:online.budget.meta.cap');
+    const r = await port.getFinanceMetrics({ asOf: '2026-10-26T12:00:00.000Z', period: '2025-12' });
+    expect(r.view).toBe('fortune_hq_v2.period_metrics');
+    expect(r.metrics.find((m) => m.id === 'm:online.ads.meta.spend')!.value).toBe(oracle.get('m:online.ads.meta.spend'));
+    expect(r.metrics).toHaveLength(oracle.size);
+    const v1 = await createZetarisDataPort(env, { fetch: z.fetchFn, ensureSources: noSources }).getFinanceMetrics({ asOf: '2026-10-26T12:00:00.000Z', period: '2025-12' }).catch((e: Error) => e.message);
+    expect(v1).toBe('unknown period "2025-12"');
+    expect(() => createZetarisDataPort({ ...env, FAHQ_DATA_VERSION: '3' })).toThrow('FAHQ_DATA_VERSION must be 1 or 2');
+  });
+
+  it('refuses under version 1 a metric only version 2 serves', async () => {
+    const z = fakeZetaris(() => ({ body: { data: [...rows, ['m:online.ads.meta.spend', '10']] } }));
+    const port = createZetarisDataPort(env, { fetch: z.fetchFn, ensureSources: noSources });
+    await expect(port.getFinanceMetrics({ asOf: '2026-10-26T12:00:00.000Z', period: '2026-09' })).rejects.toThrow('does not know');
   });
 
   it('fails loudly on unknown metrics, bad values, no rows and unknown periods', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AssistantId } from '@fahq/contracts';
+import { PERIOD_KEYS, type AssistantId } from '@fahq/contracts';
 import { createReadTools, pick, type ReadToolContext } from '../src/read-tools.ts';
 import type { Explained } from '../src/explain.ts';
 import type { ApprovalSummary, MessageRow, WorkReportRow } from '../src/store.ts';
@@ -124,6 +124,22 @@ describe('read tools', () => {
     await expect(tools.recall_my_decisions!.run({ query: '' })).rejects.toThrow(/argument "query"/);
     await expect(tools.my_lessons!.run({ surprise: true })).rejects.toThrow(/does not take/);
     await expect(tools.open_items!.run(null)).resolves.toBeTruthy(); // no arguments is fine for a no-argument tool
+  });
+
+  it('offers exactly the periods the data serves: the last two by default, all thirteen from a version 2 port', async () => {
+    const v1 = createReadTools(setup().ctx, 'finance');
+    for (const name of ['get_finance_metrics', 'get_online_metrics', 'get_salon_metrics']) {
+      expect(v1[name]!.signature.startsWith('(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<')).toBe(true);
+    }
+    const periods = PERIOD_KEYS;
+    const asked: string[] = [];
+    const data = { ...dataMock, periods, getFinanceMetrics: async (q: { asOf: string; period: string }) => { asked.push(q.period); return dataMock.getFinanceMetrics(q); } };
+    const v2 = createReadTools(setup({ data }).ctx, 'finance');
+    expect(v2.get_finance_metrics!.signature).toContain('{ period: "2025-10" | "2025-11" | ');
+    expect(v2.get_finance_metrics!.signature).toContain('"2026-09" | "2026-10-mtd" }');
+    await v2.get_salon_metrics!.run({ period: '2025-12' });
+    expect(asked).toEqual(['2025-12']);
+    await expect(v2.get_finance_metrics!.run({ period: '2026-10' })).rejects.toThrow(/argument "period"/);
   });
 
   type Keyed = { view: string; queryHash: string; metrics: Record<string, { label: string; value: number; unit: string; business: string }> };

@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { AssistantId, type DataPort } from '@fahq/contracts';
+import { AssistantId, DEFAULT_PERIODS, type DataPort, type Period } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { loadProfiles, skillFrontmatter, type ReadToolName } from '@fahq/profiles';
 
@@ -20,7 +20,6 @@ export type BrainMcpDeps = {
   now: () => Date;
 };
 
-const period = z.enum(['2026-09', '2026-10-mtd']);
 const query = z.string().min(2).max(300);
 const limit = z.number().int().min(1).max(10).optional();
 
@@ -40,7 +39,7 @@ export function registerSkillPrompt(server: McpServer, profileId: AssistantId): 
   );
 }
 
-async function readMetrics(deps: BrainMcpDeps, forPeriod: z.infer<typeof period>, only?: 'online') {
+async function readMetrics(deps: BrainMcpDeps, forPeriod: Period, only?: 'online') {
   if (!deps.data) return refuse('Business data is not connected yet (packages/data).');
   try {
     const r = await deps.data.getFinanceMetrics({ asOf: deps.now().toISOString(), period: forPeriod });
@@ -71,6 +70,8 @@ export function createBrainMcpServer(deps: BrainMcpDeps, profileId: AssistantId 
   const may = (name: ReadToolName) => reads.includes(name);
   const server = new McpServer({ name: 'fortune-brain', version: '0.1.0' });
   registerSkillPrompt(server, profileId);
+  // Exactly the periods the data serves (version 1: the last two).
+  const period = z.enum(deps.data?.periods ?? DEFAULT_PERIODS);
 
   if (may('get_finance_metrics')) {
     server.registerTool(

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AssistantId, type DataPort, type ReadTool } from '@fahq/contracts';
+import { AssistantId, DEFAULT_PERIODS, type DataPort, type Period, type ReadTool } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { explainProposal } from './explain.ts';
 import { summarizeUsage } from './reports.ts';
@@ -21,7 +21,6 @@ const MAX_ROWS = 50;
 const MAX_HOURS = 24 * 30;
 const HOUR_MS = 3_600_000;
 
-const Period = z.enum(['2026-09', '2026-10-mtd']);
 const Limit = z.number().min(1).optional();
 const Query = z.string().min(1).max(200);
 const Hours = z.number().positive();
@@ -78,7 +77,11 @@ const Suggestion = '{ kind: string; about: string; text: string }';
 const Explained = '{ proposal: { id: string; createdAt: string; from: string; requestText: string; view: string; queryHash: string; pickedBy: "model" | "rule" | null; failedDepartments: string[] } | null; plans: { rank: number; title: string; department: string; originalRank: number; why: string | null; cites: string[] }[]; cited: { id: string; label: string; value: number; unit: string; business: string }[]; approvals: { action: string; status: string; planRank: number | null; decidedAt: string | null }[]; decisions: { by: string; action: string; planRank: number | null; at: string }[]; record: { askedBy: string | null; request: { text: string; from: string; at: string } | null; cites: string[] } | null; notes: string[] }';
 
 export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Record<string, ReadTool> {
-  const financeMetrics = async (period: z.infer<typeof Period>, only?: 'online' | 'salon') => {
+  // Exactly the periods the data serves (version 1: the last two), so a script is never offered one it cannot read.
+  const served = ctx.data?.periods ?? DEFAULT_PERIODS;
+  const PeriodArg = z.enum(served);
+  const periodArgs = `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')} })`;
+  const financeMetrics = async (period: Period, only?: 'online' | 'salon') => {
     if (!ctx.data) throw new Error('Business data is not connected, so there are no metrics to read.');
     const { metrics, queryHash, view } = await ctx.data.getFinanceMetrics({ asOf: ctx.now().toISOString(), period });
     return {
@@ -103,22 +106,22 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     tool({
       name: 'get_finance_metrics',
       description: `Salon, online and combined business metrics for a period, read from Zetaris. Each metric keeps its business label.${metricIds()}`,
-      signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
-      schema: z.object({ period: Period }).strict(),
+      signature: `${periodArgs} => Promise<${Metrics}>`,
+      schema: z.object({ period: PeriodArg }).strict(),
       run: ({ period }) => financeMetrics(period),
     }),
     tool({
       name: 'get_online_metrics',
       description: `Only the online store metrics for a period, read from Zetaris.${metricIds('online')}`,
-      signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
-      schema: z.object({ period: Period }).strict(),
+      signature: `${periodArgs} => Promise<${Metrics}>`,
+      schema: z.object({ period: PeriodArg }).strict(),
       run: ({ period }) => financeMetrics(period, 'online'),
     }),
     tool({
       name: 'get_salon_metrics',
       description: `Only the salon metrics for a period, read from Zetaris (synthetic data here, standing in for the head stylist's own backend).${metricIds('salon')}`,
-      signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
-      schema: z.object({ period: Period }).strict(),
+      signature: `${periodArgs} => Promise<${Metrics}>`,
+      schema: z.object({ period: PeriodArg }).strict(),
       run: ({ period }) => financeMetrics(period, 'salon'),
     }),
     tool({

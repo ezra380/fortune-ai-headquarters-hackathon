@@ -64,6 +64,17 @@ export type FrontDoorDecision = z.infer<typeof FrontDoorDecision>;
 
 // ---- Business numbers ---------------------------------------------------------------------
 
+// The periods business numbers cover, oldest first: twelve whole months, then the month so far. They
+// never overlap, so every row belongs to exactly one.
+export const PERIOD_KEYS = [
+  '2025-10', '2025-11', '2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08',
+  '2026-09', '2026-10-mtd',
+] as const;
+export const Period = z.enum(PERIOD_KEYS);
+export type Period = z.infer<typeof Period>;
+/** The periods a data port serves when it does not list its own (version 1 of the data: the last two). */
+export const DEFAULT_PERIODS: readonly Period[] = ['2026-09', '2026-10-mtd'];
+
 export const MetricId = z.string().regex(/^m:(salon|online|combined)\.[a-z0-9_.]+$/);
 
 export const Metric = z.object({

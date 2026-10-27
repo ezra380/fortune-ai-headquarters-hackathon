@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { describe, expect, it, vi } from 'vitest';
-import { AssistantId, type DataPort, type Metric } from '@fahq/contracts';
+import { AssistantId, PERIOD_KEYS, type DataPort, type Metric } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { loadProfiles } from '@fahq/profiles';
 import { createBrainMcpServer, createCodeModeBrainServer, type BrainMcpDeps } from '../src/index.ts';
@@ -97,6 +97,18 @@ describe('profile doors (plain tools)', () => {
     expect(r.metrics.map((m) => m.id)).toEqual(['m:online.revenue.mazali']);
     expect(r.metrics.every((m) => m.business === 'online')).toBe(true);
     await client.close();
+  });
+
+  it('offers exactly the periods the data serves: the last two by default, all thirteen from a version 2 port', async () => {
+    const periodsOf = async (deps: BrainMcpDeps) => {
+      const client = await connect(createBrainMcpServer(deps, 'finance'));
+      const tool = (await client.listTools()).tools.find((x) => x.name === 'get_finance_metrics')!;
+      await client.close();
+      return (tool.inputSchema.properties as { period: { enum: string[] } }).period.enum;
+    };
+    const { deps } = makeDeps();
+    expect(await periodsOf(deps)).toEqual(['2026-09', '2026-10-mtd']);
+    expect(await periodsOf({ ...deps, data: { ...deps.data!, periods: PERIOD_KEYS } })).toEqual([...PERIOD_KEYS]);
   });
 
   it('gives the owner and finance doors both businesses, still separate and labeled', async () => {

@@ -1,4 +1,4 @@
-import { checkPlans, type DataPort, type Metric, type ModelPort, type Plan, type ProfitPlans } from '@fahq/contracts';
+import { checkPlans, type DataPort, type Metric, type ModelPort, type Period, type Plan, type ProfitPlans } from '@fahq/contracts';
 import type { AssistantMemory } from '@fahq/brain';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import { DEPARTMENT_LABEL, departmentLine, sliceFor, type Department, type Origin } from './departments.ts';
@@ -64,7 +64,7 @@ export async function writePlans(deps: {
   memory: AssistantMemory;
   now: Date;
   request: string;
-  period: '2026-09' | '2026-10-mtd';
+  period: Period;
   /** Lessons the owner adopted for this assistant (AssistantMemory.lessons), newest first. */
   lessons?: readonly string[];
 }): Promise<PlanResult> {
@@ -129,7 +129,7 @@ export async function writePlans(deps: {
   throw new PlanError(objections, { inputTokens, outputTokens });
 }
 
-async function readMetrics(deps: { data?: DataPort; now: Date; period: '2026-09' | '2026-10-mtd' }) {
+async function readMetrics(deps: { data?: DataPort; now: Date; period: Period }) {
   if (!deps.data) throw new Error('business data is not connected');
   return deps.data.getFinanceMetrics({ asOf: deps.now.toISOString(), period: deps.period });
 }
