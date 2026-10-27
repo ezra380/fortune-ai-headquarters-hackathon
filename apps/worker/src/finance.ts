@@ -1,4 +1,4 @@
-import { checkPlans, type DataPort, type Metric, type ModelPort, type Period, type Plan, type ProfitPlans } from '@fahq/contracts';
+import { DEFAULT_PERIODS, Period, checkPlans, type DataPort, type Metric, type ModelPort, type Plan, type ProfitPlans } from '@fahq/contracts';
 import type { AssistantMemory } from '@fahq/brain';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import { DEPARTMENT_LABEL, countNouns, departmentLine, sliceFor, type Department, type Origin } from './departments.ts';
@@ -127,6 +127,20 @@ export async function writePlans(deps: {
     };
   }
   throw new PlanError(objections, { inputTokens, outputTokens });
+}
+
+/**
+ * The period the worker plans for (FINANCE_PERIOD): one the data serves, else 2026-09 (served by every data
+ * version) with a note to log. Under data version 1 only the last two periods are served, so "2026-08" would
+ * pass startup and then make every finance read fail.
+ */
+export function financePeriod(value: string | undefined, served: readonly Period[] = DEFAULT_PERIODS): { period: Period; note: string | null } {
+  const fallback: Period = '2026-09';
+  if (!value) return { period: fallback, note: null };
+  const parsed = Period.safeParse(value);
+  if (parsed.success && served.includes(parsed.data)) return { period: parsed.data, note: null };
+  const why = parsed.success ? `this data serves only ${served.join(', ')}` : 'it is not a period';
+  return { period: fallback, note: `FINANCE_PERIOD "${value.slice(0, 20)}" is not used (${why}); planning for ${fallback}` };
 }
 
 async function readMetrics(deps: { data?: DataPort; now: Date; period: Period }) {

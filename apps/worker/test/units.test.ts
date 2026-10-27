@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantMemory } from '@fahq/brain';
-import { WorkReport, type Receipt } from '@fahq/contracts';
+import { PERIOD_KEYS, WorkReport, type Receipt } from '@fahq/contracts';
 import { parseCommand } from '../src/commands.ts';
 import { departmentLine } from '../src/departments.ts';
-import { PLAN_SYSTEM, PlanError, planDigest, writePlans } from '../src/finance.ts';
+import { PLAN_SYSTEM, PlanError, financePeriod, planDigest, writePlans } from '../src/finance.ts';
 import { checkReview, renderFacts } from '../src/manager.ts';
 import { buildWorkReport, codeModeDetail, numberTrace, summarizeUsage, type UsageRow } from '../src/reports.ts';
 import { dataMock, mockMetrics, modelMock, onlinePlans, salonPlans, validPlans } from './fixtures.ts';
@@ -177,6 +177,19 @@ const rc = (step: string, over: Partial<Receipt> = {}): Receipt => ({
 const task = { id: TASK, assistant_id: 'finance' as const, kind: 'mailbox' };
 const report = (receipts: Receipt[], over: { outcome?: 'done' | 'failed' | 'retrying'; error?: string | null; seconds?: number } = {}) =>
   buildWorkReport({ task, outcome: over.outcome ?? 'done', error: over.error ?? null, receipts, startedAt: t0, endedAt: new Date(t0.getTime() + (over.seconds ?? 5) * 1000) });
+
+// Review 2026-10-27: FINANCE_PERIOD=2026-08 passed startup under data version 1, then every finance read failed.
+describe('financePeriod (FINANCE_PERIOD at startup)', () => {
+  it('uses a period the data serves, and otherwise plans for 2026-09 with a reason to log', () => {
+    expect(financePeriod(undefined)).toEqual({ period: '2026-09', note: null });
+    expect(financePeriod('2026-10-mtd')).toEqual({ period: '2026-10-mtd', note: null });
+    expect(financePeriod('2026-08')).toEqual({
+      period: '2026-09', note: 'FINANCE_PERIOD "2026-08" is not used (this data serves only 2026-09, 2026-10-mtd); planning for 2026-09',
+    });
+    expect(financePeriod('2026-08', PERIOD_KEYS)).toEqual({ period: '2026-08', note: null });
+    expect(financePeriod('2026-13')).toEqual({ period: '2026-09', note: 'FINANCE_PERIOD "2026-13" is not used (it is not a period); planning for 2026-09' });
+  });
+});
 
 describe('buildWorkReport', () => {
   it('turns receipts into a report that passes the contract: steps, usage and one sentence', () => {

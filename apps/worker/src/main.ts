@@ -3,11 +3,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Period, type DataPort, type DeliveryPort } from '@fahq/contracts';
+import { DEFAULT_PERIODS, type DataPort, type DeliveryPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { createCodeModeRunner } from '@fahq/codemode';
 import { modelsFromEnv, positiveInt } from '@fahq/models';
 import { loadProfiles } from '@fahq/profiles';
+import { financePeriod } from './finance.ts';
 import type { WorkerDeps } from './flows.ts';
 import { runConcurrently } from './runner.ts';
 import { createStore } from './store.ts';
@@ -36,6 +37,10 @@ if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
 
 const models = modelsFromEnv(env);
 const profiles = loadProfiles(env);
+const data = await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)');
+// A period the data does not serve would pass startup and fail every finance read, so it falls back, said plainly.
+const planning = financePeriod(env.FINANCE_PERIOD, data?.periods ?? DEFAULT_PERIODS);
+if (planning.note) console.error(`worker: ${planning.note}`);
 // How many claim loops run in this one process. claim_task skips rows another loop holds, outbox claims are
 // atomic, the World Model queues its writes and H-MEM writes are synchronous, so loops never share a task.
 const concurrency = positiveInt(env, 'WORKER_CONCURRENCY', 2);
@@ -49,7 +54,7 @@ const deps: WorkerDeps = {
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
   // The safety screen in front of every free text; GUARD=off turns it off.
   guard: models.guard ? { model: models.guardModel } : null,
-  data: await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)'),
+  data,
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
   // Each assistant's read-only profile: its skill text, the model for each job, its read tools.
   // Reasoning on before each script: in live runs it read the right metrics more often, at about 35 s a
@@ -67,7 +72,7 @@ const deps: WorkerDeps = {
   now: () => new Date(),
   worker: `worker@${os.hostname()}:${process.pid}`,
   live: true,
-  period: Period.safeParse(env.FINANCE_PERIOD).data ?? '2026-09',
+  period: planning.period,
   smsLive: Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_API_KEY_SID && env.TWILIO_API_KEY_SECRET),
   printers: { owner: env.PRINTNODE_PRINTER_OWNER || undefined, finance: env.PRINTNODE_PRINTER_FINANCE || undefined },
   printDir: path.join(root, '.local/print'),

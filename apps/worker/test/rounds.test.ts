@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ProfitPlans, type Division, type Metric, type MetricInfo, type Receipt } from '@fahq/contracts';
+import { createZetarisDataPort } from '@fahq/data';
 import { countNouns, departmentLine, departmentsFor, isDepartment, originsOf, sliceFor } from '../src/departments.ts';
 import { planDigest } from '../src/finance.ts';
 import { buildWorkReport, codeModeDetail } from '../src/reports.ts';
@@ -45,6 +46,18 @@ describe('who is asked, and what each may read', () => {
     // Without divisions in the catalog, planUse still holds and the business rule decides.
     const plain = catalog.map(({ divisions: _d, ...rest }) => rest);
     expect(sliceFor('salon', all, plain).map((m) => m.id)).toEqual(['m:salon.revenue.wash_set']);
+  });
+
+  // Review 2026-10-27: the live default (data version 1) plans by division too, since its catalog names divisions.
+  it("slices the real version 1 catalog: Finance plans from 28 of its 33 metrics, Salon from 11, Online from 22", () => {
+    const port = createZetarisDataPort({}, { client: { run: async () => [] }, ensureSources: async () => undefined });
+    const metrics = port.catalog!.map((m): Metric => ({ ...mockMetrics[0]!, id: m.id as Metric['id'], label: m.label, unit: m.unit, business: m.business }));
+    expect(metrics).toHaveLength(33);
+    const ids = (d: 'finance' | 'salon' | 'online') => sliceFor(d, metrics, port.catalog).map((m) => m.id);
+    expect([ids('finance').length, ids('salon').length, ids('online').length]).toEqual([28, 11, 22]);
+    expect(metrics.map((m) => m.id).filter((id) => !ids('finance').includes(id)).sort()).toEqual([
+      'm:online.dq.rejected_orders', 'm:online.email.click_rate', 'm:online.email.sends', 'm:salon.dq.rejected_appointments', 'm:salon.no_shows.count',
+    ]);
   });
 
   it('takes the count words of count metrics only from the catalog', () => {
