@@ -164,9 +164,9 @@ function isDateYear(before: string, year: number, named: ReadonlySet<number>): b
  *
  * Not claims: list numbers ("1." at the start of a line, after any punctuation), digits inside words
  * ("2nd", "4pm", "30min"), the digits that close a row id ("SUP-2201", "demo-rt-01234"; isRowId in
- * @fahq/contracts, so "high-35%" and "ROAS-9.5x" are still read), calendar dates (2026-09, 2026-09-15), and a four-digit year in a real date
- * context: right after a month or a quarter ("September 2026", "Q3 2026"), or after "since", "during"
- * or a sentence-opening "In" when the facts (or `context`, such as the question) name that year.
+ * @fahq/contracts, so "high-35%" and "ROAS-9.5x" are still read), calendar dates (2026-09, 2026-09-15),
+ * and a four-digit year in a real date context: right after a month or a quarter ("September 2026",
+ * "Q3 2026"), or after "since", "during" or a sentence-opening "In" when the facts (or `context`, such as the question) name that year.
  * Every other number from 1900 to 2100 is an amount like any other ("spend of 1950", "brought in 1999").
  *
  * Numbers written in words (zero to ninety, twenty-one, hundred, dozen, "a couple of", ...) cannot be

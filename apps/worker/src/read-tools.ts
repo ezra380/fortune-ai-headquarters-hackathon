@@ -62,7 +62,6 @@ function scrub(value: unknown): unknown {
   return value;
 }
 
-
 function tool<S extends z.ZodType>(def: {
   name: string;
   description: string;
