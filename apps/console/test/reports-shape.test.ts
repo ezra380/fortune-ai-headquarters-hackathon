@@ -264,6 +264,9 @@ describe('the Divisions view: where each path or action of a weekly report stand
     expect(div(view(noNote), 'finance').reports.weekly!.sent).toBe(false);
     expect(standing({ weekly: weeklyRow('finance', weeklyReport('finance'), { message_id: null }) })).toEqual(Array(3).fill(['no_code', null]));
     expect(standing({})).toEqual(Array(3).fill(['no_code', null]));
+    // A code that is somehow on file for a report that was never sent is not a code for it.
+    const stray = { status: 'pending', expires_at: '2026-10-28T00:00:00Z', decided_at: null };
+    expect(standing({ weekly: weeklyRow('finance', weeklyReport('finance'), { message_id: null }), approval: stray })).toEqual(Array(3).fill(['no_code', null]));
   });
 
   it('says a code is waiting, with when it ends, until the clock passes it', () => {

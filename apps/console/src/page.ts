@@ -137,7 +137,7 @@ const SCRIPT = `
   var ABOUT = {
     salon: 'The salon assistant is a stand-in for Cindy, working on synthetic salon data. Cindy\\u2019s own app keeps her family and personal data; none of it is read here.'
   };
-  var CHANNELS = { sms: 'Text message', print: 'Printout' };
+  var CHANNELS = { sms: 'Text message', print: 'Printout', email: 'Email' };
 
   function h(tag, cls, text) {
     var e = document.createElement(tag);

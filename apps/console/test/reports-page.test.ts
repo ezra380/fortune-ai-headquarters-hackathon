@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { DEPARTMENTS } from '../src/departments.ts';
 import type { BriefDivision, RawDivisionReports, RawDivisions } from '../src/divisions.ts';
 import { PAGE_CSP, PAGE_HTML } from '../src/page.ts';
-import { shapeDivisions } from '../src/shape.ts';
+import { shapeDepartment, shapeDivisions } from '../src/shape.ts';
 import { drawPage } from './draw.ts';
 import { approved, NOW, raw, reportsOf, state, weeklyReport, weeklyRow, weeklyRowId, workerReport, workerRow, workerRowId } from './reports-fixtures.ts';
 
@@ -269,6 +270,21 @@ describe('a head\'s own page', () => {
   it('does not take a division from the address that is not one of the three: it draws the owner\'s view', async () => {
     const page = await drawPage('divisions', payload(), { search: '?division=hq', noTabs: false });
     expect(page.fetched).toEqual(['/api/divisions']);
+  });
+});
+
+describe("a department's texts and printouts, with the email wave 2 adds", () => {
+  it('names an email row as an email, with its status, and still blanks a code in it', async () => {
+    const finance = DEPARTMENTS.find((d) => d.id === 'finance')!;
+    const view = shapeDepartment({
+      assistant: null, counts: { openTasks: 0, proposals: 0, pendingApprovals: 0 }, tasks: [], messages: [], approvals: [], receipts: [], reports: [], decisions: [], timeline: [], notes: [],
+      outbox: [{ channel: 'email', status: 'sent', created_at: '2026-10-27T11:30:00Z', sent_at: '2026-10-27T11:31:00Z', last_error: null, body: 'Weekly report for Alan, code 482915' }],
+    }, finance, NOW);
+    const text = await (await drawPage('finance', JSON.parse(JSON.stringify(view)))).text();
+    expect(text).toContain('Texts and printouts');
+    expect(text).toContain('\nEmail\n');
+    expect(text).toContain('Weekly report for Alan, code ••••••');
+    expect(text).not.toContain('482915');
   });
 });
 

@@ -116,7 +116,7 @@ export function createConsoleServer(deps: ConsoleDeps): http.Server {
     }
     // Both parts of the name are checked values (a division, a worker id, a date), so the name is always plain.
     const name = doc.kind === 'weekly' ? `${doc.division}-weekly-${doc.weekly.weekOf}.pdf` : `${doc.worker.workerId.replace('.', '-')}-${doc.worker.day}.pdf`;
-    return send(req, res, 200, 'application/pdf', pdf, { 'Content-Disposition': `inline; filename="${name}"`, 'Content-Security-Policy': "default-src 'none'" });
+    return send(req, res, 200, 'application/pdf', pdf, { 'Content-Disposition': `inline; filename="${name}"` });
   }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
