@@ -313,7 +313,11 @@ An independent review listed one blocker, two majors and five minors. What each 
   division read pays for all 21 sources. The next fix, same pattern: build each division's period filter view from
   `periodSubsetBody(divisionIds(division, 'period'))` (the salon would read four sources, not 21), prove it live, and
   re-time. Not done in this round.
-- **Not proved (time):** the tier-0 baseline (16449bf's period body on this instance now); the unsliced
+- **Tier-0 baseline** (15:32–15:33 ET, same instance, one after another, load 3.7 to 4.4): `16449bf`'s own period body,
+  asked inline for `2026-09`, 81 rows in 22.8 s; this branch's period view for `2026-09`, 121 rows in 56.1 s. So the
+  structure costs about 2.5 times the base for half again as many metrics; slice 2's 2 to 3.5 minutes a period were
+  mostly the machine's load (other lanes' suites), not the new sources.
+- **Not proved (time):** the unsliced
   `getFinanceMetrics`; the full `zetaris-setup.ts --v2` comparison over all 13 periods (every mart table, the series).
   Run `npx tsx scripts/zetaris-setup.ts --v2 --verify-only` before W1/W2 rely on version 2, on a quiet machine.
 - One live hazard learned: the live scripts' in-process source server (port 18121) dies with the script; stopping a
