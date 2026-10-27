@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { Division, Metric, type DataPort, type MetricInfo, type Period } from '@fahq/contracts';
-import { VERSIONS, dataVersionFromEnv, financeQuery, financeViewBody } from './finance-sql.ts';
+import { Division, Metric, PERIOD_KEYS, type DataPort, type MetricInfo, type MetricSeries, type Period } from '@fahq/contracts';
+import { VERSIONS, dataVersionFromEnv, financeQuery, financeViewBody, round } from './finance-sql.ts';
 import {
-  CATALOG_V2, MARTS_V2, attentionFor, divisionHashText, divisionIds, divisionQueries, layerHashText, layerQueries, type LayerQuery,
+  CATALOG_V2, CATALOG_V2_BY_ID, MARTS_V2, attentionFor, divisionHashText, divisionIds, divisionQueries, layerHashText, layerQueries, seriesHashText,
+  seriesQuery, type LayerQuery,
 } from './divisions.ts';
+import { ROW_CAP, checkRowRead, rowHashText, rowQuery, rowSql, rowsResult } from './rows.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from './source-server.ts';
 import { createZetarisClient, zetarisConfigFromEnv, type ZetarisClient } from './zetaris-client.ts';
 import { SOURCE_PORT_V2_DEFAULT } from './zetaris-objects.ts';
@@ -13,9 +15,32 @@ export { createSourceServer, ensureSourceServer, SOURCE_PORT_DEFAULT } from './s
 export { createZetarisClient, zetarisConfigFromEnv, ZetarisError } from './zetaris-client.ts';
 export { METRICS, FINANCE_VIEW, PERIOD_VIEW_V2, VERSIONS, computeAll, dataVersionFromEnv, type DataVersion } from './finance-sql.ts';
 export { AS_OF, DERIVED, STANDING_METRICS, computeLayers } from './layers.ts';
-export { ATTENTION, CATALOG_V2, MARTS_V2, attentionFor, divisionIds, divisionSlice } from './divisions.ts';
+export { ATTENTION, CATALOG_V2, MARTS_V2, attentionFor, divisionIds, divisionSlice, seriesOf } from './divisions.ts';
+export { ROW_CAP, WANTED_VIEWS, oracleRows } from './rows.ts';
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+const WHOLE_MONTHS: readonly Period[] = PERIOD_KEYS.filter((p) => p !== '2026-10-mtd');
+
+/** Zetaris's rows of a series as points, oldest first: each a served period once, each value a number. */
+function seriesPoints(metricId: string, raw: readonly string[][]): MetricSeries['points'] {
+  const points = raw.map(([period, value]) => {
+    const n = Number(value);
+    if (!PERIOD_KEYS.includes(period as Period)) throw new Error(`Zetaris returned an unknown period for ${metricId}`);
+    if (value === undefined || value === '' || !Number.isFinite(n)) throw new Error(`Zetaris returned a non-numeric value for ${metricId}`);
+    return { period: period as Period, value: n };
+  });
+  if (new Set(points.map((p) => p.period)).size !== points.length) throw new Error(`Zetaris returned a period twice for ${metricId}`);
+  if (points.length === 0) throw new Error(`Zetaris returned no values for ${metricId}`);
+  return points.sort((a, b) => PERIOD_KEYS.indexOf(a.period) - PERIOD_KEYS.indexOf(b.period));
+}
+
+/** The range and the mean of the whole months present (the season index's denominator), rounded as the metric is. */
+function seriesStats(points: MetricSeries['points'], unit: Metric['unit']): MetricSeries['stats'] {
+  const values = points.map((p) => p.value);
+  const year = points.filter((p) => WHOLE_MONTHS.includes(p.period)).map((p) => p.value);
+  const mean = year.length === 0 ? null : round(year.reduce((t, v) => t + v, 0) / year.length, unit === 'ratio' ? 4 : 2);
+  return { min: Math.min(...values), max: Math.max(...values), mean12: mean };
+}
 /** One statement of a read, with the ids it may return. */
 type Ask = Pick<LayerQuery, 'sql' | 'table' | 'period'> & { allowed: ReadonlySet<string> };
 
@@ -83,7 +108,9 @@ export function createZetarisDataPort(
   }
 
   const base: DataPort = {
-    catalog: defs.map(({ id, label, unit, business, divisions, layer }): MetricInfo => ({ id, label, unit, business, divisions, layer })),
+    catalog: defs.map(({ id, label, unit, business, divisions, layer, about, nouns, planUse }): MetricInfo => ({
+      id, label, unit, business, divisions, layer, ...(about ? { about } : {}), ...(nouns ? { nouns } : {}), ...(planUse === false ? { planUse } : {}),
+    })),
     periods,
 
     async health() {
@@ -117,6 +144,30 @@ export function createZetarisDataPort(
       const metrics = await read(queries.map((q) => ({ ...q, allowed: ids(q.layer, d.data) })), asOf, queryHash);
       if (metrics.length === 0) throw new Error(`Zetaris returned no ${d.data} metrics for ${period}`);
       return { division: d.data, metrics, attention: attentionFor(metrics), queryHash, view: MARTS_V2[d.data] };
+    },
+
+    // The rows behind a standing number: one fixed statement over the source's row view, every matching row,
+    // and the totals added up here.
+    async readRows({ asOf: _asOf, ...input }) {
+      const read = checkRowRead(input);
+      const q = rowQuery(read);
+      await ensureSources();
+      const raw = await client.run(rowSql(q), ROW_CAP + 1);
+      return rowsResult(read, raw, sha256(rowHashText(q)));
+    },
+
+    // One metric over every period, from the division's own mart.
+    async getMetricSeries({ division, metricId }) {
+      const d = Division.safeParse(division);
+      if (!d.success) throw new Error(`unknown division "${String(division).slice(0, 40)}"`);
+      const q = seriesQuery(d.data, String(metricId));
+      const def = CATALOG_V2_BY_ID.get(String(metricId))!;
+      await ensureSources();
+      const points = seriesPoints(def.id, await client.run(q.sql, 50));
+      return {
+        metricId: def.id, label: def.label, unit: def.unit, business: def.business, points, stats: seriesStats(points, def.unit),
+        queryHash: sha256(seriesHashText(d.data, q)), view: q.table,
+      };
     },
   };
 }

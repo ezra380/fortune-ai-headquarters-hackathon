@@ -221,8 +221,13 @@ describe('Zetaris DataPort', () => {
     // The catalog a read tool lists is exactly what the view returns, with the same labels.
     expect(port.catalog!.map((c) => c.id).sort()).toEqual(r.metrics.map((m) => m.id).sort());
     for (const m of r.metrics) {
-      expect(port.catalog!.find((c) => c.id === m.id)).toEqual({ id: m.id, label: m.label, unit: m.unit, business: m.business, divisions: METRIC_BY_ID.get(m.id)!.divisions, layer: 'period' });
+      const { divisions, nouns, about } = METRIC_BY_ID.get(m.id)!;
+      expect(port.catalog!.find((c) => c.id === m.id)).toEqual({
+        id: m.id, label: m.label, unit: m.unit, business: m.business, divisions, layer: 'period', ...(nouns ? { nouns } : {}), ...(about ? { about } : {}),
+      });
     }
+    // A count carries the words that name what it counts, for the plan checker.
+    expect(port.catalog!.find((c) => c.id === 'm:salon.no_shows.count')!.nouns).toEqual(['no-show', 'no-shows']);
     expect(port.periods).toEqual(['2026-09', '2026-10-mtd']);
     // Version 1's hash is computed exactly as at bb29578: its view body, then the query.
     expect(r.queryHash).toBe(createHash('sha256').update(`${financeViewBody(1)}\n--\n${financeQuery('2026-09')}`).digest('hex'));

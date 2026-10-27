@@ -65,18 +65,18 @@ export const OPS_SOURCES: Record<OpsSource, SourceSpec> = {
 
 // ---- Conditions ---------------------------------------------------------------------------
 
-const isNullCond = (col: string): Cond => ({ sql: `${col} IS NULL`, js: (r) => isNull(r[col]) });
+export const isNullCond = (col: string): Cond => ({ sql: `${col} IS NULL`, js: (r) => isNull(r[col]) });
 const notNullCond = (col: string): Cond => ({ sql: `${col} IS NOT NULL`, js: (r) => !isNull(r[col]) });
-const inCond = (col: string, xs: readonly string[]): Cond => ({ sql: `${col} IN (${quoted(xs)})`, js: (r) => oneOf(xs, r[col]) });
-const days = (from: string, to: string) => (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
+export const inCond = (col: string, xs: readonly string[]): Cond => ({ sql: `${col} IN (${quoted(xs)})`, js: (r) => oneOf(xs, r[col]) });
+export const days = (from: string, to: string) => (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
 
 /**
  * Minutes from a message's arrival to the shop's first answer (NULL when unanswered). The day difference comes
  * from DATEDIFF on dates and the rest from the clock digits, so no session time zone can shift it.
  */
-const clock = (col: string) => `(CAST(substr(${col}, 12, 2) AS INT) * 60 + CAST(substr(${col}, 15, 2) AS INT))`;
+export const clock = (col: string) => `(CAST(substr(${col}, 12, 2) AS INT) * 60 + CAST(substr(${col}, 15, 2) AS INT))`;
 const REPLY_MINUTES = `(DATEDIFF(substr(first_reply_at, 1, 10), received_date) * 1440 + ${clock('first_reply_at')} - ${clock('received_at')})`;
-const moment = (v: unknown) => Date.parse(`${String(v).replace(' ', 'T')}Z`);
+export const moment = (v: unknown) => Date.parse(`${String(v).replace(' ', 'T')}Z`);
 const replyMinutes = (r: Row) => (isNull(r.first_reply_at) ? null : (moment(r.first_reply_at) - moment(r.received_at)) / 60_000);
 const answeredWithin = (minutes: number): Cond => ({
   sql: `${REPLY_MINUTES} <= ${minutes}`, js: (r) => { const m = replyMinutes(r); return m !== null && m <= minutes; },
@@ -85,10 +85,10 @@ const notAnsweredWithin = (minutes: number): Cond => ({
   sql: `(first_reply_at IS NULL OR ${REPLY_MINUTES} > ${minutes})`, js: (r) => { const m = replyMinutes(r); return m === null || m > minutes; },
 });
 
-const FINISHED = inCond('status', ['done', 'shipped']);
-const STILL_OPEN = inCond('status', ['open', 'in_repair']);
-const UNPAID = isNullCond('paid_date');
-const inDays = (n: number) => new Date(Date.parse(`${AS_OF}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+export const FINISHED = inCond('status', ['done', 'shipped']);
+export const STILL_OPEN = inCond('status', ['open', 'in_repair']);
+export const UNPAID = isNullCond('paid_date');
+export const inDays = (n: number) => new Date(Date.parse(`${AS_OF}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
 // ---- Metrics ------------------------------------------------------------------------------
 

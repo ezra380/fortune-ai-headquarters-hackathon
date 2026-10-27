@@ -16,6 +16,47 @@ export type DivisionData = {
   view: string;
 };
 
+/**
+ * One fixed question about the rows behind a standing number. Never free text: each is a fixed filter the
+ * data port turns into its own SQL, so no model or person's words reach a query.
+ * - repairs: open (waiting for payment or in repair), late (open over two weeks), done (finished in the last 30 days)
+ * - invoices: unpaid supplier invoices: all open, overdue, or due in the next 30 days; one business or both
+ * - waiting: customer messages from the last week still waiting for a first answer, older than N hours
+ * - low_stock: products at or below their reorder point on the data date, most viewed first
+ */
+export type RowRead =
+  | { table: 'repairs'; status: 'open' | 'late' | 'done' }
+  | { table: 'invoices'; status: 'open' | 'overdue' | 'due_30d'; business?: 'salon' | 'online' }
+  | { table: 'waiting'; olderThanHours: number }
+  | { table: 'low_stock' };
+
+/**
+ * The rows of one RowRead (every matching row; the port refuses a read too large to return whole) and their
+ * totals, added up by the port so a script never adds numbers itself. Money totals stay per business.
+ */
+export type RowsData = {
+  table: RowRead['table'];
+  rows: Record<string, string | number | null>[];
+  totals: Record<string, number | Record<string, number>>;
+  /** The day the rows are as of (the data date), not the time of the read. */
+  dataDate: string;
+  queryHash: string;
+  view: string;
+};
+
+/** One metric's value in every period a division's mart holds it, oldest first, with its range and yearly mean. */
+export type MetricSeries = {
+  metricId: string;
+  label: string;
+  unit: Metric['unit'];
+  business: Metric['business'];
+  points: { period: Period; value: number }[];
+  /** mean12: the average over the twelve whole months present (the season index divides by it); null when none. */
+  stats: { min: number; max: number; mean12: number | null };
+  queryHash: string;
+  view: string;
+};
+
 /** packages/data: business numbers through Zetaris. Read-only. */
 export interface DataPort {
   /**
@@ -24,6 +65,13 @@ export interface DataPort {
    * sliced by business (see the worker's divisionData).
    */
   getDivisionMetrics?(input: { division: Division; period: string; asOf: string }): Promise<DivisionData>;
+  /** The rows behind a standing number, through Zetaris. Optional (data version 2 only). */
+  readRows?(input: RowRead & { asOf: string }): Promise<RowsData>;
+  /**
+   * One period or derived metric over every period, from the division's own mart. Refuses an id the division
+   * does not read and a standing number (it has one value, as of the data date). Optional (data version 2 only).
+   */
+  getMetricSeries?(input: { division: Division; metricId: string; asOf: string }): Promise<MetricSeries>;
   /** Cheap reachability check; never throws. */
   health(): Promise<{ ok: boolean; detail: string }>;
   /**
@@ -56,6 +104,12 @@ export type MetricInfo = Pick<Metric, 'id' | 'label' | 'unit' | 'business'> & {
    * Absent: 'period'.
    */
   layer?: 'period' | 'derived' | 'standing';
+  /** Thresholds and caveats a reader needs, kept out of the label. */
+  about?: string;
+  /** For a count: the words that name what it counts ("invoice", "invoices"), so a plan's small counts are checked. */
+  nouns?: readonly string[];
+  /** false keeps it out of plan writing (the validator cannot check its kind of number yet). Absent: true. */
+  planUse?: boolean;
 };
 
 export type PrintResult =

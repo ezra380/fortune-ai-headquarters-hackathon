@@ -74,6 +74,13 @@ export const V2_TABLES = [
 
 export type Statement = { label: string; sql: string };
 
+/** A source's row view body: its REST table's items, every column by name. Part of a row read's query hash. */
+export function rowViewBody(view: (typeof V2_TABLES)[number]['view']): string {
+  const t = V2_TABLES.find((x) => x.view === view);
+  if (!t) throw new Error(`no version 2 row view named ${view}`);
+  return `SELECT ${t.cols.map((c) => `item.${c}`).join(', ')} FROM ${t.db.toLowerCase()}.${t.table} LATERAL VIEW explode(data) AS item`;
+}
+
 /** The division filter views, every division and layer (twelve), each over its layer view. */
 function filterViews(): Statement[] {
   return DIVISIONS.flatMap((d) => LAYERS.map((l) => ({
@@ -93,7 +100,7 @@ export function v2CreateStatements(sourceBase: string): Statement[] {
     })),
     ...V2_TABLES.map((t) => ({
       label: `${CONTAINER_V2}.${t.view}`,
-      sql: `CREATE SCHEMASTORE VIEW ${t.view} WITH CONTAINER ${CONTAINER_V2} AS SELECT ${t.cols.map((c) => `item.${c}`).join(', ')} FROM ${t.db.toLowerCase()}.${t.table} LATERAL VIEW explode(data) AS item`,
+      sql: `CREATE SCHEMASTORE VIEW ${t.view} WITH CONTAINER ${CONTAINER_V2} AS ${rowViewBody(t.view)}`,
     })),
     { label: PERIOD_VIEW_V2, sql: `CREATE SCHEMASTORE VIEW period_metrics WITH CONTAINER ${CONTAINER_V2} AS ${financeViewBody(2)}` },
     { label: DERIVED_VIEW_V2, sql: `CREATE SCHEMASTORE VIEW derived_metrics WITH CONTAINER ${CONTAINER_V2} AS ${derivedViewBody()}` },

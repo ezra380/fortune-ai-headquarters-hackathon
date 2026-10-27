@@ -97,6 +97,31 @@ export function layerHashText(queries: readonly LayerQuery[]): string {
   return [...LAYERS.map((l) => LAYER_VIEW[l].body()), ...queries.map((q) => q.sql)].join('\n--\n');
 }
 
+/**
+ * The statement a metric's series runs: every period of one id, from the division's own mart table for its layer.
+ * The id in the SQL is the catalog's own; an id the division does not read, or a standing one, is refused.
+ */
+export function seriesQuery(division: Division, metricId: string): { layer: Exclude<Layer, 'standing'>; table: string; sql: string } {
+  const def = CATALOG_V2_BY_ID.get(metricId);
+  if (!def || !def.divisions.includes(division)) throw new Error(`the ${division} division does not read a metric "${metricId.slice(0, 80)}"`);
+  if (def.layer === 'standing') throw new Error(`${def.id} is a standing number: one value as of the data date, with no series`);
+  const table = `${MARTS_V2[division]}.${martTableName(def.layer)}`;
+  return { layer: def.layer, table, sql: `SELECT period, value FROM ${table} WHERE metric_id = '${def.id}'` };
+}
+
+/** What a series read's query hash covers: the layer view, the division's filter view, the mart table and the statement. */
+export function seriesHashText(division: Division, q: ReturnType<typeof seriesQuery>): string {
+  const added = divisionMartSql(division).tables.find((t) => t.table === martTableName(q.layer))!;
+  return [LAYER_VIEW[q.layer].body(), filterViewBody(division, q.layer), added.sql, q.sql].join('\n--\n');
+}
+
+/** The oracle's series of one metric: its value in every period that has one, oldest first. */
+export function seriesOf(layers: Layers, metricId: string): { period: Period; value: number }[] {
+  const layer = CATALOG_V2_BY_ID.get(metricId)?.layer;
+  if (layer !== 'period' && layer !== 'derived') return [];
+  return [...layers[layer]].flatMap(([period, values]) => (values.has(metricId) ? [{ period, value: values.get(metricId)! }] : []));
+}
+
 /** The oracle's answer to one division read: its own ids, each layer's value for the period (standing: as of the data date). */
 export function divisionSlice(layers: Layers, division: Division, period: Period): Map<string, number> {
   const out = new Map<string, number>();
