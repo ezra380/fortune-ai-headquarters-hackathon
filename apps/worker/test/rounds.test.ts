@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ProfitPlans, type Metric, type Receipt } from '@fahq/contracts';
+import { ProfitPlans, type Division, type Metric, type MetricInfo, type Receipt } from '@fahq/contracts';
 import { departmentLine, departmentsFor, isDepartment, originsOf, sliceFor } from '../src/departments.ts';
 import { planDigest } from '../src/finance.ts';
 import { buildWorkReport, codeModeDetail } from '../src/reports.ts';
@@ -26,10 +26,31 @@ describe('who is asked, and what each may read', () => {
     expect(sliceFor('salon', [])).toEqual([]);
   });
 
+  it("gives each department its division's metrics when the data names divisions, and none kept out of plan writing", () => {
+    const combined: Metric = { ...mockMetrics[0]!, id: 'm:combined.dq.rejected_invoices', business: 'combined' };
+    const all = [...mockMetrics, combined];
+    const catalog: MetricInfo[] = all.map(({ id, label, unit, business }) => ({ id, label, unit, business, divisions: [] }));
+    const reads = (id: string, divisions: Division[], more: Partial<MetricInfo> = {}) => Object.assign(catalog.find((c) => c.id === id)!, { divisions, ...more });
+    reads('m:online.revenue.mazali', ['online', 'finance']);
+    reads('m:online.ads.google.spend', ['online', 'finance']);
+    reads('m:online.ads.google.roas', ['online']); // online's own: finance does not get it
+    reads('m:salon.revenue.wash_set', ['salon', 'finance']);
+    reads('m:salon.appointments.count', ['salon', 'finance'], { planUse: false });
+    reads('m:combined.dq.rejected_invoices', ['finance', 'hq']);
+    expect(sliceFor('finance', all, catalog).map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:salon.revenue.wash_set', 'm:combined.dq.rejected_invoices']);
+    expect(sliceFor('online', all, catalog).map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:online.ads.google.roas']);
+    expect(sliceFor('salon', all, catalog).map((m) => m.id)).toEqual(['m:salon.revenue.wash_set']);
+    // A metric the catalog does not know is not planned from.
+    expect(sliceFor('finance', all, catalog.slice(1)).map((m) => m.id)).not.toContain('m:online.revenue.mazali');
+    // Without divisions in the catalog, planUse still holds and the business rule decides.
+    const plain = catalog.map(({ divisions: _d, ...rest }) => rest);
+    expect(sliceFor('salon', all, plain).map((m) => m.id)).toEqual(['m:salon.revenue.wash_set']);
+  });
+
   it('names the department and its data in one line', () => {
     expect(departmentLine('salon')).toBe('You are writing as the Salon department. Your data is only the salon metrics provided (the online business is not yours to plan for).');
     expect(departmentLine('online')).toBe('You are writing as the Online department. Your data is only the online metrics provided (the salon business is not yours to plan for).');
-    expect(departmentLine('finance')).toBe('You are writing as the Finance department. Your data is every metric provided (salon, online and combined).');
+    expect(departmentLine('finance')).toBe('You are writing as the Finance department. Your data is the money metrics of both businesses provided, side by side (salon, online and combined).');
   });
 
   it('reads the origins a final proposal stores, and ignores anything malformed', () => {

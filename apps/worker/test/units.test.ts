@@ -115,6 +115,21 @@ describe('writePlans', () => {
     await expect(writePlans({ ...base, model: cross, department: 'online' })).rejects.toThrow(/unknown metric m:salon/);
   });
 
+  it("for a department, plans from its division's metrics when the port's catalog names divisions, even from a round's source", async () => {
+    const divisions: Record<string, ('finance' | 'online' | 'salon' | 'hq')[]> = {
+      'm:online.revenue.mazali': ['online', 'finance'], 'm:online.ads.google.spend': ['online', 'finance'], 'm:online.ads.google.roas': ['online'],
+      'm:salon.revenue.wash_set': ['salon', 'finance'], 'm:salon.appointments.count': ['salon'],
+    };
+    const data = { ...dataMock, catalog: mockMetrics.map(({ id, label, unit, business }) => ({ id, label, unit, business, divisions: divisions[id] })) };
+    const model = modelMock([JSON.stringify(validPlans)]);
+    const source = { metrics: mockMetrics, queryHash: 'd'.repeat(64), view: 'the_view' };
+    // Online's own ad return is not Finance's to plan from, so plans citing it fail on Finance's slice.
+    await expect(writePlans({ ...base, data, source, model, department: 'finance' })).rejects.toThrow(/unknown metric m:online.ads.google.roas/);
+    expect((JSON.parse(model.inputs[0]!.user).metrics as { id: string }[]).map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:salon.revenue.wash_set']);
+    const online = await writePlans({ ...base, data, source, model: modelMock([JSON.stringify(onlinePlans)]), department: 'online' });
+    expect(online.metrics.map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:online.ads.google.roas']);
+  });
+
   it('reads the metrics once for a whole round: with a source it never touches the data port', async () => {
     const source = { metrics: mockMetrics, queryHash: 'd'.repeat(64), view: 'the_view' };
     const result = await writePlans({ ...base, data: undefined, source, model: modelMock([JSON.stringify(salonPlans)]), department: 'salon' });

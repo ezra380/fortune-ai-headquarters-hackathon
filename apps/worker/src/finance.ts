@@ -55,7 +55,7 @@ export type PlanResult = {
 export async function writePlans(deps: {
   model: ModelPort;
   planModel: string;
-  /** Where the metrics are read when `source` is not given. */
+  /** Where the metrics are read when `source` is not given; its catalog says who reads each metric either way. */
   data?: DataPort;
   /** A department of a round: it plans from its own slice of the metrics, under its own name. */
   department?: Department;
@@ -69,7 +69,7 @@ export async function writePlans(deps: {
   lessons?: readonly string[];
 }): Promise<PlanResult> {
   const read = deps.source ?? (await readMetrics(deps));
-  const metrics = deps.department ? sliceFor(deps.department, read.metrics) : [...read.metrics];
+  const metrics = deps.department ? sliceFor(deps.department, read.metrics, deps.data?.catalog) : [...read.metrics];
   const { queryHash, view } = read;
   const purpose = `${deps.department ?? 'finance'}.plans`;
   if (metrics.length === 0) throw new PlanError([deps.department ? `the data source returned no metrics for the ${DEPARTMENT_LABEL[deps.department]} department` : 'the data source returned no metrics']);
