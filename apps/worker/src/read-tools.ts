@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { AssistantId, DEFAULT_PERIODS, type DataPort, type Period, type ReadTool } from '@fahq/contracts';
+import {
+  AssistantId, DEFAULT_PERIODS, MetricId, type DataPort, type Division, type DivisionData, type Period, type ReadTool, type RowRead,
+} from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { explainProposal } from './explain.ts';
 import { summarizeUsage } from './reports.ts';
@@ -72,7 +74,21 @@ function tool<S extends z.ZodType>(def: {
 
 // Keyed by metric id, so a script reads metrics["m:salon.no_shows.count"] instead of searching labels
 // (live runs matched "no-shows" against the label "Salon no-shows", found nothing and reported 0).
-const Metrics = '{ view: string; queryHash: string; metrics: { [id: string]: { label: string; value: number; unit: "usd" | "count" | "ratio" | "percent"; business: "salon" | "online" | "combined" } } }';
+// A division read (data version 2) adds each metric's period ("standing" = as of the data date) and the
+// attention rules that fired.
+const Unit = '"usd" | "count" | "ratio" | "percent"';
+const Business = '"salon" | "online" | "combined"';
+const Attention = '{ metricId: string; level: "watch" | "act"; rule: string }';
+const Metrics = `{ view: string; queryHash: string; metrics: { [id: string]: { label: string; value: number; unit: ${Unit}; business: ${Business}; period?: string } }; attention?: ${Attention}[] }`;
+const Keyed = `{ [id: string]: { label: string; value: number; unit: ${Unit}; period: string } }`;
+const RowsOf = (row: string, totals: string) => `{ dataDate: string; view: string; queryHash: string; totals: ${totals}; rows: ${row}[] }`;
+const Owed = '{ count: number; amountUsd: number }';
+
+/** Who reads which division's metrics: the division tools, and the ids a series may be asked for. */
+const TOOL_DIVISION = { get_finance_metrics: 'finance', get_online_metrics: 'online', get_salon_metrics: 'salon' } as const satisfies Record<string, Division>;
+const SERIES_DIVISIONS: Record<AssistantId, readonly Division[]> = { owner: ['finance', 'hq'], finance: ['finance'], online: ['online'], salon: ['salon'], manager: [] };
+const RepairStatus = z.enum(['open', 'late', 'done']);
+const InvoiceStatus = z.enum(['open', 'overdue', 'due_30d']);
 const Suggestion = '{ kind: string; about: string; text: string }';
 const Explained = '{ proposal: { id: string; createdAt: string; from: string; requestText: string; view: string; queryHash: string; pickedBy: "model" | "rule" | null; failedDepartments: string[] } | null; plans: { rank: number; title: string; department: string; originalRank: number; why: string | null; cites: string[] }[]; cited: { id: string; label: string; value: number; unit: string; business: string }[]; approvals: { action: string; status: string; planRank: number | null; decidedAt: string | null }[]; decisions: { by: string; action: string; planRank: number | null; at: string }[]; record: { askedBy: string | null; request: { text: string; from: string; at: string } | null; cites: string[] } | null; notes: string[] }';
 
@@ -81,20 +97,54 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   const served = ctx.data?.periods ?? DEFAULT_PERIODS;
   const PeriodArg = z.enum(served);
   const periodArgs = `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')} })`;
-  const financeMetrics = async (period: Period, only?: 'online' | 'salon') => {
+  const connected = (): DataPort => {
     if (!ctx.data) throw new Error('Business data is not connected, so there are no metrics to read.');
-    const { metrics, queryHash, view } = await ctx.data.getFinanceMetrics({ asOf: ctx.now().toISOString(), period });
+    return ctx.data;
+  };
+  const asOf = () => ctx.now().toISOString();
+  const financeMetrics = async (period: Period, only?: 'online' | 'salon') => {
+    const { metrics, queryHash, view } = await connected().getFinanceMetrics({ asOf: asOf(), period });
     return {
       view,
       queryHash,
       metrics: Object.fromEntries(metrics.filter((m) => !only || m.business === only).map((m) => [m.id, { label: m.label, value: m.value, unit: m.unit, business: m.business }])),
     };
   };
-  // The exact ids a script can look up, so it never guesses at a label ("Google Ads Spend" matched nothing).
-  const metricIds = (only?: 'online' | 'salon') => {
-    const listed = (ctx.data?.catalog ?? []).filter((m) => !only || m.business === only);
+  /** One division's own read (data version 2), refused plainly by a port without divisions. */
+  const division = async (d: Division, period: Period): Promise<DivisionData> => {
+    const data = connected();
+    if (!data.getDivisionMetrics) throw new Error(`This data source has no ${d} division read (it needs data version 2).`);
+    return data.getDivisionMetrics({ division: d, period, asOf: asOf() });
+  };
+  /** A division tool reads its division's mart when the port has divisions; otherwise its business, as before. */
+  const divisionMetrics = async (name: keyof typeof TOOL_DIVISION, period: Period) => {
+    const d = TOOL_DIVISION[name];
+    if (!ctx.data?.getDivisionMetrics) return financeMetrics(period, d === 'finance' ? undefined : d);
+    const r = await division(d, period);
+    return {
+      view: r.view,
+      queryHash: r.queryHash,
+      metrics: Object.fromEntries(r.metrics.map((m) => [m.id, { label: m.label, value: m.value, unit: m.unit, business: m.business, period: m.period }])),
+      attention: r.attention,
+    };
+  };
+  // The exact ids a script can look up, so it never guesses at a label ("Google Ads Spend" matched nothing):
+  // exactly what the tool returns (its division's ids, or its business's on a port without divisions).
+  const metricIds = (name: keyof typeof TOOL_DIVISION) => {
+    const d = TOOL_DIVISION[name];
+    const byDivision = Boolean(ctx.data?.getDivisionMetrics);
+    const listed = (ctx.data?.catalog ?? []).filter((m) => (byDivision ? m.divisions?.includes(d) : d === 'finance' || m.business === d));
     return listed.length === 0 ? '' : ` Read one as metrics["<id>"]. Metric ids: ${listed.map((m) => `${m.id} (${m.label}, ${m.unit})`).join('; ')}.`;
   };
+  /** The rows of one fixed read, the first `limit` of them shown; the totals always cover every matching row. */
+  const rows = async (read: RowRead, limit: number | undefined) => {
+    const data = connected();
+    if (!data.readRows) throw new Error('This data source has no row reads (they need data version 2).');
+    const r = await data.readRows({ ...read, asOf: asOf() });
+    return { dataDate: r.dataDate, view: r.view, queryHash: r.queryHash, totals: r.totals, rows: r.rows.slice(0, clampRows(limit, 20)) };
+  };
+  /** The value of a metric a division read returned, or null when the read has none (a ratio over nothing). */
+  const valueIn = (r: DivisionData, id: string) => r.metrics.find((m) => m.id === id)?.value ?? null;
   const decisions = (assistant: AssistantId, query: string, limit: number | undefined) => ({
     decisions: ctx.brain.memory(assistant).recallDecisions(query, clampRows(limit, 5)).map((d) => ({
       id: d.memory.id, text: d.memory.content, relevance: round(d.relevance, 2),
@@ -105,24 +155,113 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   const tools: ReadTool[] = [
     tool({
       name: 'get_finance_metrics',
-      description: `Salon, online and combined business metrics for a period, read from Zetaris. Each metric keeps its business label.${metricIds()}`,
+      description: `Salon, online and combined business metrics for a period, read from Zetaris. Each metric keeps its business label.${metricIds('get_finance_metrics')}`,
       signature: `${periodArgs} => Promise<${Metrics}>`,
       schema: z.object({ period: PeriodArg }).strict(),
-      run: ({ period }) => financeMetrics(period),
+      run: ({ period }) => divisionMetrics('get_finance_metrics', period),
     }),
     tool({
       name: 'get_online_metrics',
-      description: `Only the online store metrics for a period, read from Zetaris.${metricIds('online')}`,
+      description: `Only the online store metrics for a period, read from Zetaris.${metricIds('get_online_metrics')}`,
       signature: `${periodArgs} => Promise<${Metrics}>`,
       schema: z.object({ period: PeriodArg }).strict(),
-      run: ({ period }) => financeMetrics(period, 'online'),
+      run: ({ period }) => divisionMetrics('get_online_metrics', period),
     }),
     tool({
       name: 'get_salon_metrics',
-      description: `Only the salon metrics for a period, read from Zetaris (synthetic data here, standing in for the head stylist's own backend).${metricIds('salon')}`,
+      description: `Only the salon metrics for a period, read from Zetaris (synthetic data here, standing in for the head stylist's own backend).${metricIds('get_salon_metrics')}`,
       signature: `${periodArgs} => Promise<${Metrics}>`,
       schema: z.object({ period: PeriodArg }).strict(),
-      run: ({ period }) => financeMetrics(period, 'salon'),
+      run: ({ period }) => divisionMetrics('get_salon_metrics', period),
+    }),
+    tool({
+      name: 'get_budget_room',
+      description: 'Each ad channel\'s approved monthly budget, its spend, the budget left (negative = over) and the share used, for a period, from the finance owner\'s budget sheet and the ad reports in Zetaris; plus all ad spend, proposed budget changes waiting, and the online same-month-last-year index (the month so far only). Null where the data has no value.',
+      signature: `${periodArgs} => Promise<{ period: string; view: string; queryHash: string; channels: { [channel: string]: { capUsd: number | null; spendUsd: number | null; roomUsd: number | null; used: number | null } }; totalSpendUsd: number | null; proposedChanges: number | null; onlineLastYearIndex: number | null; attention: ${Attention}[] }>`,
+      schema: z.object({ period: PeriodArg }).strict(),
+      run: async ({ period }) => {
+        const r = await division('finance', period);
+        const channels = r.metrics.map((m) => /^m:online\.budget\.([a-z]+)\.cap$/.exec(m.id)?.[1]).filter((c): c is string => Boolean(c));
+        return {
+          period, view: r.view, queryHash: r.queryHash,
+          channels: Object.fromEntries(channels.map((ch) => [ch, {
+            capUsd: valueIn(r, `m:online.budget.${ch}.cap`), spendUsd: valueIn(r, `m:online.ads.${ch}.spend`),
+            roomUsd: valueIn(r, `m:online.budget.${ch}.room`), used: valueIn(r, `m:online.budget.${ch}.used`),
+          }])),
+          totalSpendUsd: valueIn(r, 'm:online.ads.total.spend'),
+          proposedChanges: valueIn(r, 'm:online.budget.proposed.count'),
+          onlineLastYearIndex: valueIn(r, 'm:online.season.last_year_index'),
+          attention: r.attention.filter((a) => a.metricId.startsWith('m:online.budget.')),
+        };
+      },
+    }),
+    tool({
+      name: 'get_metric_series',
+      description: 'One metric in every period from 2025-10 to the month so far, oldest first, read from your division\'s Zetaris mart, with its lowest, highest and mean of the twelve whole months (the season index divides by that mean). Use an id from your metric tool\'s list; a standing number has no series.',
+      signature: '(args: { metricId: string }) => Promise<{ metricId: string; label: string; unit: string; business: string; points: { period: string; value: number }[]; stats: { min: number; max: number; mean12: number | null }; view: string; queryHash: string }>',
+      schema: z.object({ metricId: MetricId }).strict(),
+      run: async ({ metricId }) => {
+        const data = connected();
+        if (!data.getMetricSeries) throw new Error('This data source has no series (it needs data version 2).');
+        const info = data.catalog?.find((m) => m.id === metricId);
+        const from = SERIES_DIVISIONS[caller].find((d) => info?.divisions?.includes(d));
+        if (!from) throw new Error(`${metricId} is not one of the metrics your division reads.`);
+        return data.getMetricSeries({ division: from, metricId, asOf: asOf() });
+      },
+    }),
+    tool({
+      name: 'get_company_overview',
+      description: 'The whole company at a glance for a period, from the HQ mart in Zetaris: the headline numbers of the salon and the online store side by side (never added together), the standing numbers as of the data date, and the attention list (fixed rules that fired; empty = running normally).',
+      signature: `${periodArgs} => Promise<{ period: string; view: string; queryHash: string; normal: boolean; salon: ${Keyed}; online: ${Keyed}; combined: ${Keyed}; attention: ${Attention}[] }>`,
+      schema: z.object({ period: PeriodArg }).strict(),
+      run: async ({ period }) => {
+        const r = await division('hq', period);
+        const side = (b: string) => Object.fromEntries(r.metrics.filter((m) => m.business === b).map((m) => [m.id, { label: m.label, value: m.value, unit: m.unit, period: m.period }]));
+        return { period, view: r.view, queryHash: r.queryHash, normal: r.attention.length === 0, salon: side('salon'), online: side('online'), combined: side('combined'), attention: r.attention };
+      },
+    }),
+    tool({
+      name: 'get_data_quality',
+      description: 'Rows each source system sent that failed the data checks and were left out of the numbers, for a period (some sources are as of the data date), read from Zetaris, with the total and how many sources had any.',
+      signature: `${periodArgs} => Promise<{ period: string; view: string; queryHash: string; rejected: { [id: string]: { label: string; value: number; business: ${Business} } }; totalRows: number; sourcesWithRejects: number }>`,
+      schema: z.object({ period: PeriodArg }).strict(),
+      run: async ({ period }) => {
+        const r = await division('hq', period);
+        const dq = r.metrics.filter((m) => /\.dq\.rejected_/.test(m.id));
+        return {
+          period, view: r.view, queryHash: r.queryHash,
+          rejected: Object.fromEntries(dq.map((m) => [m.id, { label: m.label, value: m.value, business: m.business }])),
+          totalRows: dq.reduce((t, m) => t + m.value, 0), sourcesWithRejects: dq.filter((m) => m.value > 0).length,
+        };
+      },
+    }),
+    tool({
+      name: 'get_repair_tickets',
+      description: 'Salon repair tickets from the ops app, through Zetaris: "open" (waiting for payment or in repair), "late" (open longer than two weeks) or "done" (finished in the last 30 days), oldest first, with the count and fee and cost totals of every matching ticket. days = days open so far, or days it took. As of the data date.',
+      signature: `(args: { status: "open" | "late" | "done"; limit?: number }) => Promise<${RowsOf('{ ticketId: string; type: string; location: string; channel: string; status: string; receivedDate: string; completedDate: string | null; quoteUsd: number; costUsd: number; days: number }', '{ count: number; quoteUsd: number; costUsd: number }')}>`,
+      schema: z.object({ status: RepairStatus, limit: Limit }).strict(),
+      run: ({ status, limit }) => rows({ table: 'repairs', status }, limit),
+    }),
+    tool({
+      name: 'get_supplier_invoices',
+      description: 'Unpaid supplier invoices, through Zetaris: "open" (all unpaid), "overdue" (past due) or "due_30d" (due in the next 30 days), for one business or both, soonest due first, with the count and amount owed per business (never added across the two). As of the data date.',
+      signature: `(args: { status: "open" | "overdue" | "due_30d"; business?: "salon" | "online"; limit?: number }) => Promise<${RowsOf('{ invoiceId: string; supplierId: string; business: "salon" | "online"; productLine: string; invoiceDate: string; dueDate: string; amountUsd: number; daysPastDue: number }', `{ salon?: ${Owed}; online?: ${Owed} }`)}>`,
+      schema: z.object({ status: InvoiceStatus, business: z.enum(['salon', 'online']).optional(), limit: Limit }).strict(),
+      run: ({ status, business, limit }) => rows({ table: 'invoices', status, ...(business ? { business } : {}) }, limit),
+    }),
+    tool({
+      name: 'get_waiting_conversations',
+      description: 'Customer messages from the last week still waiting for a first answer (support email, both shop text numbers, chat), through Zetaris, longest waiting first: thread id, channel, topic and hours waited by the end of the data date. No message text and no customer. Totals by channel and topic.',
+      signature: `(args: { olderThanHours?: number; limit?: number }) => Promise<${RowsOf('{ threadId: string; channel: string; intent: string; receivedAt: string; waitingMinutes: number; waitingHours: number }', '{ count: number; byChannel: { [channel: string]: number }; byIntent: { [intent: string]: number } }')}>`,
+      schema: z.object({ olderThanHours: z.number().min(0).max(MAX_HOURS).optional(), limit: Limit }).strict(),
+      run: ({ olderThanHours, limit }) => rows({ table: 'waiting', olderThanHours: olderThanHours ?? 0 }, limit),
+    }),
+    tool({
+      name: 'get_low_stock_interest',
+      description: 'Store products at or below their reorder point on the data date, through Zetaris, most viewed first: on hand, reorder point, product views and add-to-carts in the week before; with how many there are, how many are wanted (40 or more views) and how many wanted ones are out of stock.',
+      signature: `(args: { limit?: number }) => Promise<${RowsOf('{ sku: string; productLine: string; onHand: number; reorderPoint: number; views7d: number; addToCart7d: number }', '{ count: number; wanted: number; wantedOutOfStock: number }')}>`,
+      schema: z.object({ limit: Limit }).strict(),
+      run: ({ limit }) => rows({ table: 'low_stock' }, limit),
     }),
     tool({
       name: 'recall_my_decisions',

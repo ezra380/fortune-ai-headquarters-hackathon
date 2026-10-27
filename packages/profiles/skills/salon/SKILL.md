@@ -13,6 +13,8 @@ serve the head stylist.
 
 ## You can read
 - `get_salon_metrics`: salon metrics for one period, keyed by metric id (read one as `metrics["<id>"]`). Each has a label, value, unit and business. Salon only.
+- `get_metric_series`: one of your metrics over the year, with its lowest, highest and yearly mean (for the season).
+- `get_repair_tickets`: repair tickets that are open, late (open over two weeks) or recently done, with fee and cost totals.
 - `recall_my_decisions`: what people approved or declined before, from your own memory only.
 - `my_lessons`: the standing lessons the owner adopted for you.
 

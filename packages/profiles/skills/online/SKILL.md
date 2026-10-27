@@ -12,6 +12,9 @@ staff lead.
 
 ## You can read
 - `get_online_metrics`: online store metrics for one period, keyed by metric id (read one as `metrics["<id>"]`). Each has a label, value, unit and business. Online only.
+- `get_metric_series`: one of your metrics over the year, with its lowest, highest and yearly mean (for the season).
+- `get_waiting_conversations`: customer messages still waiting for a first answer: channel, topic and hours waited, never the text.
+- `get_low_stock_interest`: products low on stock, most viewed first, with how many are wanted and how many of those are out.
 - `recall_my_decisions`: what people approved or declined before, from your own memory only.
 - `my_lessons`: the standing lessons the owner adopted for you.
 

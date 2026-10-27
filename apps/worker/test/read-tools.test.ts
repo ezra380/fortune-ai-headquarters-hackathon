@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PERIOD_KEYS, type AssistantId } from '@fahq/contracts';
+import { PERIOD_KEYS, type AssistantId, type Attention, type DataPort, type Division, type Metric, type MetricInfo } from '@fahq/contracts';
 import { createReadTools, pick, type ReadToolContext } from '../src/read-tools.ts';
 import type { Explained } from '../src/explain.ts';
 import type { ApprovalSummary, MessageRow, WorkReportRow } from '../src/store.ts';
@@ -11,6 +11,8 @@ const NOW = new Date('2026-10-26T12:00:00.000Z');
 const NAMES = [
   'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons', 'list_lessons',
   'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
+  'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
+  'get_waiting_conversations', 'get_low_stock_interest',
 ];
 
 const FINAL_ID = 'abcdef12-3456-4789-8abc-def012345678';
@@ -260,6 +262,148 @@ describe('read tools', () => {
     });
     expect(await tools.latest_proposal!.run({})).toEqual({ proposal: null });
     expect(await tools.get_timeline!.run({ limit: 5 })).toEqual({ events: [{ id: 'e1', type: 'relate', at: '2026-10-26T11:00:00Z' }] });
+  });
+});
+
+// ---- The division data (version 2): a FAKE port with divisions, row reads and series -------------------------
+
+const v2Source = { system: 'zetaris' as const, view: 'fortune_demo_v2_mart.period_metrics', queryHash: 'd'.repeat(64), asOf: NOW.toISOString() };
+const dm = (id: string, value: number, unit: Metric['unit'] = 'usd', period = '2026-10-mtd'): Metric =>
+  ({ id: id as Metric['id'], label: `label of ${id}`, value, unit, business: id.split(':')[1]!.split('.')[0] as Metric['business'], period, source: v2Source });
+const DIVISION_METRICS: Record<Division, Metric[]> = {
+  finance: [
+    dm('m:online.budget.google.cap', 2000), dm('m:online.ads.google.spend', 1800), dm('m:online.budget.google.room', 200), dm('m:online.budget.google.used', 0.9, 'ratio'),
+    dm('m:online.budget.meta.cap', 1000), dm('m:online.ads.meta.spend', 1100), dm('m:online.budget.meta.room', -100), dm('m:online.budget.meta.used', 1.1, 'ratio'),
+    dm('m:online.ads.total.spend', 2900), dm('m:online.budget.proposed.count', 1, 'count', 'standing'), dm('m:salon.revenue.total', 9000),
+  ],
+  hq: [
+    dm('m:salon.revenue.total', 9000), dm('m:online.revenue.total', 15000), dm('m:salon.repairs.open_over_14d.count', 2, 'count', 'standing'),
+    dm('m:combined.dq.rejected_invoices', 1, 'count'), dm('m:online.dq.rejected_orders', 0, 'count'), dm('m:salon.dq.rejected_repairs', 1, 'count'),
+  ],
+  salon: [dm('m:salon.revenue.total', 9000), dm('m:salon.repairs.open.count', 5, 'count', 'standing')],
+  online: [dm('m:online.revenue.total', 15000)],
+};
+const ATTENTION: Record<Division, Attention[]> = {
+  finance: [
+    { metricId: 'm:online.budget.meta.used', level: 'act', rule: 'Ad spend went over the approved budget.' },
+    { metricId: 'm:online.budget.proposed.count', level: 'act', rule: 'A proposed ad budget change is waiting.' },
+  ],
+  hq: [{ metricId: 'm:salon.repairs.open_over_14d.count', level: 'act', rule: 'Repairs have been open longer than two weeks.' }],
+  salon: [], online: [],
+};
+const DIVISIONS: Division[] = ['salon', 'finance', 'online', 'hq'];
+const catalogV2: MetricInfo[] = [...new Map(Object.values(DIVISION_METRICS).flat().map((m) => [m.id, m])).values()].map((m) => ({
+  id: m.id, label: m.label, unit: m.unit, business: m.business, divisions: DIVISIONS.filter((d) => DIVISION_METRICS[d].some((x) => x.id === m.id)),
+}));
+type DivisionKeyed = { view: string; metrics: Record<string, unknown>; attention: Attention[] };
+
+function v2Data() {
+  const asked: unknown[] = [];
+  const data: DataPort = {
+    ...dataMock, periods: PERIOD_KEYS, catalog: catalogV2,
+    getDivisionMetrics: async (q) => {
+      asked.push({ division: q.division, period: q.period });
+      return { division: q.division, metrics: DIVISION_METRICS[q.division], attention: ATTENTION[q.division], queryHash: 'd'.repeat(64), view: `fortune_demo_v2_${q.division}_mart` };
+    },
+    readRows: async ({ asOf: _asOf, ...read }) => {
+      asked.push(read);
+      return { table: read.table, rows: Array.from({ length: 60 }, (_, i) => ({ ticketId: `demo-rt-r${String(i).padStart(5, '0')}`, quoteUsd: 10 })), totals: { count: 60, quoteUsd: 600, costUsd: 240 }, dataDate: '2026-10-26', queryHash: 'e'.repeat(64), view: 'fortune_hq_v2.salon_repairs' };
+    },
+    getMetricSeries: async (q) => {
+      asked.push({ division: q.division, metricId: q.metricId });
+      return { metricId: q.metricId, label: 'x', unit: 'usd', business: 'salon', points: [{ period: '2026-09', value: 1 }], stats: { min: 1, max: 1, mean12: 1 }, queryHash: 'f'.repeat(64), view: `fortune_demo_v2_${q.division}_mart.period_metrics` };
+    },
+  };
+  return { data, asked };
+}
+
+describe('division read tools (data version 2)', () => {
+  it("reads each division tool from its own mart, with each metric's period and the attention list, and names exactly its division's ids", async () => {
+    const { data, asked } = v2Data();
+    const tools = createReadTools(setup({ data }).ctx, 'salon');
+    const out = (await tools.get_salon_metrics!.run({ period: '2026-10-mtd' })) as DivisionKeyed;
+    expect(asked).toEqual([{ division: 'salon', period: '2026-10-mtd' }]);
+    expect(out.view).toBe('fortune_demo_v2_salon_mart');
+    expect(out.metrics['m:salon.repairs.open.count']).toEqual({ label: 'label of m:salon.repairs.open.count', value: 5, unit: 'count', business: 'salon', period: 'standing' });
+    expect(out.attention).toEqual([]);
+    // Finance lists the salon revenue it reads and the budget sheet, not the online revenue it does not read.
+    expect(tools.get_finance_metrics!.description).toContain('m:online.budget.google.cap (label of m:online.budget.google.cap, usd)');
+    expect(tools.get_finance_metrics!.description).toContain('m:salon.revenue.total');
+    expect(tools.get_finance_metrics!.description).not.toContain('m:online.revenue.total');
+    expect(tools.get_online_metrics!.description).toContain('m:online.revenue.total');
+    expect(tools.get_online_metrics!.description).not.toContain('m:online.budget');
+    expect(tools.get_salon_metrics!.description).not.toContain('m:online.');
+  });
+
+  it('gives the budget room per channel from the finance read, over budget as a negative room, and only the budget attention', async () => {
+    const { data, asked } = v2Data();
+    const out = await createReadTools(setup({ data }).ctx, 'finance').get_budget_room!.run({ period: '2026-10-mtd' });
+    expect(asked).toEqual([{ division: 'finance', period: '2026-10-mtd' }]);
+    expect(out).toEqual({
+      period: '2026-10-mtd', view: 'fortune_demo_v2_finance_mart', queryHash: 'd'.repeat(64),
+      channels: { google: { capUsd: 2000, spendUsd: 1800, roomUsd: 200, used: 0.9 }, meta: { capUsd: 1000, spendUsd: 1100, roomUsd: -100, used: 1.1 } },
+      totalSpendUsd: 2900, proposedChanges: 1, onlineLastYearIndex: null, attention: ATTENTION.finance,
+    });
+    await expect(createReadTools(setup().ctx, 'finance').get_budget_room!.run({ period: '2026-09' })).rejects.toThrow('This data source has no finance division read (it needs data version 2).');
+  });
+
+  it('shows the company side by side, never added, says whether everything runs normally, and counts the rejected rows', async () => {
+    const { data } = v2Data();
+    const tools = createReadTools(setup({ data }).ctx, 'owner');
+    const out = (await tools.get_company_overview!.run({ period: '2026-10-mtd' })) as Record<string, any>;
+    expect(Object.keys(out.salon)).toEqual(['m:salon.revenue.total', 'm:salon.repairs.open_over_14d.count', 'm:salon.dq.rejected_repairs']);
+    expect(Object.keys(out.online)).toEqual(['m:online.revenue.total', 'm:online.dq.rejected_orders']);
+    expect(Object.keys(out.combined)).toEqual(['m:combined.dq.rejected_invoices']);
+    expect(out.normal).toBe(false);
+    expect(out.attention).toEqual(ATTENTION.hq);
+    expect(JSON.stringify(out)).not.toContain('24000'); // salon + online revenue is never made
+    const dq = (await createReadTools(setup({ data }).ctx, 'manager').get_data_quality!.run({ period: '2026-10-mtd' })) as Record<string, any>;
+    expect(Object.keys(dq.rejected)).toEqual(['m:combined.dq.rejected_invoices', 'm:online.dq.rejected_orders', 'm:salon.dq.rejected_repairs']);
+    expect(dq).toMatchObject({ totalRows: 2, sourcesWithRejects: 2 });
+  });
+
+  it('reads the rows behind the standing numbers as fixed reads: the totals of every row, at most 50 rows shown', async () => {
+    const { data, asked } = v2Data();
+    const tools = createReadTools(setup({ data }).ctx, 'owner');
+    const late = (await tools.get_repair_tickets!.run({ status: 'late' })) as { rows: unknown[]; totals: unknown; dataDate: string };
+    expect(late.rows).toHaveLength(20);
+    expect(late.totals).toEqual({ count: 60, quoteUsd: 600, costUsd: 240 });
+    expect(late.dataDate).toBe('2026-10-26');
+    expect(((await tools.get_repair_tickets!.run({ status: 'open', limit: 5000 })) as { rows: unknown[] }).rows).toHaveLength(50);
+    await tools.get_supplier_invoices!.run({ status: 'overdue', business: 'online', limit: 3 });
+    await tools.get_supplier_invoices!.run({ status: 'due_30d' });
+    await tools.get_waiting_conversations!.run({});
+    await tools.get_waiting_conversations!.run({ olderThanHours: 24 });
+    await tools.get_low_stock_interest!.run({ limit: 1 });
+    expect(asked).toEqual([
+      { table: 'repairs', status: 'late' }, { table: 'repairs', status: 'open' }, { table: 'invoices', status: 'overdue', business: 'online' },
+      { table: 'invoices', status: 'due_30d' }, { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' },
+    ]);
+  });
+
+  it('refuses a status, business or hours off the fixed lists before reading, and a port without row reads', async () => {
+    const { data, asked } = v2Data();
+    const tools = createReadTools(setup({ data }).ctx, 'owner');
+    await expect(tools.get_repair_tickets!.run({ status: "open' OR 1=1" })).rejects.toThrow(/^get_repair_tickets: argument "status"/);
+    await expect(tools.get_supplier_invoices!.run({ status: 'open', business: 'combined' })).rejects.toThrow(/argument "business"/);
+    await expect(tools.get_waiting_conversations!.run({ olderThanHours: -2 })).rejects.toThrow(/argument "olderThanHours"/);
+    await expect(tools.get_low_stock_interest!.run({ sku: 'x' })).rejects.toThrow(/does not take/);
+    expect(asked).toEqual([]);
+    await expect(createReadTools(setup().ctx, 'owner').get_repair_tickets!.run({ status: 'open' })).rejects.toThrow('This data source has no row reads (they need data version 2).');
+  });
+
+  it("reads a series from the caller's own division, and refuses an id the caller's division does not read", async () => {
+    const { data, asked } = v2Data();
+    await createReadTools(setup({ data }).ctx, 'salon').get_metric_series!.run({ metricId: 'm:salon.revenue.total' });
+    await createReadTools(setup({ data }).ctx, 'owner').get_metric_series!.run({ metricId: 'm:online.ads.total.spend' });
+    await createReadTools(setup({ data }).ctx, 'owner').get_metric_series!.run({ metricId: 'm:online.revenue.total' });
+    expect(asked).toEqual([
+      { division: 'salon', metricId: 'm:salon.revenue.total' }, { division: 'finance', metricId: 'm:online.ads.total.spend' }, { division: 'hq', metricId: 'm:online.revenue.total' },
+    ]);
+    await expect(createReadTools(setup({ data }).ctx, 'salon').get_metric_series!.run({ metricId: 'm:online.revenue.total' })).rejects.toThrow('m:online.revenue.total is not one of the metrics your division reads.');
+    await expect(createReadTools(setup({ data }).ctx, 'manager').get_metric_series!.run({ metricId: 'm:salon.revenue.total' })).rejects.toThrow('not one of the metrics your division reads');
+    await expect(createReadTools(setup({ data }).ctx, 'salon').get_metric_series!.run({ metricId: "m:salon.revenue.total'--" })).rejects.toThrow(/argument "metricId"/);
+    expect(asked).toHaveLength(3);
   });
 });
 
