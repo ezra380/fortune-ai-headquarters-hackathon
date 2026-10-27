@@ -1,20 +1,86 @@
 # Divisions
 
-Status: **slices 1 and 2 built** on branch `hq/div-brief`: the division briefs, APPROVE, BRIEF, the CEO digest and the daily
-clock. The console view comes in the next slice of this lane. Synthetic data only.
+Status: **built** on branch `hq/div-brief`: the division briefs, the questions the divisions ask each other, APPROVE, BRIEF,
+the CEO digest, the daily clock and the console's Divisions view. Synthetic data only.
 
-The company is organised like an enterprise into four divisions. Each has one assistant, and each assistant has the
-data it needs, centred on its own target, and turns it into advice for its human head.
+## In plain words
 
-| Division | Assistant | Head | Reads |
+The company is run like an enterprise, as four divisions. Each division has one AI assistant, its manager, and one human
+head. The assistant holds the data its division needs, centred on the division's own target, and turns it into advice for
+its head. The head decides and does the work. The assistant never acts.
+
+| Division | Its assistant | Its head | What the assistant reads |
 |---|---|---|---|
-| Salon | `salon` | the head stylist | salon numbers only |
-| Finance | `finance` | the finance owner | every metric (salon and online kept apart) |
-| Online | `online` | the online staff lead | online numbers only |
-| HQ / CEO | `owner` | the owner | the three divisions' one-line status |
+| Salon | `salon` | the head stylist | the salon's numbers only |
+| Finance | `finance` | the finance owner | every number in the company, with the salon's and the online store's kept apart |
+| Online | `online` | the online staff lead | the online store's numbers only |
+| HQ / CEO | `owner` | the owner | one short status line from each of the other three |
 
-The HQ Manager (`manager`) sits under Owner HQ. It is not a division. It receives every assistant's end-of-work report
-and recommends changes to their profiles ([manager.md](manager.md)).
+The salon assistant is a stand-in for Cindy, the head stylist's own assistant (a separate app), and works on synthetic salon
+data. The salon and the online store are two businesses and are never merged into one number.
+
+The **HQ Manager** (`manager`) sits under Owner HQ. It is not a division. It receives every assistant's end-of-work report and
+recommends changes to the assistants' profiles; the owner adopts each one with a code ([manager.md](manager.md)).
+
+### The brief
+
+Every morning each of the salon, finance and online assistants reads its own numbers and writes its head one short **brief**:
+a status, a headline, up to four findings and up to three actions the head may approve.
+
+- The **status** is **normal**, **watch** or **act**. A program sets it from fixed rules about the numbers (any "act" rule
+  makes it act, otherwise any "watch" rule makes it watch). The assistant's words must agree with it, and it can never set it.
+- Every number in a brief has to trace back to the data the assistant was given. A program checks that. If the assistant's
+  write-up does not pass, it gets one more try with the exact objections; if it still fails, a program writes a plainer
+  brief from the rules and says so at the top ("written by rules").
+- The head gets the brief as one text, and a printout is queued. The CEO division gets only a one-line status.
+
+### When a division needs something from another
+
+Sometimes a division cannot write its brief from its own numbers alone. Then its assistant sends a plain question to another
+division's assistant (at most two questions, never to itself). The other assistant answers from **its own data, with its own
+tools and its own instructions**: the asking division never reads the other's data itself. The answer, or the plain reason it
+could not be given ("Code Mode is not connected on this machine"), is kept in the mailbox with who asked, who answered and
+when. The asker may use the answer in its brief, and the numbers in it are checked like any other.
+
+### Approving by code
+
+Each action in a brief is a suggestion. The head's text carries one **one-time code**. She replies `APPROVE 1 3 <code>` to
+approve actions 1 and 3 (any ranks, once each). The code works once, only for her, for twelve hours. A plain "yes" decides
+nothing. Approving records her decision in the division's memory, the company record and the HQ Manager's mailbox; it changes
+nothing else. Carrying the action out is hers.
+
+### The CEO digest
+
+The owner gets one very short text each morning, written by a program and not a model: a heading and one line per division.
+A division that is normal is one fixed sentence ("Salon: running normally."). One that needs a look, or a decision, carries
+its own one-line summary for the CEO, which has already passed the number check. The heads get the detail in their own briefs.
+The owner can also text `STATUS` to see the digest as it stands, or `BRIEF` to ask all three divisions for a brief now.
+
+### The schedule
+
+New York time, every day: **8:00** the three briefs are queued; **8:30** the digest is queued with whatever has reported (it
+is also queued the moment the third brief is in, so normally it goes out as soon as the last division reports). If the worker
+was down at the time, a missed job is queued when it comes back, but only within four hours of its time.
+
+### Where to look
+
+The console's first tab, **Divisions** (owner only, read only): the CEO digest, and for each division its latest brief with
+where each action stands (approved, waiting for a code, code expired, not approved), the questions it asked and was asked, and
+whether they were answered. See [The console's Divisions view](#the-consoles-divisions-view).
+
+### What can never happen
+
+- An assistant changes something. They read and advise; people decide by one-time code and carry the action out.
+- A number reaches a person that does not trace to data.
+- The salon's numbers and the online store's are merged, or put side by side in one sentence.
+- Medical or hair-loss information is read, written or shown.
+- A model sees a phone number or a code.
+
+---
+
+## How it is built
+
+The rest of this page is the reference: what the code does, step by step, and the keys that make each step happen once.
 
 ## The day in one picture
 
@@ -191,3 +257,49 @@ needs and replies. `issue_approval` refuses to queue the same text twice, so the
 `enqueueBrief(deps, division, 'YYYY-MM-DD')` queues the day's scheduled brief (a second call for the same day changes
 nothing); with a third argument, a UUID, it queues that run of the day. `enqueueDigest(deps, date)` does the same for the
 digest.
+
+
+## The console's Divisions view
+
+`apps/console` (owner only, read only, on this computer only). The first tab, **Divisions**, is drawn from `GET /api/divisions`;
+the salon tab, which used to be a placeholder, now reads the salon's assistant like the other four. Code: `loader.ts`
+(`createDivisionsLoader`), `shape.ts` (`shapeDivisions`), `divisions.ts` (the types), `page.ts`.
+
+**What it shows**
+
+- **The CEO digest**: the newest `digestdoc:` mailbox note: the words as the owner was sent them, and what each division's
+  report looked like when it was written (in, no report yet, could not be read).
+- **For each division** (salon, finance, online), its newest brief (by day, then by time: a BRIEF run on the same day shows once
+  it is written): the status, a "written by rules" mark when a program wrote it, the headline, the findings with the metric
+  ids they cite, the actions, and the line it gave the CEO division. Each action carries where it stands:
+
+  | Shown as | Meaning |
+  |---|---|
+  | approved | the head approved it with her code (from the note the HQ Manager was sent: rank and verdict only) |
+  | waiting for a code | a code is waiting; the page says when it expires |
+  | code expired / code locked | the code ran out (a waiting code past its time is shown as expired, because the database only marks it when someone tries it) or was locked by wrong tries |
+  | not approved | the code was used, but not for this action |
+  | no code sent | the brief was not texted with a code (no live number, or no action) |
+  | unknown | where the actions stand could not be read right now |
+
+- **The questions between divisions**: the latest 30 (`datareq:` notes), each paired with its answer (`datareply:`, which replies
+  to the request). A division lists the questions it asked and the ones it was asked: from, to, the question, when it was asked
+  and when answered; a question with no reply is "waiting for an answer"; one the other side could not answer shows its plain
+  reason.
+
+**The console's rules, kept**
+
+- Read only: GET and HEAD, no form, no write. Loopback only. The service key stays on the server.
+- Named columns only. An approval is read without its code hash. An answer is read as its outcome and reason only: the facts it
+  carried are never selected. Who approved an action is never read (the decision notes give rank and verdict; the person is not
+  taken).
+- `shape.ts` is the one place that decides what leaves the server: known fields only, every text cleaned and cut, six-digit
+  codes blanked, phone numbers masked to their last four digits, keys and hashes hidden. (A run of six or more digits is blanked
+  whether it is a code or not, so a large unformatted figure in a brief shows as `••••••`.)
+- A stored value of the wrong shape becomes one plain note and what is readable stays. A part that could not be read (a brief,
+  the standing of its actions, the questions, their answers, the digest) says so on the page and is never shown as empty.
+- The page draws only with `textContent`; its Content-Security-Policy allows exactly its one script and one style block.
+
+**Tests**: `apps/console/test/divisions.test.ts` (shaping, the loader against a recording fake, the server, the page drawn in a
+fake browser), `divisions-db.test.ts` (the loader on the real local database through the real query builder, with its own rows
+removed afterwards) and `console.test.ts` (the departments, including the live salon).

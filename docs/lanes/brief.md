@@ -162,3 +162,82 @@ recording only the first rank.
 - **Full suite on 2026-10-27 (08:30 ET):** `npm run typecheck` is clean; `npm test` 615 passed, 2 failed. The two failures are
   the same `supabase/tests/db.test.ts` "public (anon) role" tests as in slice 1 (this database's `anon` role has no table
   grants), not from this lane.
+
+## Slice 3: the console's Divisions view and the live salon tab (done)
+
+Design and plain-words explanation: [../divisions.md](../divisions.md) (rewritten: "In plain words" first, the step-by-step
+reference after it, and a section on the console's Divisions view). Code: `apps/console/src/divisions.ts` (types),
+`loader.ts` (`createDivisionsLoader`), `shape.ts` (`shapeDivisions`), `server.ts` (`GET /api/divisions`), `page.ts`.
+
+### What works (tests)
+
+`apps/console/test/divisions.test.ts` (no database, 42):
+- the briefs: three divisions in the digest order with their heads; the latest brief's status, day, headline, findings with the
+  metrics they cite, ranked actions and the CEO line; a rule-written brief; no brief yet; a brief that could not be read, and a
+  division the source forgot, shown as unread and never as "no brief yet".
+- where each action stands: no code sent; waiting (and a waiting code past its time shown as expired); expired; locked; code used
+  for other actions; approved whatever became of the code; only an approved verdict counts; unknown when the approvals could not
+  be read (an approval already read still shows); an unfamiliar code status; who approved, the code hash and row ids never leave.
+- the data requests: each question paired with its answer under the division that asked and the one that was asked, newest first;
+  the plain reason an answer gave and nothing of its facts; the outcome read as a flag or as text; unanswered; requests between
+  unknown parties, not a data request, or with a blank question left out with a note; an unreadable answer; every question
+  unreadable when no answer could be read; at most ten each way.
+- the digest: its words, day and what each division had reported; none yet; one that cannot be read is left out with a note and a
+  bad report line costs only itself.
+- scrubbing and bad data: no code, phone, key or hash in any text of the view; every text and list cut to its limit after
+  cleaning; a brief of the wrong shape, an unknown status, JSON text, a source that sends lists of the wrong kind.
+- the loader against a recording fake: named columns only, newest first, limits of 100 or less, only the tables and key patterns
+  it needs (`division_briefs`, `assistant_messages`, `approvals`); answers selected as outcome and reason only; each approval and
+  decision goes with its own brief and the newest code wins; nothing asked about approvals or answers when there is nothing to
+  ask about; every part that fails is named by code, shown as unread and the rest kept; a database that is down.
+- the server: the shaped view, read once, nothing secret; 502 in plain words without the cause and a log line of codes only;
+  read only; 404 for a trailing slash.
+- the page drawn in a fake browser: the digest, each division's brief with the standing of each action, the questions asked and
+  received; "no brief yet", "none" and "could not be read" for empty and unread parts; markup in a brief shown as the characters
+  it is; the salon tab, live, with the note that Cindy's own app keeps her personal data.
+
+`apps/console/test/divisions-db.test.ts` (real local database through the real query builder, 5; skips itself when the local
+API is not running): every part is read without a note; the newest brief of each division is the one just written; where each
+action stands (a used code and the one action approved, a locked code, no code); each question with its answer, and an answer's
+facts never read; the newest digest; no person id, code hash or phone in the view. Its rows are written with SQL in the year 8000s
+and 9000, so they are the newest in every list, and removed afterwards (checked: none left).
+
+`apps/console/test/console.test.ts` (53, was 53): updated for the live salon (it is read like the others, no placeholder),
+the Divisions tab first in the tab order, and five live assistants in the HQ Manager's usage table.
+
+I checked that these tests fail without the guards: a waiting code never lapsing, any verdict counting as approved, answers read
+as whole bodies, unread answers shown as unanswered, texts not trimmed, unread actions shown as "no code sent", the oldest code
+winning, approvals not filtered by action.
+
+I looked at the page in the browser pane, with made-up data through the real server (no database): desktop and phone width
+(no sideways scroll at 375 pixels), the digest, a normal, a watch and an act division, a rule-written brief, approved, waiting
+and not-approved actions, answered, unanswered and could-not-answer questions, and the live salon tab.
+
+### What is not done
+
+- Only each division's latest brief is shown (no history), and nothing about a text's delivery (sent, skipped, no live number).
+- The Divisions tab has not been run against the live worker's own rows: the proof of the database path is
+  `divisions-db.test.ts` with rows written by SQL in the shape the worker writes them, and the worker tests prove the worker
+  writes that shape.
+- The HQ Manager still does not read briefs (slice 1's note); the console shows only the actions the head approved, not what the
+  manager did with them.
+
+### What the merge must know
+
+- **Files outside the lane's own, minimal:** `docs/architecture.md` (the sentence about the salon placeholder), `README.md` (one
+  table cell). Everything else is in `apps/console` (listed in the lane) and `docs/`.
+- **Removed from `apps/console`:** `LiveDepartmentId`, `PlaceholderView`, `placeholderView`, `SALON_MESSAGE`, and the `placeholder`
+  field of a department (in `/api/departments` and in a department's view): the salon is live, so none of it applies. `ConsoleDeps`
+  has a new required `loadDivisions`. Nothing outside `apps/console` used any of these (`grep` over the repo).
+- **Test helpers moved** out of `console.test.ts` so two files can use them: `test/draw.ts` (`drawTab`, the page in a fake
+  browser) and `test/recorder.ts` (`recorder`, the recording fake of the Supabase client). `divisions-db.test.ts` imports
+  `../../worker/test/localdb.ts` (the same local-API helper the worker's database tests use).
+- **The cloud project:** the Divisions tab reads `division_briefs` (migrations `20261027100100` and `20261027100110`, which have
+  to be applied there first). Until they are, the tab says the briefs "could not be read right now (42P01)" and shows the
+  questions and digest it can read. No new env var, no new dependency.
+- **A hazard worth knowing for any test that holds a waiting code on the shared database:** a wrong code tried by any other test
+  adds a failed attempt to every waiting code of that person, and the fifth locks it. The database test therefore uses a locked
+  code, not a waiting one (the waiting case is covered without a database).
+- **Full suite on 2026-10-27 (08:52 ET), other lanes testing too:** `npm run typecheck` is clean; `npm test` 662 passed, 2 failed.
+  The two failures are the same `supabase/tests/db.test.ts` "public (anon) role" tests as in slices 1 and 2 (this database's
+  `anon` role has no table grants), not from this lane.

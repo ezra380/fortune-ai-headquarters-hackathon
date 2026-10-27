@@ -21,12 +21,10 @@ const DAY = new Date(Date.UTC(8000, 0, 1) + randomInt(0, 365_000) * 86_400_000).
 const LATER = '9000-01-01T00:00:00Z';
 const FACT_MARKER = `FACT-${randomBytes(4).toString('hex')}`;
 
-const briefOf = (division: string, action: boolean) => ({
+const briefOf = (division: string) => ({
   headline: `${division} headline`,
   findings: [{ text: `${division} finding`, cites: [`m:${division}.metric`] }],
-  actions: action
-    ? [1, 2, 3].map((rank) => ({ rank, title: `${division} action ${rank}`, why: 'because', steps: 'do it', cites: [] }))
-    : [],
+  actions: [1, 2, 3].map((rank) => ({ rank, title: `${division} action ${rank}`, why: 'because', steps: 'do it', cites: [] })),
   ceoLine: `${division} line`,
 });
 
@@ -60,7 +58,7 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
       await pool.query(
         `insert into public.division_briefs (division, brief_key, brief_date, period, status, written_by, brief, ceo_line)
          values ($1, $2, $3, 'demo-period', $4, 'model', $5::jsonb, $6)`,
-        [division, key, DAY, division === 'finance' ? 'watch' : 'normal', JSON.stringify(briefOf(division, division !== 'salon' ? true : false)), `${division} line`],
+        [division, key, DAY, division === 'finance' ? 'watch' : 'normal', JSON.stringify(briefOf(division)), `${division} line`],
       );
       docs[division] = await message({
         from: division, to: division, kind: 'report', dedupe: `briefdoc:${key}`,
@@ -74,8 +72,9 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
       from: 'finance', to: 'manager', kind: 'decision', replyTo: docs.finance!, dedupe: `action-decision:${docs.finance}:2`,
       body: { type: 'action_decision', briefId: randomUUID(), division: 'finance', rank: 2, title: 'finance action 2', verdict: 'approved', by: 'demo-p-finance-owner' },
     });
-    // Online: a code is waiting.
-    await approval(docs.online!, 'pending', '9999-01-01T00:00:00Z', null, '9000-01-01T00:10:00Z');
+    // Online: a code that was locked by wrong tries. (Not a waiting one: every test that tries a wrong code adds a failed
+    // attempt to every waiting code of that person, and the database is shared, so a waiting row would not stay waiting.)
+    await approval(docs.online!, 'locked', '9000-01-02T00:00:00Z', null, '9000-01-01T00:10:00Z');
 
     // Finance asked the others two questions: online answered, the salon could not.
     for (const [to, ok] of [['online', true], ['salon', false]] as const) {
@@ -117,15 +116,15 @@ describe.skipIf(!api)('the Divisions loader on the real local database', () => {
     expect(loaded.divisions.map((d) => [d.division, d.brief?.brief_key, d.unread])).toEqual(briefKeys.map((key) => [key.split(':')[1], key, []]));
   });
 
-  it('shows where each action stands: the used code, the action the head approved, the waiting code, and none', async () => {
+  it('shows where each action stands: the used code, the action the head approved, a locked code, and no code', async () => {
     const view = shapeDivisions(await createDivisionsLoader({ db: db() })(), new Date());
     const by = Object.fromEntries(view.divisions.map((d) => [d.id, d]));
     expect(by.finance!.brief).toMatchObject({ date: DAY, status: 'watch', writtenBy: 'model', headline: 'finance headline', ceoLine: 'finance line' });
     // The newest code was used (the older, expired one does not count), and the head approved action 2 only.
     expect(by.finance!.brief!.actions.map((a) => a.approval.state)).toEqual(['not_approved', 'approved', 'not_approved']);
     expect(by.finance!.brief!.actions[1]!.approval.at).not.toBeNull();
-    expect(by.online!.brief!.actions.map((a) => a.approval.state)).toEqual(['awaiting', 'awaiting', 'awaiting']);
-    expect(by.salon!.brief!.actions).toEqual([]);
+    expect(by.online!.brief!.actions.map((a) => a.approval.state)).toEqual(['code_locked', 'code_locked', 'code_locked']);
+    expect(by.salon!.brief!.actions.map((a) => a.approval.state)).toEqual(['no_code', 'no_code', 'no_code']);
     expect(by.salon!.brief!.findings).toEqual([{ text: 'salon finding', cites: ['m:salon.metric'] }]);
   });
 
