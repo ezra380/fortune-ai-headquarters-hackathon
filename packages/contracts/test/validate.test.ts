@@ -129,6 +129,15 @@ describe('numbersIn', () => {
     expect(numbersIn('net was -$3,000; a 10-20% lift; down -150 units').map((n) => n.value)).toEqual([-3000, 10, 20, -150]);
     expect(numbersIn('ticket demo-rt-01234 owes $1,234').map((n) => n.raw)).toEqual(['$1,234']);
   });
+
+  // Review 2026-10-27: the id rule skipped every figure after a letter and a hyphen, so "a sub-$5,000 test" read nothing.
+  it.each([
+    ['a mid-$45,000 profit', 45000, 'usd'], ['a sub-$5,000 test', 5000, 'usd'], ['a mid-$40k month', 40000, 'usd'],
+    ['a high-35% margin', 35, 'percent'], ['returns in the mid-30% range', 30, 'percent'], ['ROAS-9.5x', 9.5, 'ratio'],
+    ['a sub-5,000 budget', 5000, 'plain'], ['the top-100 buyers', 100, 'plain'], ['a demo-rt-1,234 claim', 1234, 'plain'],
+  ])('still reads a figure after a word and a hyphen that is not a row id: "%s"', (text, value, kind) => {
+    expect(numbersIn(text).map((n) => [n.value, n.kind])).toEqual([[value, kind]]);
+  });
 });
 
 describe('checkPlans against invented numbers (adversarial review, 2026-10-26)', () => {
@@ -214,6 +223,13 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
   it('lets an action name a row by its id: the digits after a letter and a hyphen are not an amount (design 4e)', () => {
     expect(checkPlans(withPlan1({ actions: ['Chase invoice demo-inv-i00412 and ticket demo-rt-01234 first'] }), metrics).ok).toBe(true);
   });
+
+  it('still refuses an untraced figure written after a word and a hyphen ("a mid-$45,000 profit")', () => {
+    rejects(withPlan1({ summary: 'This adds a mid-$45,000 profit every month.' }), '$45,000');
+    rejects(withPlan1({ summary: 'Run a sub-$5,000 test.' }), '$5,000');
+    rejects(withPlan1({ summary: 'Margins sit in the high-35% range.' }), '35%');
+    rejects(withPlan1({ summary: 'Ads reach ROAS-9.5x.' }), '9.5x');
+  });
 });
 
 // Design 4d: small counts were never checked, so "clear the 5 late repairs" passed when the data said 3.
@@ -269,6 +285,10 @@ describe('mixedSentences (the same rule for a reason or a note written about pic
     expect(mixedSentences(text, [bothPlan], probe)).toEqual([['$12,400', '$18,900']]);
     // With other picks beside it (the salon's own plan holds 6,200, nothing that collides with these two).
     expect(mixedSentences(text, [bothPlan, salonPlan], probe)).toEqual([['$12,400', '$18,900']]);
+  });
+
+  it('is not hidden by a hyphen glued to each figure ("online-$12,400 … salon-$6,200")', () => {
+    expect(mixedSentences('Mazali online-$12,400 beat wash and set salon-$6,200.', [onlinePlan, salonPlan], probe)).toEqual([['$12,400', '$6,200']]);
   });
 
   it('lets each side be quoted in its own sentence, and a business with itself', () => {

@@ -283,9 +283,9 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[]; smal
     const at = m.index ?? 0;
     const prev = text[at - 1] ?? '';
     if (/[\p{L}_.:\d]/u.test(prev)) continue; // part of a word, an id or a version ("Q4", "m:online", "v1.2")
-    if (/\p{L}-$/u.test(text.slice(Math.max(0, at - 2), at))) continue; // an id's digits after a letter and a hyphen ("demo-rt-01234")
     const [raw, dollar, whole, fraction, exponent, unitRaw, currencyWord] = m;
     if (whole === undefined) continue;
+    if (!dollar && !unitRaw && !currencyWord && !fraction && !exponent && isRowId(text, at + whole.length)) continue;
     let base = Number(whole.replaceAll(',', '') + (fraction ?? ''));
     if (exponent) base *= 10 ** Number(exponent);
     if (!Number.isFinite(base)) continue;
@@ -326,6 +326,17 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[]; smal
     found.push({ raw: r.raw, value, percent: kind === 'percent', kind, at: r.at, sentence: sentenceIndex(text, r.at) });
   }
   return { found, unreadable, small };
+}
+
+// Row ids are names, not amounts (design 4e): a synthetic row's id ("demo-rt-01234", "demo-s-3") and a supplier
+// number ("SUP-2201"). Only bare digits that end such an id exactly are skipped, so "a sub-$5,000 test", "mid-30%",
+// "ROAS-9.5x" and "the top-100 buyers" are still read (review 2026-10-27).
+const ROW_ID = /(?:^|[^\p{L}\p{N}_-])(?:demo(?:-[a-z]+)+-[a-z]*|sup-)\d+$/iu;
+const ID_END = /^(?:$|[\s,;:)!?]|\.(?:\s|$))/;
+
+/** Do the digits ending at `end` close a row id, with nothing glued after them? */
+function isRowId(text: string, end: number): boolean {
+  return ROW_ID.test(text.slice(0, end)) && ID_END.test(text.slice(end));
 }
 
 function sentenceIndex(text: string, at: number): number {
