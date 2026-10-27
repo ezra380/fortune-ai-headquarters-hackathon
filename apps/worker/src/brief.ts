@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   DataRequest, DivisionBrief, DIVISION_ASSISTANT,
-  type AssistantId, type Attention, type BriefStatus, type CodeModeResult, type Division, type DivisionData, type Metric,
+  type AssistantId, type Attention, type BriefStatus, type CodeModeResult, type Division, type DivisionData, type Metric, type WeeklyReport,
 } from '@fahq/contracts';
 import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
@@ -111,6 +111,8 @@ type Run = {
   deps: WorkerDeps; task: TaskRow; runId: string;
   division: BriefDivision; assistant: AssistantId; label: string; head: PersonRow; key: string; date: string; request?: string;
 };
+/** What asking the other divisions needs of a run (a brief's, or a weekly report's: weekly.ts asks through the same route). */
+export type AskingRun = Pick<Run, 'deps' | 'task' | 'runId' | 'division' | 'assistant' | 'head' | 'key'>;
 
 /** The scheduled job: this division's brief for one day. */
 export async function divisionBrief(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
@@ -204,8 +206,9 @@ const droppedNote = (dropped: readonly string[]) =>
  * One model call (the division's code model, reasoning on) asks what, if anything, it needs from another division.
  * The answer is stored as a note in the mailbox, so a task that runs again does not ask the model again. A model that
  * cannot be reached stops the task (it is tried again); an answer that cannot be read means no questions, and says so.
+ * A weekly report passes `weekly`: its own purpose, and the owner's standing asks added to the rules.
  */
-async function decideNeeds(run: Run, read: DivisionData): Promise<DataRequest[]> {
+export async function decideNeeds(run: AskingRun, read: DivisionData, weekly?: { purpose: string; asks: string }): Promise<DataRequest[]> {
   const { deps, task, runId, division, assistant } = run;
   const noteKey = `needs:${run.key}`;
   const stored = await deps.store.messageByKey(noteKey);
@@ -216,7 +219,8 @@ async function decideNeeds(run: Run, read: DivisionData): Promise<DataRequest[]>
   let reply;
   try {
     reply = await deps.models.nvidia.chat({
-      purpose: `${division}.needs`, model, system: `${deps.profiles.skill(assistant)}\n\n${NEEDS_RULES}`.trim(),
+      purpose: weekly?.purpose ?? `${division}.needs`, model,
+      system: `${deps.profiles.skill(assistant)}\n\n${NEEDS_RULES}${weekly ? `\n${weekly.asks}` : ''}`.trim(),
       user: JSON.stringify({
         division, period: deps.period, metrics: read.metrics.map(shownMetric), attention: read.attention,
         otherDivisions: (['finance', 'online', 'salon'] as const).filter((d) => d !== division),
@@ -224,7 +228,7 @@ async function decideNeeds(run: Run, read: DivisionData): Promise<DataRequest[]>
       maxTokens: positiveInt(process.env, 'NEEDS_MAX_TOKENS', 3000), temperature: 0.2, json: true, thinking: true,
     });
   } catch (error) {
-    await receipt(deps, { runId, taskId: task.id, step: 'brief.needs', assistant, started, outcome: 'failed', model, detail: errorText(error, 'the model failed') });
+    await receipt(deps, { runId, taskId: task.id, step: weekly ? 'weekly.needs' : 'brief.needs', assistant, started, outcome: 'failed', model, detail: errorText(error, 'the model failed') });
     throw error;
   }
   let parsed: ReturnType<typeof parseNeeds>;
@@ -235,7 +239,7 @@ async function decideNeeds(run: Run, read: DivisionData): Promise<DataRequest[]>
   }
   const asked = parsed.requests.length > 0 ? `asks ${parsed.requests.map((r) => r.division).join(', ')}` : parsed.dropped.length > 0 ? 'no questions went out' : 'needs nothing from the other divisions';
   await receipt(deps, {
-    runId, taskId: task.id, step: 'brief.needs', assistant, started, model: reply.model, inputTokens: reply.inputTokens, outputTokens: reply.outputTokens,
+    runId, taskId: task.id, step: weekly ? 'weekly.needs' : 'brief.needs', assistant, started, model: reply.model, inputTokens: reply.inputTokens, outputTokens: reply.outputTokens,
     outcome: parsed.unusable ? 'refused' : 'ok',
     detail: parsed.unusable ? `no questions asked: ${parsed.unusable}` : `${asked}${droppedNote(parsed.dropped)}`,
   });
@@ -303,7 +307,7 @@ export function replyMetrics(facts: unknown, from: BriefDivision): ReplyMetric[]
 }
 
 /** Posts each question to its division's assistant, has that assistant answer it, and returns the replies. */
-async function consult(run: Run, requests: readonly DataRequest[]): Promise<Reply[]> {
+export async function consult(run: AskingRun, requests: readonly DataRequest[]): Promise<Reply[]> {
   const { deps, runId, assistant, head } = run;
   const posted: MessageRow[] = [];
   for (const r of requests) {
@@ -517,7 +521,7 @@ async function writeBrief(run: Run, read: DivisionData, status: BriefStatus, rep
   return { ok: false, why: 'check', reason: objections.slice(0, 3).join(' | '), attempts: 2, model: usedModel, inputTokens, outputTokens };
 }
 
-const CEO_LINE: Record<BriefStatus, string> = {
+export const CEO_LINE: Record<BriefStatus, string> = {
   normal: 'is running normally.',
   watch: 'has something to watch; its head has the detail.',
   act: 'needs a decision from its head.',
@@ -624,7 +628,7 @@ async function queueDigestWhenAllIn(run: Run): Promise<boolean> {
 // ---- BRIEF ------------------------------------------------------------------------------------------
 
 /** When the text arrived (its own time), or `now` when the task carries none: a task that runs again later still means the same moment. */
-function arrivedAt(task: TaskRow, now: Date): Date {
+export function arrivedAt(task: TaskRow, now: Date): Date {
   const at = Date.parse(String((task.payload as { receivedAt?: unknown }).receivedAt ?? ''));
   return Number.isNaN(at) ? now : new Date(at);
 }
@@ -691,22 +695,45 @@ export const BRIEF_CODE_FOR = 'approving a brief action: reply APPROVE <1-3> <co
 /** "a", "a and b", "a, b and c". */
 const joined = (items: readonly string[]) => (items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`);
 
-/** The brief a code hangs from: the brief's own mailbox row, and the brief it names. Null when the row names none. */
-async function briefBehind(deps: WorkerDeps, messageId: string): Promise<{ doc: MessageRow; row: DivisionBriefRow } | null> {
-  const doc = await deps.store.message(messageId);
-  const briefId = typeof doc.body.briefId === 'string' ? doc.body.briefId : '';
-  return briefId ? { doc, row: await deps.store.divisionBrief(briefId) } : null;
+/** What the head approves by rank in a weekly report: George's paths, or Georgette's and Cindy's actions. */
+export function weeklyItems(report: WeeklyReport): { noun: 'path' | 'action'; items: Approvable['items'] } {
+  if (report.division === 'finance') {
+    return { noun: 'path', items: (report.paths?.plans ?? []).map((p) => ({ rank: p.rank, title: p.title, cites: [...new Set(p.evidence.map((e) => e.metricId))] })) };
+  }
+  return { noun: 'action', items: report.actions.map((a) => ({ rank: a.rank, title: a.title, cites: a.cites })) };
 }
 
-/** The ranks asked for that the brief has no action for. */
-const missingRanks = (row: DivisionBriefRow, ranks: readonly number[]) => ranks.filter((rank) => !row.brief.actions.some((a) => a.rank === rank));
+/** What a code was issued for: a brief's actions, or a weekly report's paths or actions, with what the record needs of it. */
+type Approvable = {
+  doc: MessageRow; what: 'brief' | 'weekly report'; noun: 'action' | 'path'; id: string; division: BriefDivision;
+  taskId: string | null; dataSource: string | null; createdAt: string; items: { rank: number; title: string; cites: string[] }[];
+};
+
+/** The brief or weekly report a code hangs from: its own mailbox row, and the report it names. Null when the row names none. */
+async function approvableBehind(deps: WorkerDeps, messageId: string): Promise<Approvable | null> {
+  const doc = await deps.store.message(messageId);
+  const of = (id: unknown) => (typeof id === 'string' ? id : '');
+  if (of(doc.body.briefId)) {
+    const row = await deps.store.divisionBrief(of(doc.body.briefId));
+    return { doc, what: 'brief', noun: 'action', id: row.id, division: row.division, taskId: row.task_id, dataSource: row.data_source, createdAt: row.created_at, items: row.brief.actions };
+  }
+  if (of(doc.body.weeklyReportId)) {
+    const row = await deps.store.weeklyReport(of(doc.body.weeklyReportId));
+    return { doc, what: 'weekly report', id: row.id, division: row.division, taskId: row.task_id, dataSource: row.data_source, createdAt: row.created_at, ...weeklyItems(row.report) };
+  }
+  return null;
+}
+
+/** The ranks asked for that the brief or report has nothing for. */
+const missingRanks = (behind: Approvable, ranks: readonly number[]) => ranks.filter((rank) => !behind.items.some((a) => a.rank === rank));
 
 /**
- * The head replies APPROVE <ranks> <code>. The code is for one brief and works once, for the actions named in that one
- * reply. Each action named is recorded as the head's decision: the division remembers it, the World Model holds it and
- * the HQ Manager gets a note. The head carries the action out. The assistant changes nothing.
- * Everything that can be checked is checked BEFORE the code is spent: a rank the brief does not have is refused with the
- * code still usable, so one wrong digit never costs the head her decision.
+ * The head replies APPROVE <ranks> <code>. The code is for one brief (its actions) or one weekly report (George's paths, or
+ * Georgette's and Cindy's actions) and works once, for the ranks named in that one reply. Each one named is recorded as the
+ * head's decision: the division remembers it, the World Model holds it and the HQ Manager gets a note. The head carries it
+ * out. The assistant changes nothing.
+ * Everything that can be checked is checked BEFORE the code is spent: a rank the brief or report does not have is refused
+ * with the code still usable, so one wrong digit never costs the head her decision.
  */
 export async function approveAction(
   command: Extract<Command, { kind: 'approve' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
@@ -714,13 +741,13 @@ export async function approveAction(
 ): Promise<Outcome> {
   const pending = await deps.store.peekApprovalCode({ phone: sender.phone, code: command.code, action: 'approve_action', now: started });
   if (pending) {
-    const behind = await briefBehind(deps, pending.message_id);
-    if (!behind) return fail('the approval does not point at a brief');
-    const lacking = missingRanks(behind.row, command.ranks);
+    const behind = await approvableBehind(deps, pending.message_id);
+    if (!behind) return fail('the approval does not point at a brief or a weekly report');
+    const lacking = missingRanks(behind, command.ranks);
     if (lacking.length > 0) {
       const { answer } = await approverOf(pending.approver_person_id, sender, task, deps);
-      await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: behind.row.division, started, outcome: 'refused', detail: `the brief has no action ${lacking.join(', ')}; the code was not spent` });
-      await answer(`This brief has no action ${lacking.join(' or ')}. Nothing was recorded, and your code still works.`);
+      await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: behind.division, started, outcome: 'refused', detail: `the ${behind.what} has no ${behind.noun} ${lacking.join(', ')}; the code was not spent` });
+      await answer(`This ${behind.what} has no ${behind.noun} ${lacking.join(' or ')}. Nothing was recorded, and your code still works.`);
       return done;
     }
   }
@@ -738,40 +765,43 @@ export async function approveAction(
     return done;
   }
   const { person, answer } = await approverOf(used.approver_person_id, sender, task, deps);
-  const behind = await briefBehind(deps, used.message_id);
-  if (!behind) return fail('the approval does not point at a brief');
-  const { doc, row } = behind;
-  const lacking = missingRanks(row, command.ranks);
+  const behind = await approvableBehind(deps, used.message_id);
+  if (!behind) return fail('the approval does not point at a brief or a weekly report');
+  const { doc, noun, what } = behind;
+  const lacking = missingRanks(behind, command.ranks);
   if (lacking.length > 0) {
     // The look before spending rules this out; if the code was taken a moment earlier, this says so instead of recording half.
-    const error = `the brief has no action ${lacking.join(', ')}, though the code was spent for it: nothing was recorded`;
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: row.division, started, outcome: 'failed', detail: error });
-    await answer(`This brief has no action ${lacking.join(' or ')}, and the code was already used up, so nothing was recorded. Text BRIEF for a new brief and a new code.`);
+    const error = `the ${what} has no ${noun} ${lacking.join(', ')}, though the code was spent for it: nothing was recorded`;
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: behind.division, started, outcome: 'failed', detail: error });
+    await answer(`This ${what} has no ${noun} ${lacking.join(' or ')}, and the code was already used up, so nothing was recorded. Text ${what === 'brief' ? 'BRIEF for a new brief' : 'REPORT for a new report'} and a new code.`);
     return fail(error);
   }
-  const assistant = DIVISION_ASSISTANT[row.division];
+  const assistant = DIVISION_ASSISTANT[behind.division];
   // The text's own arrival time, so a task that runs again records the same moment.
   const at = arrivedAt(task, deps.now()).toISOString();
-  const found = row.brief.actions.filter((a) => command.ranks.some((rank) => rank === a.rank));
+  const found = behind.items.filter((a) => command.ranks.some((rank) => rank === a.rank));
   for (const action of found) {
-    // Each action is its own item in the record and in the division's memory, so approving two of one brief keeps both.
+    // Each one is its own item in the record and in the division's memory, so approving two of one brief keeps both.
     const item = `${doc.id}:${action.rank}`;
     await deps.brain.record.proposal({
-      proposalId: item, requestTaskId: row.task_id ?? doc.id, by: assistant, forPersonId: person.id, titles: [action.title],
-      citedMetricIds: action.cites, dataSource: row.data_source ?? 'not recorded', at: new Date(row.created_at).toISOString(), runId,
+      proposalId: item, requestTaskId: behind.taskId ?? doc.id, by: assistant, forPersonId: person.id, titles: [action.title],
+      citedMetricIds: action.cites, dataSource: behind.dataSource ?? 'not recorded', at: new Date(behind.createdAt).toISOString(), runId,
     });
     await deps.brain.record.decision({ proposalId: item, personId: person.id, personName: person.name, verdict: 'signed', planRank: action.rank, action: 'decide_plan', at, runId });
     deps.brain.memory(assistant).rememberDecision({ proposalId: item, personId: person.id, verdict: 'signed', planRank: action.rank, planTitle: action.title, runId });
     await deps.store.postMessage({
       from: assistant, to: 'manager', kind: 'decision', replyTo: doc.id, dedupeKey: `action-decision:${doc.id}:${action.rank}`,
-      body: { type: 'action_decision', briefId: row.id, division: row.division, rank: action.rank, title: action.title, verdict: 'approved', by: person.id },
+      body: {
+        type: 'action_decision', ...(what === 'brief' ? { briefId: behind.id } : { weeklyReportId: behind.id, kind: noun }),
+        division: behind.division, rank: action.rank, title: action.title, verdict: 'approved', by: person.id,
+      },
     });
   }
   await receipt(deps, {
     runId, taskId: task.id, step: 'approval.action', assistant, started, outcome: 'ok',
-    detail: `action ${found.map((a) => a.rank).join(', ')} of the ${row.division} brief approved by ${person.id}`,
+    detail: `${noun} ${found.map((a) => a.rank).join(', ')} of the ${behind.division} ${what} approved by ${person.id}`,
   });
-  const names = found.map((a) => `action ${a.rank} (${a.title})`);
+  const names = found.map((a) => `${noun} ${a.rank} (${a.title})`);
   await answer(`Recorded: you approved ${joined(names)}. ${found.length === 1 ? "It's" : "They're"} yours to carry out.`);
   return done;
 }

@@ -14,6 +14,8 @@ export type Command =
   | { kind: 'approve'; ranks: Rank[]; code: string }
   | { kind: 'review' }
   | { kind: 'brief' }
+  /** REPORT, or REPORT FINANCE|ONLINE|SALON|ALL: a weekly report now (null = the sender's own, or all three for the owner). */
+  | { kind: 'report'; division: 'FINANCE' | 'ONLINE' | 'SALON' | 'ALL' | null }
   | { kind: 'status' }
   | { kind: 'malformed'; hint: string };
 
@@ -48,6 +50,9 @@ export function parseCommand(text: string): Command | null {
   if (t === 'REVIEW') return { kind: 'review' };
   // BRIEF: the owner asks every division for its brief now; a division head asks for her own.
   if (t === 'BRIEF') return { kind: 'brief' };
+  // REPORT: a weekly report now. The owner names a division or ALL; a division head asks for her own.
+  m = /^REPORT(?: (FINANCE|ONLINE|SALON|ALL))?$/.exec(t);
+  if (m) return { kind: 'report', division: (m[1] ?? null) as Extract<Command, { kind: 'report' }>['division'] };
   if (t === 'STATUS') return { kind: 'status' };
   const approvalWord = /\b(SEND|CONFIRM|DECLINE|ADOPT|APPROVE|APPROVED|YES|OK)\b/.test(t);
   // A near-miss approval: a code next to an approval word ("ok send 2 482913 thanks") never goes to a
