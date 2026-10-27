@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import type { ModelPort, Plan } from '@fahq/contracts';
+import { mixedSentences, type Metric, type ModelPort, type Plan } from '@fahq/contracts';
 import { parseJsonObject } from '@fahq/models';
 import { errorText } from './common.ts';
 import { DEPARTMENT_LABEL, RULE_ORDER, type Department } from './departments.ts';
-import { numbersWritten, numberTrace } from './reports.ts';
+import { numberTrace } from './reports.ts';
 
 // Owner HQ's choice of the final three. Every department has already written plans whose numbers a
 // program checked; here one model picks the three best of them, and a program checks that its words use
@@ -34,27 +34,19 @@ const CANDIDATE_ID = /\b(?:finance|salon|online):\d\b/gi;
 const withoutIds = (text: string) => text.replace(CANDIDATE_ID, '');
 /** What a plan says, for number checks: everything except its rank. */
 const contentOf = (c: Candidate) => ({ ...c.plan, rank: undefined });
-const soleBusiness = (c: Candidate) => (c.plan.businesses.length === 1 ? c.plan.businesses[0] : 'mixed');
 
-/** Sentences in `text` that hold a number only a salon-only plan has next to a number only an online-only plan has. */
-function mixedSentences(label: string, text: string, picks: readonly Candidate[]): string[] {
-  const objections: string[] = [];
-  for (const sentence of text.split(/(?<=[.!?;])\s+/)) {
-    const sides = new Set<string>();
-    for (const n of numbersWritten(sentence).found) {
-      const owners = new Set(picks.filter((c) => numberTrace([['n', n.raw]], contentOf(c)).length === 0).map(soleBusiness));
-      const only = owners.size === 1 ? [...owners][0] : undefined;
-      if (only === 'salon' || only === 'online') sides.add(only);
-    }
-    if (sides.size === 2) objections.push(`${label}: one sentence mixes a salon number and an online number`);
-  }
-  return objections;
-}
+/**
+ * Sentences that put a salon number next to an online number. Which business a number belongs to comes from the
+ * metric it traces to inside the plans the text is about (the contracts rule a plan's own words pass), not from
+ * how many businesses a plan lists: a plan that cites both is held to it too.
+ */
+const mixed = (label: string, text: string, plans: readonly Plan[], metrics: readonly Metric[]) =>
+  mixedSentences(text, plans, metrics).map((numbers) => `${label}: one sentence mixes a salon number and an online number (${numbers.join(', ')})`);
 
 export type SynthesisCheck = { ok: true; picks: Picked[]; note: string } | { ok: false; objections: string[] };
 
 /** The schema, then the rules a schema cannot state: real and different ids, and every number from the plans picked. */
-export function checkSynthesis(raw: unknown, candidates: readonly Candidate[]): SynthesisCheck {
+export function checkSynthesis(raw: unknown, candidates: readonly Candidate[], metrics: readonly Metric[]): SynthesisCheck {
   const parsed = Synthesis.safeParse(raw);
   if (!parsed.success) {
     return { ok: false, objections: parsed.error.issues.slice(0, 10).map((i) => `${i.path.join('.') || 'answer'}: ${i.message}`) };
@@ -69,10 +61,10 @@ export function checkSynthesis(raw: unknown, candidates: readonly Candidate[]): 
   const chosen = picks.map((p) => byId.get(p.id)!);
   picks.forEach((p, i) => {
     objections.push(...numberTrace([[`pick ${i + 1} why`, withoutIds(p.why)]], contentOf(chosen[i]!)));
-    objections.push(...mixedSentences(`pick ${i + 1} why`, withoutIds(p.why), [chosen[i]!]));
+    objections.push(...mixed(`pick ${i + 1} why`, withoutIds(p.why), [chosen[i]!.plan], metrics));
   });
   objections.push(...numberTrace([['note', withoutIds(note)]], chosen.map(contentOf)));
-  objections.push(...mixedSentences('note', withoutIds(note), chosen));
+  objections.push(...mixed('note', withoutIds(note), chosen.map((c) => c.plan), metrics));
   return objections.length > 0 ? { ok: false, objections } : { ok: true, picks, note };
 }
 
@@ -100,6 +92,8 @@ export async function synthesize(deps: {
   planModel: string;
   request: string;
   candidates: readonly Candidate[];
+  /** The metrics the candidates cite: they tell which business each number belongs to. */
+  metrics: readonly Metric[];
   lessons: readonly string[];
 }): Promise<Synthesized> {
   const shown = deps.candidates.map((c) => ({
@@ -137,7 +131,7 @@ export async function synthesize(deps: {
       firstObjection ??= objections[0] ?? null;
       continue;
     }
-    const check = checkSynthesis(raw, deps.candidates);
+    const check = checkSynthesis(raw, deps.candidates, deps.metrics);
     if (check.ok) return { ok: true, picks: check.picks, note: check.note, attempts: attempt, model, inputTokens, outputTokens, firstObjection };
     objections = check.objections;
     firstObjection ??= objections[0] ?? null;

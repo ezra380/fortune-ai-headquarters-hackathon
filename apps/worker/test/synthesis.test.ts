@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ProfitPlans } from '@fahq/contracts';
 import { candidateId, checkSynthesis, pickByRule, synthesize, SYNTHESIS_SYSTEM, type Candidate } from '../src/synthesis.ts';
-import { onlinePlans, salonPlans, scriptedModel, validPlans } from './fixtures.ts';
+import { mockMetrics, onlinePlans, salonPlans, scriptedModel, validPlans } from './fixtures.ts';
 
 // Owner HQ's pick of the final three: what a program accepts from the model, and the rule that takes over.
 // The model is a FAKE (scripted); the plans are the department fixtures, already valid.
@@ -19,13 +19,13 @@ const GOOD = reply([
 ], 'Different bets that fit together.');
 
 const objectionsOf = (raw: unknown) => {
-  const check = checkSynthesis(raw, candidates);
+  const check = checkSynthesis(raw, candidates, mockMetrics);
   return check.ok ? [] : check.objections;
 };
 
 describe('checkSynthesis', () => {
   it('accepts three different candidates whose words use only numbers from the plans picked', () => {
-    const check = checkSynthesis(JSON.parse(GOOD), candidates);
+    const check = checkSynthesis(JSON.parse(GOOD), candidates, mockMetrics);
     expect(check).toMatchObject({ ok: true, note: 'Different bets that fit together.' });
     expect(check.ok && check.picks.map((p) => p.id)).toEqual(['online:1', 'salon:1', 'finance:1']);
   });
@@ -69,7 +69,34 @@ describe('checkSynthesis', () => {
     const separate = reply([['online:3', 'Fine.'], ['salon:1', 'Fine.'], ['finance:2', 'Fine.']], 'Online spends $1,800. The salon earned $6,200.');
     expect(objectionsOf(JSON.parse(separate))).toEqual([]);
     const mixed = reply([['online:3', 'Fine.'], ['salon:1', 'Fine.'], ['finance:2', 'Fine.']], 'Online spends $1,800 while the salon earned $6,200.');
-    expect(objectionsOf(JSON.parse(mixed))).toEqual(['note: one sentence mixes a salon number and an online number']);
+    expect(objectionsOf(JSON.parse(mixed))).toEqual(['note: one sentence mixes a salon number and an online number ($1,800, $6,200)']);
+  });
+
+  describe('the salon and online rule judges each number by the metric it traces to, not by how many businesses the plan touches', () => {
+    // finance:3 cites BOTH businesses: Mazali revenue $12,400 (online) and wash and set revenue $6,200 (salon).
+    const BOTH = 'Mazali brought in $12,400 while the wash and set earned $6,200.';
+    const MIXED = 'one sentence mixes a salon number and an online number ($12,400, $6,200)';
+
+    it("refuses a reason that quotes a salon number and an online number from a plan that cites both businesses", () => {
+      const picks = reply([['finance:3', BOTH], ['online:1', 'Fine.'], ['salon:1', 'Fine.']]);
+      expect(objectionsOf(JSON.parse(picks))).toEqual([`pick 1 why: ${MIXED}`]);
+    });
+
+    it('refuses the same sentence in the note', () => {
+      const picks = reply([['online:1', 'Fine.'], ['salon:1', 'Fine.'], ['finance:3', 'Fine.']], BOTH);
+      expect(objectionsOf(JSON.parse(picks))).toEqual([`note: ${MIXED}`]);
+    });
+
+    it('lets that plan quote each side in its own sentence, and one side with itself in one sentence', () => {
+      const why = 'Mazali brought in $12,400, which becomes $13,020 with the lift. The wash and set earned $6,200.';
+      expect(objectionsOf(JSON.parse(reply([['finance:3', why], ['online:1', 'Fine.'], ['salon:1', 'Fine.']])))).toEqual([]);
+    });
+
+    it("is not hidden by a plan that cites both businesses among the picks: a number another pick also has keeps its side", () => {
+      // $6,200 is in the salon plan AND in finance:3; 2.4x is the online plan's. Together in one sentence they still mix.
+      const picks = reply([['online:1', 'Fine.'], ['salon:1', 'Fine.'], ['finance:3', 'Fine.']], 'Ads return 2.4x while the salon earned $6,200.');
+      expect(objectionsOf(JSON.parse(picks))).toEqual(['note: one sentence mixes a salon number and an online number (2.4x, $6,200)']);
+    });
   });
 });
 
@@ -89,7 +116,7 @@ describe('pickByRule', () => {
 
 describe('synthesize', () => {
   const run = (model: ReturnType<typeof scriptedModel>) =>
-    synthesize({ model: model.port, planModel: 'nvidia/ultra', request: 'Plans please', candidates, lessons: ['Prefer cheap tests.'] });
+    synthesize({ model: model.port, planModel: 'nvidia/ultra', request: 'Plans please', candidates, metrics: mockMetrics, lessons: ['Prefer cheap tests.'] });
 
   it('asks once with the candidates and the lessons, and returns the checked picks', async () => {
     const model = scriptedModel({ 'owner.synthesis': GOOD });

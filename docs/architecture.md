@@ -82,8 +82,9 @@ credentials, are ever used here.
 5. **No action on the world.** The outbox sends only to registered people. Nothing charges, publishes,
    messages a customer or changes an ad.
 6. **No invented numbers.** Evidence must match the metric it cites; projections must equal
-   `metric × factor`; no claim mixes salon and online. On failure the task fails with the reason. No
-   silent fallback model.
+   `metric × factor`; no claim mixes salon and online (a plan's own words, and the reasons and note Owner HQ
+   writes about picked plans, pass the same sentence rule: each number belongs to the business of the metric
+   it traces to). On failure the task fails with the reason. No silent fallback model.
 7. **Memory holds only what a person decided.**
 8. **Model-written code runs only in the sandbox.** No network, no files, no timers. Time and memory
    limits. Only the brain tools passed in are reachable.

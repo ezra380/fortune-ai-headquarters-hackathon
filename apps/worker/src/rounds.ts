@@ -186,7 +186,7 @@ async function choose(round: Round, answered: readonly Answered[]): Promise<Chos
   }
   const started = deps.now();
   const written = await synthesize({
-    model: deps.models.nvidia, planModel: deps.models.planModel, request: round.requestText, candidates,
+    model: deps.models.nvidia, planModel: deps.models.planModel, request: round.requestText, candidates, metrics: round.source.metrics,
     lessons: deps.brain.memory('owner').lessons(10).map((m) => m.content),
   });
   const base = { runId, taskId: task.id, step: 'owner.synthesis', assistant: 'owner' as const, started, model: written.model, inputTokens: written.inputTokens, outputTokens: written.outputTokens };
