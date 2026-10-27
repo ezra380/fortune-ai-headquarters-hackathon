@@ -5,6 +5,10 @@ import type { HmemLike, MemoryRecordLike, MeterlessEngines } from './meterless.t
 // tagged "unapproved". Only a person's decision becomes long-term memory, and it supersedes the
 // proposal it settles. Recall for planning returns decisions only, so an unapproved model idea is
 // never treated as a fact.
+//
+// A lesson is a change the HQ Manager recommended and a person adopted by code. It is long-term
+// memory tagged "lesson" (never "decision"), so recallDecisions never returns it; lessons() does.
+// A review note is the manager's own unapproved summary of a review: short-term, low confidence.
 
 export type Decision = { memory: MemoryRecordLike; relevance: number };
 
@@ -54,6 +58,48 @@ export class AssistantMemory {
       source: `fahq/${this.assistant}/decision/${input.runId}`,
       provenance: { origin: 'manual', learnedAt: this.now(), label: `Decision by ${input.personId}`, refs: [input.proposalId] },
       ...(proposal ? { supersedes: proposal.id } : {}),
+    });
+  }
+
+  /** A standing lesson the owner adopted. One memory per recommendation (a retried task finds it again). */
+  rememberLesson(input: { recommendationId: string; text: string; adoptedBy: string; reviewId: string; runId: string }): MemoryRecordLike {
+    const tag = `recommendation:${input.recommendationId}`;
+    const existing = this.hmem.store.all().find((m) => m.tags.includes('lesson') && m.tags.includes(tag));
+    if (existing) return existing;
+    return this.hmem.add({
+      content: input.text.slice(0, 2000),
+      type: 'general',
+      layer: 'long_term',
+      confidence: 0.9,
+      tags: ['lesson', 'adopted', tag],
+      source: `fahq/${this.assistant}/lesson/${input.runId}`,
+      provenance: { origin: 'manual', learnedAt: this.now(), label: `Adopted by ${input.adoptedBy}`, refs: [input.recommendationId, input.reviewId] },
+    });
+  }
+
+  /** Adopted lessons that nothing superseded, newest first. */
+  lessons(limit = 10): MemoryRecordLike[] {
+    return this.hmem.store
+      .all()
+      .filter((m) => m.tags.includes('lesson') && m.tags.includes('adopted') && !m.supersededBy)
+      .reverse() // insertion order is oldest first; the sort below is stable, so ties keep newest first
+      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+      .slice(0, limit);
+  }
+
+  /** The manager's summary of a review, unapproved until a person adopts something from it. One per review. */
+  rememberReviewNote(input: { reviewId: string; summary: string; runId: string }): MemoryRecordLike {
+    const tag = `review:${input.reviewId}`;
+    const existing = this.hmem.store.all().find((m) => m.tags.includes('review') && m.tags.includes(tag));
+    if (existing) return existing;
+    return this.hmem.add({
+      content: `Review ${input.reviewId}: ${input.summary}`.slice(0, 2000),
+      type: 'general',
+      layer: 'short_term',
+      confidence: 0.4,
+      tags: ['review', 'unapproved', tag],
+      source: `fahq/${this.assistant}/review/${input.runId}`,
+      provenance: { origin: 'model_response', learnedAt: this.now(), label: 'Unapproved review', refs: [input.reviewId] },
     });
   }
 

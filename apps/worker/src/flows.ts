@@ -1,58 +1,30 @@
-import { randomInt, randomUUID } from 'node:crypto';
-import type { AssistantId, DataPort, DeliveryPort, Metric, ModelPort, ProfitPlans } from '@fahq/contracts';
-import type { Brain } from '@fahq/brain';
+import { randomUUID } from 'node:crypto';
+import type { Metric, ProfitPlans } from '@fahq/contracts';
 import { parseCommand, type Command } from './commands.ts';
+import { approverOf, done, fail, fitSms, newCode, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
 import { planDigest, PlanError, writePlans } from './finance.ts';
+import { adoptChanges, askQuestion, managerReview, requestReview } from './manager.ts';
 import { routeText } from './router.ts';
-import type { MessageRow, PersonRow, Store, TaskRow } from './store.ts';
+import type { MessageRow, PersonRow, TaskRow } from './store.ts';
 
 // The assistants' flows. Assistants send proposals; only a person's one-time code turns a proposal
-// into a forward or a decision. Every step leaves a receipt.
+// into a forward, a decision or an adopted lesson. Every step leaves a receipt.
 
-export type WorkerDeps = {
-  store: Store;
-  brain: Brain;
-  models: { nvidia: ModelPort; planModel: string; routerModel: string };
-  data: DataPort | null;
-  delivery: DeliveryPort | null;
-  now: () => Date;
-  worker: string;
-  /** true when talking to real providers; recorded on every receipt. */
-  live: boolean;
-  period: '2026-09' | '2026-10-mtd';
-  smsLive: boolean;
-  printers: Partial<Record<AssistantId, string>>;
-  printDir: string;
-  /** Dry-run SMS go here (and to the console) instead of Twilio. */
-  smsSink?: (message: { to: string; body: string }) => void;
-};
-
-export type Outcome = { status: 'done' | 'failed'; error?: string };
-
-const newCode = () => String(randomInt(100000, 1000000));
-const done: Outcome = { status: 'done' };
-const fail = (error: string): Outcome => ({ status: 'failed', error });
-
-async function receipt(
-  deps: WorkerDeps,
-  r: { runId: string; taskId: string | null; step: string; assistant: AssistantId | null; started: Date; outcome: 'ok' | 'refused' | 'failed'; model?: string; dataSource?: string; detail?: string },
-) {
-  await deps.store.receipt({
-    runId: r.runId, taskId: r.taskId, step: r.step, assistantId: r.assistant, live: deps.live,
-    model: r.model ?? null, dataSource: r.dataSource ?? null, startedAt: r.started.toISOString(),
-    endedAt: deps.now().toISOString(), costUsd: null, outcome: r.outcome, detail: r.detail?.slice(0, 500) ?? null,
-  });
-}
-
-async function text(deps: WorkerDeps, to: PersonRow, from: AssistantId, body: string, dedupeKey: string) {
-  await deps.store.addOutbox({ channel: 'sms', toPersonId: to.id, from, body, attachmentRef: null, dedupeKey });
-}
+export type { Outcome, WorkerDeps } from './common.ts';
+export { fitSms } from './common.ts';
 
 export async function handleTask(task: TaskRow, deps: WorkerDeps): Promise<Outcome> {
   const runId = randomUUID();
   if (task.kind === 'inbound_text') return inbound(task, deps, runId);
   if (task.kind === 'mailbox') return mailbox(task, deps, runId);
+  if (task.kind === 'scheduled') return scheduled(task, deps, runId);
   return fail(`unsupported task kind ${task.kind}`);
+}
+
+async function scheduled(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
+  const job = String((task.payload as { job?: unknown }).job ?? '');
+  if (task.assistant_id === 'manager' && job === 'manager_review') return managerReview(task, deps, runId);
+  return fail(`unsupported scheduled job "${job}" for the ${task.assistant_id} assistant`);
 }
 
 async function inbound(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
@@ -64,10 +36,8 @@ async function inbound(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
   const command = parseCommand(payload.body);
   if (command) return handleCommand(command, person, task, deps, runId);
 
-  if (person.assistant_id === 'finance') {
-    await text(deps, person, 'finance', 'In this build your assistant takes plan requests from the owner. Reply STATUS for open items.', `reply:${task.id}`);
-    return done;
-  }
+  // The finance owner's own questions go straight to a lookup with the finance assistant's tools (no router).
+  if (person.assistant_id === 'finance') return askQuestion(person, 'finance', payload.body, task, deps, runId);
   const started = deps.now();
   let routed;
   try {
@@ -80,11 +50,16 @@ async function inbound(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
   }
   await receipt(deps, {
     runId, taskId: task.id, step: 'front-door', assistant: person.assistant_id, started, model: routed.model,
-    outcome: routed.valid ? 'ok' : 'refused',
+    outcome: routed.valid ? 'ok' : 'refused', inputTokens: routed.inputTokens, outputTokens: routed.outputTokens,
     detail: `${routed.decision.intent} → ${routed.decision.targetAssistant}; risks: ${routed.decision.risks.join(',') || 'none'}; ${routed.decision.reason}`,
   });
-  if (routed.decision.targetAssistant !== 'finance') {
-    await text(deps, person, person.assistant_id, `That sounds like one for the ${routed.decision.targetAssistant} assistant. In this build only the finance assistant runs, so I've saved it.`, `reply:${task.id}`);
+  const { targetAssistant, intent } = routed.decision;
+  if (targetAssistant === 'manager') return requestReview(person, task, deps, runId, started);
+  if ((targetAssistant === 'owner' || intent === 'status') && person.role === 'owner') {
+    return askQuestion(person, 'owner', payload.body, task, deps, runId);
+  }
+  if (targetAssistant !== 'finance') {
+    await text(deps, person, person.assistant_id, `That sounds like one for the ${targetAssistant} assistant. In this build only the finance assistant runs, so I've saved it.`, `reply:${task.id}`);
     return done;
   }
   const request = await deps.store.postMessage({
@@ -120,6 +95,8 @@ async function mailbox(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
       result = await writePlans({
         model: deps.models.nvidia, planModel: deps.models.planModel, data: deps.data,
         memory: deps.brain.memory('finance'), now: started, request: askText, period: deps.period,
+        // What the owner adopted for the finance assistant: standing guidance for the plan writer.
+        lessons: deps.brain.memory('finance').lessons(10).map((m) => m.content),
       });
     } catch (error) {
       const detail = error instanceof PlanError ? error.objections.join(' | ') : error instanceof Error ? error.message : 'unknown error';
@@ -127,10 +104,13 @@ async function mailbox(task: TaskRow, deps: WorkerDeps, runId: string): Promise<
       await text(deps, requester, 'finance', "I couldn't produce plans whose numbers all check out, so I'm not sending any. The reasons are on the console.", `reply:${task.id}`);
       return fail(`plans not produced: ${detail}`);
     }
+    const firstObjection = result.attempts > 1 ? result.firstObjections[0] : undefined;
     await receipt(deps, {
       runId, taskId: task.id, step: 'finance.plans', assistant: 'finance', started, outcome: 'ok', model: result.model,
       dataSource: `zetaris:${result.view}#${result.queryHash.slice(0, 12)}`,
-      detail: `attempts ${result.attempts}, tokens ${result.tokens}, cited ${result.citedMetricIds.length} metrics`,
+      inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+      // The report's "needed a correction round" suggestion reads this line back.
+      detail: `attempts ${result.attempts}, tokens ${result.tokens}, cited ${result.citedMetricIds.length} metrics${firstObjection ? `; first objection: ${firstObjection.replace(/\s+/g, ' ').slice(0, 220)}` : ''}`,
     });
     const cited = result.metrics.filter((m) => result.citedMetricIds.includes(m.id));
     proposal = await deps.store.postMessage({
@@ -186,6 +166,10 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
     case 'confirm':
     case 'decline':
       return decidePlan(command, person, task, deps, runId, started, reply);
+    case 'adopt':
+      return adoptChanges(command, person, task, deps, runId, started, reply);
+    case 'review':
+      return requestReview(person, task, deps, runId, started);
   }
 }
 
@@ -198,8 +182,10 @@ async function forwardPlan(
     detail: { planRank: command.planRank }, now: started,
   });
   if (used.outcome === 'wrong_action') {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: sender.assistant_id, started, outcome: 'refused', detail: 'code is for a decision' });
-    await reply(`That code is for a decision: reply CONFIRM <code> or DECLINE <code>. Nothing was sent.`);
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: sender.assistant_id, started, outcome: 'refused', detail: `code is for ${used.action ?? 'another action'}` });
+    await reply(used.action === 'adopt_change'
+      ? 'That code is for adopting a review recommendation: reply ADOPT <1-3> <code>. Nothing was sent.'
+      : `That code is for a decision: reply CONFIRM <code> or DECLINE <code>. Nothing was sent.`);
     return done;
   }
   if (used.outcome !== 'signed' || used.action !== 'forward_plan' || !used.message_id) {
@@ -234,12 +220,6 @@ async function forwardPlan(
   return done;
 }
 
-async function approverOf(approverId: string | null, sender: PersonRow, task: TaskRow, deps: WorkerDeps) {
-  const person = approverId && approverId !== sender.id ? await deps.store.person(approverId) : sender;
-  const answer = (body: string) => text(deps, person, person.assistant_id, body, `reply:${task.id}`);
-  return { person, answer };
-}
-
 async function decidePlan(
   command: Extract<Command, { kind: 'confirm' | 'decline' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
   runId: string, started: Date, reply: (b: string) => Promise<void>,
@@ -249,8 +229,10 @@ async function decidePlan(
     phone: sender.phone, code: command.code, verdict, action: 'decide_plan', taskId: task.id, detail: {}, now: started,
   });
   if (used.outcome === 'wrong_action') {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: sender.assistant_id, started, outcome: 'refused', detail: 'code is for sending a plan' });
-    await reply(`That code is for sending a plan: reply SEND <1-3> <code>. Nothing was recorded.`);
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: sender.assistant_id, started, outcome: 'refused', detail: `code is for ${used.action ?? 'another action'}` });
+    await reply(used.action === 'adopt_change'
+      ? 'That code is for adopting a review recommendation: reply ADOPT <1-3> <code>. Nothing was recorded.'
+      : `That code is for sending a plan: reply SEND <1-3> <code>. Nothing was recorded.`);
     return done;
   }
   if (used.outcome !== verdict || used.action !== 'decide_plan' || !used.message_id) {
@@ -275,12 +257,6 @@ async function decidePlan(
   await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: 'finance', started, outcome: 'ok', detail: `plan ${planRank} ${word} by ${person.id}` });
   await answer(`Recorded: you ${word} plan ${planRank}. Thank you.`);
   return done;
-}
-
-/** An SMS body of at most 1600 characters that always keeps its last line (the code and how to reply). */
-export function fitSms(head: string, tail: string): string {
-  const room = 1600 - tail.length - 1;
-  return `${head.length > room ? `${head.slice(0, room - 1).trimEnd()}…` : head}\n${tail}`;
 }
 
 export function citedMetricsOf(proposal: MessageRow): Metric[] {

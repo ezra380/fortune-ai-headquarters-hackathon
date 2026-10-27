@@ -101,6 +101,58 @@ export class SharedRecord {
     });
   }
 
+  /** An assistant handed the HQ Manager the report of a finished task. */
+  async report(input: {
+    taskId: string;
+    assistant: AssistantId;
+    outcome: 'done' | 'failed' | 'retrying';
+    summary: string;
+  } & Stamp): Promise<string> {
+    const assistant = await this.entity('assistant', `assistant:${input.assistant}`, input.assistant, {}, input);
+    const report = await this.entity('report', `report:${input.taskId}`, `Report ${input.taskId.slice(0, 8)}`, {
+      outcome: input.outcome,
+      summary: input.summary.slice(0, 300),
+    }, input);
+    await this.wm.relate({ from: assistant.id, type: 'reported', to: report.id, source: this.source(input) });
+    return report.id;
+  }
+
+  /** The HQ Manager wrote a review (optionally naming the assistants whose work it covered). */
+  async review(input: {
+    reviewId: string;
+    recommendationCount: number;
+    reviewed?: readonly AssistantId[];
+  } & Stamp): Promise<string> {
+    const manager = await this.entity('assistant', 'assistant:manager', 'manager', {}, input);
+    const review = await this.entity('review', `review:${input.reviewId}`, `Review ${input.reviewId.slice(0, 8)}`, {
+      recommendationCount: input.recommendationCount,
+    }, input);
+    await this.wm.relate({ from: manager.id, type: 'wrote', to: review.id, source: this.source(input) });
+    for (const id of input.reviewed ?? []) {
+      const reviewed = await this.entity('assistant', `assistant:${id}`, id, {}, input);
+      await this.wm.relate({ from: manager.id, type: 'reviewed', to: reviewed.id, source: this.source(input) });
+    }
+    return review.id;
+  }
+
+  /** A person adopted a recommendation; it now guides one assistant. */
+  async adoption(input: {
+    recommendationId: string;
+    reviewId: string;
+    personId: string;
+    personName: string;
+    assistant: AssistantId;
+  } & Stamp): Promise<string> {
+    const person = await this.entity('person', input.personId, input.personName, {}, input);
+    const recommendation = await this.entity('recommendation', `recommendation:${input.recommendationId}`, `Recommendation ${input.recommendationId.slice(0, 8)}`, {}, input);
+    const review = await this.entity('review', `review:${input.reviewId}`, `Review ${input.reviewId.slice(0, 8)}`, {}, input);
+    const assistant = await this.entity('assistant', `assistant:${input.assistant}`, input.assistant, {}, input);
+    await this.wm.relate({ from: review.id, type: 'recommended', to: recommendation.id, source: this.source(input) });
+    await this.wm.relate({ from: person.id, type: 'adopted', to: recommendation.id, source: this.source(input) });
+    await this.wm.relate({ from: recommendation.id, type: 'guides', to: assistant.id, source: this.source(input) });
+    return recommendation.id;
+  }
+
   /** Oldest first. `type` is the World Model event kind (upsertEntity, relate, assertFact, ...). */
   timeline(limit = 50): readonly { id: string; type: string; at: string }[] {
     return this.wm.events().slice(-limit).map((e) => ({ id: e.id, type: e.kind, at: e.at }));

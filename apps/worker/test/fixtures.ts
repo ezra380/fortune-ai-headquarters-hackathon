@@ -59,13 +59,16 @@ export const validPlans = {
   memoryConflicts: [],
 };
 
-export function modelMock(planReplies: string[] = [JSON.stringify(validPlans)]): ModelPort & { calls: string[] } {
+export function modelMock(planReplies: string[] = [JSON.stringify(validPlans)]): ModelPort & { calls: string[]; inputs: { purpose: string; system: string; user: string }[] } {
   const calls: string[] = [];
+  const inputs: { purpose: string; system: string; user: string }[] = [];
   let planIndex = 0;
   return {
     calls,
+    inputs,
     async chat(input) {
       calls.push(input.purpose);
+      inputs.push({ purpose: input.purpose, system: input.system, user: input.user });
       const text = input.purpose === 'front-door'
         ? JSON.stringify({ intent: 'request', risks: ['money', 'ads'], targetAssistant: 'finance', confidence: 0.92, reason: 'profit plans' })
         : planReplies[Math.min(planIndex++, planReplies.length - 1)] ?? '';

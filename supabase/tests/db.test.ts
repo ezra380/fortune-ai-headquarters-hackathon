@@ -259,3 +259,170 @@ describe('row-level security', () => {
     }
   });
 });
+
+describe('the HQ Manager tables', () => {
+  const newTask = async () => (await enqueue(sid(), OWNER)).task_id as string;
+  const insertReport = (taskId: string, summary: string, outcome = 'done') =>
+    pool.query(
+      `insert into public.work_reports (task_id, run_id, assistant_id, task_kind, outcome, summary, steps, usage, suggestions, input_tokens, output_tokens, model_calls, started_at, ended_at)
+       values ($1, $2, 'finance', 'mailbox', $3, $4, '[]'::jsonb, '{}'::jsonb, '[]'::jsonb, 10, 20, 1, $5, $6)
+       on conflict (task_id) do update set outcome = excluded.outcome, summary = excluded.summary, updated_at = now()
+       returning id`,
+      [taskId, randomUUID(), outcome, summary, T0, '2026-10-26T12:00:05Z'],
+    );
+  async function reviewWithRecommendations() {
+    const review = await pool.query(
+      `insert into public.manager_reviews (review_key, covers_from, covers_to, report_count, review, digest)
+       values ($1, $2, $3, 2, '{}'::jsonb, '{}'::jsonb) returning id`,
+      ['test-review:' + randomUUID(), '2026-10-25T12:00:00Z', T0],
+    );
+    const reviewId = review.rows[0].id as string;
+    for (const [rank, assistant] of [[1, 'finance'], [2, 'owner'], [3, 'online']] as const) {
+      await pool.query(
+        'insert into public.recommendations (review_id, rank, assistant_id, change, why) values ($1, $2, $3, $4, $5)',
+        [reviewId, rank, assistant, `Change ${rank}`, `Because ${rank}`],
+      );
+    }
+    return reviewId;
+  }
+  const adopt = (reviewId: string, ranks: number[]) =>
+    pool.query('select * from public.adopt_recommendations($1, $2, $3, $4)', [reviewId, ranks, 'demo-p-owner', T0]).then((r) => r.rows as
+      { recommendation_id: string; rank: number; assistant_id: string; change: string; newly_adopted: boolean }[]);
+
+  it('seeds the manager as an assistant with no phone number and no person', async ({ skip }) => {
+    if (!reachable) skip();
+    const assistant = await pool.query(`select display_name, sms_from from public.assistants where id = 'manager'`);
+    expect(assistant.rows[0]).toEqual({ display_name: 'HQ Manager', sms_from: null });
+    const people = await pool.query(`select count(*)::int as n from public.people where assistant_id = 'manager'`);
+    expect(people.rows[0].n).toBe(0);
+  });
+
+  it('shows the public (anon) role nothing in the new tables', async ({ skip }) => {
+    if (!reachable) skip();
+    await insertReport(await newTask(), 'A finished task');
+    const reviewId = await reviewWithRecommendations();
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local role anon');
+      for (const table of ['work_reports', 'manager_reviews', 'recommendations']) {
+        const visible = await client.query(`select count(*)::int as n from public.${table}`);
+        expect(visible.rows[0].n, table).toBe(0);
+      }
+      await expect(client.query(`select * from public.adopt_recommendations($1, '{1}', 'demo-p-owner')`, [reviewId])).rejects.toThrow(/permission denied/);
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
+  it('keeps one work report per task: the latest attempt wins', async ({ skip }) => {
+    if (!reachable) skip();
+    const task = await newTask();
+    const first = await insertReport(task, 'first attempt', 'retrying');
+    const second = await insertReport(task, 'second attempt', 'done');
+    expect(second.rows[0].id).toBe(first.rows[0].id);
+    const { rows } = await pool.query('select outcome, summary from public.work_reports where task_id = $1', [task]);
+    expect(rows).toEqual([{ outcome: 'done', summary: 'second attempt' }]);
+    // A plain second insert is refused by the unique key, not by a check in code.
+    await expect(pool.query(
+      `insert into public.work_reports (task_id, run_id, assistant_id, task_kind, outcome, summary, steps, usage, suggestions, started_at, ended_at)
+       values ($1, $2, 'finance', 'mailbox', 'done', 'x', '[]', '{}', '[]', $3, $3)`, [task, randomUUID(), T0],
+    )).rejects.toThrow(/duplicate key/);
+  });
+
+  describe('an adopt_change code', () => {
+    async function adoptCode(code: string) {
+      const msg = await pool.query(
+        `insert into public.assistant_messages (from_assistant, to_assistant, kind, body, dedupe_key)
+         values ('manager', 'owner', 'report', '{}'::jsonb, $1) returning id`,
+        ['test:' + randomUUID()],
+      );
+      const issued = await pool.query(
+        'select * from public.issue_approval($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [msg.rows[0].id, 'demo-p-owner', 'adopt_change', code, 'owner', `Reply ADOPT 1 ${code}`, 'test-sms:' + randomUUID(), 720, T0],
+      );
+      return { messageId: msg.rows[0].id as string, approvalId: issued.rows[0].approval_id as string };
+    }
+    const use = (code: string, action: string, at = '2026-10-26T12:05:00Z') =>
+      pool.query('select * from public.use_approval_code($1, $2, $3, $4, $5, $6, $7)', [OWNER, code, 'signed', action, null, '{}', at]).then((r) => r.rows[0]);
+    const freshCode = () => String(100000 + Math.floor(Math.random() * 899999));
+
+    it('works only for ADOPT, and a SEND or CONFIRM code is refused for ADOPT', async ({ skip }) => {
+      if (!reachable) skip();
+      const code = freshCode();
+      const { approvalId, messageId } = await adoptCode(code);
+      expect((await use(code, 'forward_plan')).outcome).toBe('wrong_action');
+      expect((await use(code, 'decide_plan')).outcome).toBe('wrong_action');
+      expect(await use(code, 'adopt_change')).toMatchObject({ approval_id: approvalId, message_id: messageId, outcome: 'signed', action: 'adopt_change' });
+      expect((await use(code, 'adopt_change')).outcome).toBe('refused'); // single use
+
+      const other = freshCode();
+      const msg = await pool.query(
+        `insert into public.assistant_messages (from_assistant, to_assistant, kind, body, dedupe_key) values ('finance', 'owner', 'proposal', '{}'::jsonb, $1) returning id`,
+        ['test:' + randomUUID()],
+      );
+      await pool.query('select * from public.issue_approval($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [msg.rows[0].id, 'demo-p-owner', 'forward_plan', other, 'finance', `Reply SEND <1-3> ${other}`, 'test-sms:' + randomUUID(), 15, T0]);
+      expect((await use(other, 'adopt_change')).outcome).toBe('wrong_action'); // the reverse
+      expect((await use(other, 'forward_plan')).outcome).toBe('signed'); // and the code was not spent
+    });
+
+    it('lives for 12 hours when issued with that lifetime', async ({ skip }) => {
+      if (!reachable) skip();
+      const late = freshCode();
+      await adoptCode(late);
+      expect((await use(late, 'adopt_change', '2026-10-27T00:30:00Z')).outcome).toBe('refused'); // past 12 hours
+      const inTime = freshCode();
+      await adoptCode(inTime);
+      expect((await use(inTime, 'adopt_change', '2026-10-26T23:30:00Z')).outcome).toBe('signed');
+    });
+
+    it('is not accepted by the database for an unknown action', async ({ skip }) => {
+      if (!reachable) skip();
+      await expect(pool.query('select * from public.use_approval_code($1, $2, $3, $4, $5, $6, $7)', [OWNER, '123456', 'signed', 'transfer_money', null, '{}', T0])).rejects.toThrow(/bad action/);
+    });
+  });
+
+  describe('adopt_recommendations', () => {
+    it('adopts the listed ranks once, returns the same rows on a retry, and never adopts an expired row', async ({ skip }) => {
+      if (!reachable) skip();
+      const reviewId = await reviewWithRecommendations();
+      await pool.query(`update public.recommendations set status = 'expired' where review_id = $1 and rank = 3`, [reviewId]);
+
+      const first = await adopt(reviewId, [1, 3]);
+      expect(first).toMatchObject([{ rank: 1, assistant_id: 'finance', change: 'Change 1', newly_adopted: true }]);
+
+      const retry = await adopt(reviewId, [1, 3]);
+      expect(retry).toMatchObject([{ rank: 1, recommendation_id: first[0]!.recommendation_id, newly_adopted: false }]);
+
+      const both = await adopt(reviewId, [1, 2]);
+      expect(both.map((r) => [r.rank, r.newly_adopted])).toEqual([[1, false], [2, true]]);
+
+      const rows = await pool.query('select rank, status, decided_by from public.recommendations where review_id = $1 order by rank', [reviewId]);
+      expect(rows.rows).toEqual([
+        { rank: 1, status: 'adopted', decided_by: 'demo-p-owner' },
+        { rank: 2, status: 'adopted', decided_by: 'demo-p-owner' },
+        { rank: 3, status: 'expired', decided_by: null },
+      ]);
+      expect(await adopt(reviewId, [])).toEqual([]);
+    });
+
+    it('adopts a rank once even when two callers race', async ({ skip }) => {
+      if (!reachable) skip();
+      const reviewId = await reviewWithRecommendations();
+      const [a, b] = await Promise.all([adopt(reviewId, [2]), adopt(reviewId, [2])]);
+      expect([...a, ...b].filter((r) => r.newly_adopted)).toHaveLength(1);
+      expect(a).toHaveLength(1);
+      expect(b).toHaveLength(1); // the loser still gets the row back, as already adopted
+    });
+
+    it('allows one recommendation per rank in a review', async ({ skip }) => {
+      if (!reachable) skip();
+      const reviewId = await reviewWithRecommendations();
+      await expect(pool.query(
+        `insert into public.recommendations (review_id, rank, assistant_id, change, why) values ($1, 1, 'owner', 'x', 'y')`, [reviewId],
+      )).rejects.toThrow(/duplicate key/);
+    });
+  });
+});
