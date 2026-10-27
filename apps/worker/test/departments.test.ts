@@ -3,14 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModelPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { loadProfiles } from '@fahq/profiles';
 import type { WorkerDeps } from '../src/flows.ts';
-import { runConcurrently, runUntilIdle } from '../src/runner.ts';
+import { runConcurrently, runOnce, runUntilIdle } from '../src/runner.ts';
 import { UNAVAILABLE_REPLY, UNSAFE_REPLY } from '../src/screen.ts';
-import { createStore } from '../src/store.ts';
+import { createStore, LEASE_SECONDS } from '../src/store.ts';
 import { dataMock, fakeCodeMode, okResult, routerReply, SAFE, scriptedModel, UNSAFE, validPlans } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
 
@@ -334,10 +334,93 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       expect(rows.every((r) => r.status === 'done' && r.attempts === 1)).toBe(true);
       expect(new Set(claimed)).toEqual(new Set(rows.map((r) => r.id)));
       expect(busiest).toBe(2); // two tasks were being handled at once
-      // A task stays its loop's for 15 minutes, longer than a round of plans can take, so the other loop never claims it again.
+      // A claim is short (a task left by a crash is tried again within an approval code's 15 minutes); a task that
+      // takes long keeps its lease by renewing it (see "the lease of a task that takes long").
       expect(leases).toHaveLength(TASKS);
-      expect(leases.every((s) => s === 900)).toBe(true);
+      expect(leases.every((s) => s === LEASE_SECONDS)).toBe(true);
+      expect(LEASE_SECONDS).toBeLessThanOrEqual(300);
       expect(sms.filter((m) => m.to === ownerPhone && m.body.startsWith('Open items')).length).toBe(TASKS);
+    });
+
+    // Holds `expected` handlers of STATUS texts inside their work (the open-task count) until released.
+    const hold = (base: WorkerDeps, expected: number) => {
+      let inside = 0;
+      let release: () => void = () => {};
+      let allIn: () => void = () => {};
+      const open = new Promise<void>((resolve) => { release = resolve; });
+      const entered = new Promise<void>((resolve) => { allIn = resolve; });
+      const finishes: boolean[] = [];
+      const held: WorkerDeps = {
+        ...base,
+        store: {
+          ...base.store,
+          openTaskCount: async (assistant) => { inside += 1; if (inside >= expected) allIn(); await open; return base.store.openTaskCount(assistant); },
+          finishTask: async (...args) => { const ok = await base.store.finishTask(...args); finishes.push(ok); return ok; },
+        },
+      };
+      return { held, entered, release, finishes };
+    };
+    const enqueueStatus = async (from = ownerPhone) => {
+      const messageSid = sid();
+      await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, from, '+15550100001', 'STATUS']);
+      return messageSid;
+    };
+
+    it('gives every loop its own worker id, so only the loop that holds a task can finish it', async () => {
+      const sids = [await enqueueStatus(), await enqueueStatus(), await enqueueStatus()];
+      const { held, entered, release, finishes } = hold(deps, 3);
+      const all = runConcurrently(held, 3, () => false, { untilIdle: true });
+      await entered; // three tasks are being handled at the same moment, one per loop
+      const owners = (await pool.query(`select lease_owner from public.tasks where idempotency_key = any($1) and status = 'running'`, [sids.map((x) => 'sms:' + x)])).rows.map((r) => r.lease_owner as string);
+      expect(owners).toHaveLength(3);
+      expect(new Set(owners).size).toBe(3);
+      expect(owners.every((o) => o.startsWith('departments-test-worker#'))).toBe(true);
+      release();
+      await all;
+      expect(finishes).toEqual([true, true, true]);
+      for (const messageSid of sids) expect((await taskOfText(messageSid)).status).toBe('done');
+    });
+
+    describe('the lease of a task that takes long', () => {
+      const leaseUntil = async (taskId: string) => new Date((await pool.query('select lease_until from public.tasks where id = $1', [taskId])).rows[0].lease_until as string).getTime();
+      const taskRow = async (taskId: string) => (await pool.query('select status, attempts from public.tasks where id = $1', [taskId])).rows[0] as { status: string; attempts: number };
+      // Loop A claims one STATUS text and is then held inside its work; a fake clock is what moves the time on.
+      async function startHeld(leaseRenewMs: number) {
+        const messageSid = await enqueueStatus();
+        const clock = { at: new Date() }; // after the text was queued, so the task can be claimed at this moment
+        const { held, entered, release, finishes } = hold({ ...deps, now: () => clock.at, leaseRenewMs, worker: 'loop-a' }, 1);
+        const a = runOnce(held);
+        await entered;
+        const id = (await taskOfText(messageSid)).id;
+        return { clock, id, release, a, finishes };
+      }
+      const asLoopB = (clock: { at: Date }): WorkerDeps => ({ ...deps, now: () => clock.at, worker: 'loop-b' });
+
+      it('is renewed while the task is handled, so a longer round than one lease is never taken by another loop', async () => {
+        const { clock, id, release, a, finishes } = await startHeld(10);
+        const t0 = clock.at.getTime();
+        expect(await leaseUntil(id)).toBe(t0 + LEASE_SECONDS * 1000);
+        for (const minutes of [4, 8, 12]) { // each step is more than a whole lease later than the last claim
+          clock.at = new Date(t0 + minutes * 60_000);
+          await vi.waitFor(async () => expect(await leaseUntil(id)).toBe(clock.at.getTime() + LEASE_SECONDS * 1000));
+          expect(await runOnce(asLoopB(clock))).toBe(false); // nothing for the other loop to take
+        }
+        release();
+        await a;
+        expect(finishes).toEqual([true]);
+        expect(await taskRow(id)).toEqual({ status: 'done', attempts: 1 });
+      });
+
+      it('runs out without renewals: the other loop takes the task, and the first loop can no longer finish it', async () => {
+        const { clock, id, release, a, finishes } = await startHeld(3_600_000); // no renewal within this test
+        clock.at = new Date(clock.at.getTime() + (LEASE_SECONDS + 1) * 1000);
+        expect(await runOnce(asLoopB(clock))).toBe(true); // loop B claims and finishes it
+        expect(await taskRow(id)).toEqual({ status: 'done', attempts: 2 });
+        release();
+        await a;
+        expect(finishes).toEqual([false]); // loop A's finish is refused: the task is not its any more
+        expect((await pool.query('select count(*)::int as n from public.outbox where dedupe_key = $1', [`reply:${id}`])).rows[0].n).toBe(1); // handled twice, answered once
+      });
     });
 
     it('stops after maxCycles, however much is queued', async () => {

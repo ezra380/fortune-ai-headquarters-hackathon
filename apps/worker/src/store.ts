@@ -83,11 +83,12 @@ export type ApprovalAction = 'forward_plan' | 'decide_plan' | 'adopt_change';
 export type ApprovalSummary = { action: ApprovalAction; status: 'pending' | 'signed' | 'declined' | 'expired'; planRank: number | null; expiresAt: string; decidedAt: string | null };
 
 /**
- * How long a claimed task is the claiming loop's. A round of plans can take several minutes (three planners at
- * once, then the picker, each with a correction round), and with more than one claim loop a lease that ran out
- * mid-round would hand the same task to the other loop.
+ * How long a claim lasts without being renewed. It is short on purpose: a task left by a worker that died is
+ * tried again within minutes, inside an approval code's 15 minutes. A task that takes longer (a round of plans
+ * can run for ten minutes or more) keeps its lease by renewing it while it is handled (extendLease, from the
+ * runner), so the length of a round never decides the length of the lease.
  */
-const LEASE_SECONDS = 900;
+export const LEASE_SECONDS = 300;
 
 const ASSISTANTS: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
 
@@ -114,6 +115,10 @@ export function createStore(url: string, serviceKey: string) {
     },
     async finishTask(id: string, worker: string, status: 'done' | 'failed' | 'waiting' | 'queued', error: string | null, now: Date) {
       return must(await db.rpc('finish_task', { p_task_id: id, p_worker: worker, p_status: status, p_error: error, p_now: now.toISOString() }), 'finish_task') as boolean;
+    },
+    /** Pushes the lease of a task this worker holds forward. False = the task is not this worker's any more. */
+    async extendLease(id: string, worker: string, now: Date) {
+      return must(await db.rpc('extend_lease', { p_task_id: id, p_worker: worker, p_lease_seconds: LEASE_SECONDS, p_now: now.toISOString() }), 'extend_lease') as boolean;
     },
     async cancelTask(id: string, now: Date) {
       return must(await db.rpc('cancel_task', { p_task_id: id, p_now: now.toISOString() }), 'cancel_task') as boolean;

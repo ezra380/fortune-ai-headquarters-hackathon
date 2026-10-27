@@ -24,7 +24,10 @@ export type WorkerDeps = {
     reads(id: AssistantId): readonly string[];
   };
   now: () => Date;
+  /** Names the claim loop that holds a task (runConcurrently adds `#<n>` for each loop). */
   worker: string;
+  /** How often, in milliseconds, the lease of a task being handled is renewed. Default: once a minute. */
+  leaseRenewMs?: number;
   /** true when talking to real providers; recorded on every receipt. */
   live: boolean;
   period: '2026-09' | '2026-10-mtd';
