@@ -43,6 +43,53 @@ export interface DeliveryPort {
   }): Promise<PrintResult>;
 }
 
+/**
+ * One read-only function an assistant's Code Mode script may call (as `codemode.<name>(args)`).
+ * Writes are never tools: proposals and reports are fixed code paths in the worker.
+ */
+export type ReadTool = {
+  /** A JavaScript identifier. */
+  name: string;
+  /** One line: what it returns and where the data comes from. */
+  description: string;
+  /** The typed signature shown to the model, e.g. '(args: { period: "2026-09" }) => Promise<{ metrics: Metric[] }>'. */
+  signature: string;
+  /** Validates its own arguments; returns plain JSON. */
+  run: (args: unknown) => Promise<unknown>;
+};
+
+export type CodeModeResult = {
+  ok: boolean;
+  /** The script's return value (plain JSON) when ok. */
+  result: unknown;
+  /** Why it failed, in a plain sentence, when not ok. */
+  error: string | null;
+  script: string | null;
+  attempts: number;
+  toolCalls: number;
+  /** Characters of the script's result (what reaches the next model instead of raw tool output). */
+  resultChars: number;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+};
+
+/**
+ * Cloudflare Code Mode inside the worker: a model writes one script against an assistant's typed
+ * read API, the QuickJS sandbox runs it with only those tools, and only the script's small result
+ * goes on to the next model. One retry with the sandbox's error, then a plain failure.
+ */
+export type CodeModeRunner = (input: {
+  /** Receipt step name, e.g. 'owner.lookup'. */
+  purpose: string;
+  /** The model that writes the script. */
+  model: string;
+  /** The assistant's skill text (its rules), placed before the API in the system prompt. */
+  skill: string;
+  question: string;
+  tools: readonly ReadTool[];
+}) => Promise<CodeModeResult>;
+
 /** Lane A: one chat call to an OpenAI-compatible provider, with cost accounting. */
 export interface ModelPort {
   chat(input: {

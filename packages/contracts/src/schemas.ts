@@ -6,7 +6,9 @@ import { z } from 'zod';
 
 export const Timestamp = z.iso.datetime({ offset: true });
 
-export const AssistantId = z.enum(['owner', 'finance', 'salon', 'online']);
+// 'manager' is the HQ Manager: it reviews the other assistants' work reports and keeps the lessons
+// the owner adopts. It has no phone number of its own; it reaches the owner through Owner HQ's number.
+export const AssistantId = z.enum(['owner', 'finance', 'salon', 'online', 'manager']);
 export type AssistantId = z.infer<typeof AssistantId>;
 
 export const BusinessUnit = z.enum(['salon', 'online', 'combined']);
@@ -163,5 +165,72 @@ export const Receipt = z.object({
   costUsd: z.number().min(0).nullable(),
   outcome: z.enum(['ok', 'refused', 'failed']),
   detail: z.string().max(500).nullable(),
+  /** Provider-reported tokens for this step's model calls; null when the step called no model. */
+  inputTokens: z.number().int().min(0).nullable().optional(),
+  outputTokens: z.number().int().min(0).nullable().optional(),
 });
 export type Receipt = z.infer<typeof Receipt>;
+
+// ---- End-of-work reports and the HQ Manager ------------------------------------------------
+
+/** One step of a finished task, copied from its receipts. */
+export const WorkStep = z.object({
+  step: z.string().min(1).max(60),
+  outcome: z.enum(['ok', 'refused', 'failed']),
+  model: z.string().max(120).nullable(),
+  ms: z.number().int().min(0),
+  inputTokens: z.number().int().min(0).nullable(),
+  outputTokens: z.number().int().min(0).nullable(),
+  detail: z.string().max(500).nullable(),
+});
+export type WorkStep = z.infer<typeof WorkStep>;
+
+/** An observation a program made about a finished task (never model text). */
+export const Suggestion = z.object({
+  kind: z.enum(['prompt', 'reliability', 'speed', 'cost', 'data', 'safety']),
+  about: AssistantId,
+  text: z.string().min(1).max(300),
+});
+export type Suggestion = z.infer<typeof Suggestion>;
+
+/** What every assistant hands the HQ Manager at the end of every task: the log, the usage, the suggestions. */
+export const WorkReport = z.object({
+  taskId: z.uuid(),
+  runId: z.uuid(),
+  assistant: AssistantId,
+  taskKind: z.string().min(1).max(40),
+  outcome: z.enum(['done', 'failed', 'retrying']),
+  summary: z.string().min(1).max(300),
+  steps: z.array(WorkStep).max(30),
+  usage: z.object({
+    modelCalls: z.number().int().min(0),
+    inputTokens: z.number().int().min(0),
+    outputTokens: z.number().int().min(0),
+    codeMode: z.object({
+      scripts: z.number().int().min(0),
+      toolCalls: z.number().int().min(0),
+      resultChars: z.number().int().min(0),
+    }).optional(),
+  }),
+  suggestions: z.array(Suggestion).max(10),
+  startedAt: Timestamp,
+  endedAt: Timestamp,
+});
+export type WorkReport = z.infer<typeof WorkReport>;
+
+/** A change the HQ Manager recommends; it becomes a standing lesson only when the owner adopts it by code. */
+export const Recommendation = z.object({
+  rank: z.number().int().min(1).max(3),
+  assistant: AssistantId,
+  change: z.string().min(1).max(300),
+  why: z.string().min(1).max(300),
+});
+export type Recommendation = z.infer<typeof Recommendation>;
+
+/** The HQ Manager's review of recent work (model output, validated before anyone sees it). */
+export const ManagerReview = z.object({
+  summary: z.string().min(1).max(500),
+  findings: z.array(z.object({ assistant: AssistantId, text: z.string().min(1).max(300) })).max(6),
+  recommendations: z.array(Recommendation).max(3),
+});
+export type ManagerReview = z.infer<typeof ManagerReview>;
