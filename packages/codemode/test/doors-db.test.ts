@@ -265,7 +265,7 @@ describe('file_work_report at a door', () => {
 
 describe('the Legal Team door', () => {
   const legalWords = {
-    summary: 'Read a vendor agreement. Auto-renewal with a long notice window, overall call Yellow. Rang +1 718 555 0100, reply 482913.',
+    summary: 'Read a vendor agreement. Auto-renewal with a long notice window, overall call Yellow. Rang +1 718 555 0100, reply 482913. Notices go to legal@vendor.example.',
     steps: ['Read every clause', 'Marked the renewal clause Yellow'],
     suggestions: ['Ask for a 30 day notice window'],
     lessons: ['Check the notice window before the renewal date'],
@@ -283,7 +283,8 @@ describe('the Legal Team door', () => {
     const prompt = ((await client.getPrompt({ name: 'skill' })).messages[0]!.content as { text: string }).text;
     expect(prompt).toContain('- `recall_my_decisions`:');
     expect(prompt).not.toMatch(/my_lessons|get_finance_metrics|get_online_metrics|get_salon_metrics|get_company_overview/);
-    for (const word of ['Green', 'Yellow', 'Red', 'licensed attorney', '`review-contract`', '`saas-msa-review`', 'call `file_work_report` once']) expect(prompt, word).toContain(word);
+    for (const word of ['Green', 'Yellow', 'Red', 'licensed attorney', '`legal:contract-review`', '`/legal:review-contract`', '`saas-msa-review`', 'call `file_work_report` once']) expect(prompt, word).toContain(word);
+    expect(prompt).not.toMatch(/compliance-check|legal-response/); // names the plugins do not have
     // Code Mode: one `code` tool for the reads (the sandbox sees the reads only) beside the report tool.
     const code = await connectDoor(token, 'cursor', { plain: false });
     expect((await toolNames(code.client)).filter((n) => n !== 'file_work_report')).toEqual(['code']);
@@ -300,7 +301,8 @@ describe('the Legal Team door', () => {
     const rows = await reportsOf(id);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ assistant_id: 'legal', token_id: id, tool: 'claude-code', reviewed_at: null });
-    expect(rows[0].summary).toBe('Read a vendor agreement. Auto-renewal with a long notice window, overall call Yellow. Rang [phone], reply [code].');
+    expect(rows[0].summary).toBe('Read a vendor agreement. Auto-renewal with a long notice window, overall call Yellow. Rang [phone], reply [code]. Notices go to [email].');
+    expect(rows[0].summary).not.toMatch(/@|vendor\.example/); // a contract's notice address is a party's contact detail and never reaches the manager's digest
     expect(rows[0].lessons).toEqual([{ text: 'Check the notice window before the renewal date' }]);
     expect((await pool.query(`select count(*)::int as n from public.session_reports where assistant_id <> 'legal' and token_id = $1`, [id])).rows[0].n).toBe(0);
   });

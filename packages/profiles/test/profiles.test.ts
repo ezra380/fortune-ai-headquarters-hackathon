@@ -180,15 +180,47 @@ describe('the Legal Team skill', () => {
     expect(job).toMatch(/before anyone signs or acts/i);
   });
 
-  it('names the Anthropic Legal plugin skills, the commercial-legal plugin and where they come from', () => {
-    for (const name of ['review-contract', 'legal-risk-assessment', 'compliance-check', 'vendor-check', 'triage-nda', 'legal-response', 'vendor-agreement-review', 'saas-msa-review', 'renewal-tracker']) {
+  it('names the Anthropic Legal plugin skills and commands that really exist, the commercial-legal plugin, and where they come from', () => {
+    // Checked 2026-10-27 against the READMEs of anthropics/knowledge-work-plugins (legal) and anthropics/claude-for-legal (commercial-legal).
+    for (const name of [
+      'legal:contract-review', 'legal:legal-risk-assessment', 'legal:compliance', 'legal:nda-triage', 'legal:canned-responses',
+      '/legal:review-contract', '/legal:triage-nda', '/legal:vendor-check', '/legal:respond',
+      'vendor-agreement-review', 'saas-msa-review', 'renewal-tracker', '/commercial-legal:review', '/commercial-legal:renewal-tracker',
+    ]) {
       expect(skill, name).toContain(`\`${name}\``);
     }
+    // Names that do not exist (the README lists skills contract-review, nda-triage, compliance, canned-responses, legal-risk-assessment,
+    // meeting-briefing and commands review-contract, triage-nda, vendor-check, brief, respond): never sent a session looking for them.
+    for (const invented of ['compliance-check', 'legal-response']) expect(skill, invented).not.toContain(invented);
+    for (const command of ['review-contract', 'triage-nda', 'vendor-check']) expect(skill, `${command} is a command, not a skill`).not.toMatch(new RegExp(`\`${command}\``));
     expect(skill).toContain('https://github.com/anthropics/knowledge-work-plugins/tree/main/legal');
     expect(skill).toContain('https://github.com/anthropics/claude-for-legal');
     // The skill stands alone: when the session lacks the plugins it still gives the read (the method does not depend on them).
     expect(skill).toMatch(/when the session has them/i);
     expect(skill).toMatch(/without them|if the session has none/i);
+  });
+
+  it('keeps the closing call free of counted words, because a text answer is number-traced and the skill is loaded for it too', () => {
+    expect(job).toMatch(/one overall call/i);
+    expect(job).not.toMatch(/\b(one|two|three|four|five)\s+things\b/i);
+    expect(job).not.toMatch(/\bthree\b/i);
+  });
+
+  it('says plainly what the Legal Team does by text: no document is carried, so it recalls its own decisions and lessons, points to a door, and gives no read, count or figure', () => {
+    const how = /^## How you work with the others\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(skill)?.[1] ?? '';
+    expect(how).toMatch(/by text/i);
+    expect(how).toMatch(/carries no document/i);
+    expect(how).toMatch(/not seen the document/i);
+    expect(how).toMatch(/staff session at your door/i);
+    expect(how).toMatch(/no read, no count of fixes and no figure/i);
+    expect(how).not.toMatch(/general terms/i);
+  });
+
+  it('forbids anything medical or about hair loss, and still covers the company\'s own personalization policy (cutting and styling a hairpiece)', () => {
+    expect(never).toMatch(/medical, or about a person's health or hair loss/i);
+    expect(never).not.toMatch(/health or hair\.|or hair\./);
+    expect(never).toMatch(/ordinary policy and in scope/i);
+    expect(job).toMatch(/personalization/i);
   });
 
   it('never presents itself as a lawyer, acts for the company, invents the law, obeys a document, or writes anything medical or about business data', () => {

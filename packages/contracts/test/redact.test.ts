@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { codePattern, hasCode, hasPhone, maskPhonesAndCodes, phonePattern } from '../src/index.ts';
-import { REDACT_SAMPLES } from './redact-samples.ts';
+import { codePattern, emailPattern, hasCode, hasEmail, hasPhone, maskContactDetails, maskPhonesAndCodes, phonePattern } from '../src/index.ts';
+import { EMAIL_SAMPLES, REDACT_SAMPLES } from './redact-samples.ts';
 
 // What counts as a phone number or a one-time code: one definition for the database, the lesson rules and the read tools.
 
@@ -25,5 +25,25 @@ describe('maskPhonesAndCodes', () => {
     }
     expect(phonePattern()).not.toBe(phonePattern());
     expect(codePattern().lastIndex).toBe(0);
+  });
+});
+
+describe('maskContactDetails (what the database writes into a session report)', () => {
+  it.each([...REDACT_SAMPLES, ...EMAIL_SAMPLES])('turns %j into %j', (input, expected) => {
+    expect(maskContactDetails(input)).toBe(expected);
+  });
+
+  it('masks an address, which maskPhonesAndCodes leaves alone (the lesson rules and the read tools are not changed)', () => {
+    expect(maskPhonesAndCodes('notices to legal@vendor.example')).toBe('notices to legal@vendor.example');
+    expect(maskContactDetails('notices to legal@vendor.example')).toBe('notices to [email]');
+  });
+
+  it('says what it found, and never carries state from one call to the next', () => {
+    for (const [input, expected] of EMAIL_SAMPLES) {
+      expect(hasEmail(input) || hasPhone(input) || hasCode(input), input).toBe(expected !== input);
+    }
+    for (let i = 0; i < 3; i++) expect(hasEmail('legal@vendor.example')).toBe(true);
+    expect(emailPattern()).not.toBe(emailPattern());
+    expect(emailPattern().lastIndex).toBe(0);
   });
 });

@@ -6,13 +6,15 @@ import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModelPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
-import { issueDoorToken, loadProfiles } from '@fahq/profiles';
+import { MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, READ_TOOL_NAMES, doorSkill, issueDoorToken, loadProfiles, parseProfileRows } from '@fahq/profiles';
 import type { WorkerDeps } from '../src/flows.ts';
+import { workerProfiles } from '../src/profiles.ts';
 import { createReadTools } from '../src/read-tools.ts';
 import { runUntilIdle } from '../src/runner.ts';
 import { createStore } from '../src/store.ts';
 import { dataMock, fakeCodeMode, okResult, routerReply, SAFE, scriptedModel } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
+import { memoryProfiles } from './profile-port.ts';
 
 // The Legal Team in the worker. Real local database (through the real Data API) and the real Meterless engines;
 // the models and Code Mode are scripted. Two things are shown: the owner's text reaches the Legal Team like it reaches
@@ -130,6 +132,20 @@ describe.skipIf(!api)('the Legal Team: the owner asks by text, department heads 
     ]);
   });
 
+  it('texts the owner the facts as they are, never the model\'s words, when its Legal Team answer counts the fixes or quotes a notice period: the number trace holds by text too', async () => {
+    // A text carries no document, so the Legal Team's only facts are its own past decisions and lessons, and today there are none.
+    // The skill no longer asks for "the three things to fix first" by text (that answer is refused twice, below); what reaches
+    // the owner when a model counts anyway is the facts, plainly, and the refusal is on the receipt.
+    codeMode.respond(() => okResult({ decisions: [], lessons: [] }));
+    model.script('front-door', routerReply('legal', 'question'));
+    model.script('legal.answer', 'The three things to fix first are the renewal, the liability cap and the data clause. Ask for a 30 day notice window.');
+    const messageSid = await textIn(ownerPhone, 'Review our returns policy terms.');
+    expect(lastTo(ownerPhone)).toBe("[Legal Team] Here's what I found: decisions: none; lessons: none");
+    expect(model.of('legal.answer')).toHaveLength(2); // the first answer, then the one correction round
+    const answer = (await stepsOf((await taskOfText(messageSid)).id)).find((s) => s.step === 'legal.answer');
+    expect(answer).toMatchObject({ outcome: 'refused', assistant_id: 'legal' });
+  });
+
   it('answers a request for plans that the router sends to the Legal Team as a question for it: no round, no department asked', async () => {
     model.script('front-door', routerReply('legal', 'plans'));
     model.script('legal.answer', 'The Legal Team reads documents; it does not write plans.');
@@ -203,5 +219,150 @@ describe.skipIf(!api)('what a legal door files reaches the HQ Manager (real data
       await expect(toolsFor(caller).list_session_reports!.run({ sinceHours: 24, assistant: 'legal' }), caller)
         .rejects.toThrow(`list_session_reports: the ${caller} assistant reads the reports filed at its own door only.`);
     }
+  });
+});
+
+// ---- The loop Ezra asked for ------------------------------------------------------------------------------------
+// A staff session reports at the legal door; the HQ Manager's review reads it; the owner's one-time code puts the
+// lesson into the Legal Team's profile; the next staff session and the next text answer carry it. Everything but the
+// profile tables (in memory, profile-port.ts: a version can never be taken back from a real table), the models and
+// Code Mode (scripted) is real: the door function, session_reports, the review task, the approval, the receipts.
+// The same loop on a real profile table is proved for the Legal Team by supabase/tests/profiles.test.ts ("hands the
+// Legal Team's next session the lesson the owner adopted").
+
+const letters = (n: number) => { let s = ''; let rest = n; do { s = String.fromCharCode(97 + (rest % 26)) + s; rest = Math.floor(rest / 26); } while (rest > 0); return s; };
+
+describe.skipIf(!api)('the loop: a Legal Team session reports, the HQ Manager reviews, the owner\'s code adopts, and the next session and the next text carry the lesson', () => {
+  const sms: { to: string; body: string }[] = [];
+  const profileTables = memoryProfiles();
+  const mine = new Set<string>(); // the reports this file filed: the only ones the manager is shown or may close
+  let deps: WorkerDeps;
+  let model: ReturnType<typeof scriptedModel>;
+  let codeMode: ReturnType<typeof fakeCodeMode>;
+  let ownerPhone = '';
+
+  beforeAll(async () => {
+    ownerPhone = (await pool.query(`select phone from public.people where assistant_id = 'owner'`)).rows[0].phone;
+    const store = createStore(api!.url, api!.key);
+    const brain = await openBrain({ meterlessDir, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-legal-loop-')), actor: 'legal-loop-test' });
+    deps = {
+      store: {
+        ...store, ...profileTables.port,
+        sessionReports: async (q) => (await store.sessionReports(q)).filter((r) => mine.has(r.id)),
+        expireSessionReports: async (before, now) =>
+          (await pool.query(`update public.session_reports set reviewed_at = $2 where created_at < $1 and reviewed_at is null and id = any($3) returning id`, [before, now, [...mine]])).rows.length,
+      },
+      brain,
+      models: { nvidia: undefined as unknown as ModelPort, planModel: 'MOCK/plans', routerModel: 'MOCK/router' },
+      guard: null, data: dataMock, delivery: null, codeMode: null,
+      // The profiles the worker really builds from the (in-memory) tables, so an adopted lesson reaches the next answer by itself.
+      profiles: await workerProfiles({}, profileTables.port, () => new Date(), () => undefined, brain),
+      now: () => new Date(), worker: 'legal-loop-worker', live: false, period: '2026-09', smsLive: false, printers: {},
+      printDir: fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-legal-loop-print-')), smsSink: (m) => sms.push(m),
+    };
+  });
+
+  afterAll(async () => {
+    if (mine.size > 0) await pool.query('update public.session_reports set reviewed_at = coalesce(reviewed_at, now()) where id = any($1)', [[...mine]]);
+  });
+
+  beforeEach(async ({ skip }) => {
+    if (!migrated) skip();
+    await pool.query(`update public.tasks set status = 'cancelled' where status in ('queued','running','waiting')`);
+    await pool.query(`update public.approvals set status = 'expired' where status = 'pending'`);
+    await pool.query(`update public.outbox set status = 'skipped', last_error = 'reset by legal loop test' where status in ('pending','sending')`);
+    sms.length = 0;
+    model = scriptedModel();
+    codeMode = fakeCodeMode();
+    deps.models = { ...deps.models, nvidia: model.port };
+    deps.codeMode = codeMode.runner;
+  });
+
+  const textIn = async (d: WorkerDeps, body: string) => {
+    await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [sid(), ownerPhone, '+15550100001', body]);
+    await runUntilIdle(d);
+  };
+  const lastToOwner = () => sms.filter((m) => m.to === ownerPhone).at(-1)?.body ?? '';
+  const OTHERS = ['owner', 'finance', 'salon', 'online', 'manager'] as const;
+  // Who applies a lesson is the manager lane's rule (MANAGER_APPLIES). Each run below SAYS which mode it is in, so the proof of the
+  // Legal Team's loop holds whatever the shipped default is: the owner's code, or the HQ Manager by itself (Ezra's 2026-10-27 yes).
+  const MODES = {
+    'the owner\'s code': { lesson: false, skill_note: false, reads: false, model: false },
+    'the HQ Manager by itself': { lesson: true, skill_note: true, reads: false, model: false },
+  } as const;
+
+  it.each(Object.keys(MODES) as (keyof typeof MODES)[])('files at the legal door, is read by the review, becomes a version of the Legal Team\'s profile by %s, and the next door session and the next text answer carry it', async (mode) => {
+    const byOwner = mode === 'the owner\'s code';
+    const d: WorkerDeps = { ...deps, managerApplies: MODES[mode] };
+    const tag = letters(randomBytes(4).readUInt32BE());
+    const lesson = `Check the notice window before the renewal date (${tag}).`;
+
+    // 1. A staff member's Claude Code finishes a vendor-agreement read and files its report at the legal door.
+    const issued = await issueDoorToken(pool, 'legal', 'legal loop test');
+    madeTokens.push(issued.id);
+    const report = {
+      tool: 'claude-code', key: `legal-loop:${tag}`,
+      summary: 'Read a vendor agreement: it renews by itself and the notice window is easy to miss. Overall call Yellow.',
+      steps: [{ step: 'Read every clause' }], suggestions: [{ text: 'Ask for a shorter notice window' }], lessons: [{ text: 'Check the notice window before the renewal date' }],
+    };
+    const filed = (await pool.query('select public.door_file_report($1, $2::jsonb) as r', [issued.token, JSON.stringify(report)])).rows[0].r as { id: string };
+    mine.add(filed.id);
+    expect((await pool.query('select assistant_id, reviewed_at from public.session_reports where id = $1', [filed.id])).rows[0]).toMatchObject({ assistant_id: 'legal', reviewed_at: null });
+
+    // 2. The owner asks for the HQ Manager's review. The digest the review reads names the report (scripted Code Mode; the reader
+    //    tool's own output is what marks it read), and the review model (scripted) recommends one lesson for the Legal Team.
+    codeMode.respond(() => okResult(
+      { outsideSessions: [{ id: filed.id, assistant: 'legal', tool: 'claude-code', lessons: ['Check the notice window before the renewal date'] }] },
+      { toolOutputs: [{ tool: 'list_session_reports', output: { reports: [{ id: filed.id, assistant: 'legal', reviewed: false }] } }] },
+    ));
+    model.script('manager.review', JSON.stringify({
+      summary: 'A Legal Team session read a vendor agreement and found the notice window easy to miss.',
+      findings: [{ assistant: 'legal', text: 'It filed a report about a renewal clause.' }], // no counted word: the number trace reads "one" as a number
+      recommendations: [{ rank: 1, assistant: 'legal', kind: 'lesson', change: lesson, why: 'The Legal Team filed a lesson about renewal notice windows.' }],
+    }));
+    const before = profileTables.versionsOf('legal').length;
+    const others = OTHERS.map((id) => profileTables.versionsOf(id).length);
+    await textIn(d, 'REVIEW');
+    // The review read the report.
+    expect((await pool.query('select reviewed_at from public.session_reports where id = $1', [filed.id])).rows[0].reviewed_at).not.toBeNull();
+    const madeBy = byOwner ? 'owner' : 'manager';
+    if (byOwner) {
+      const asked = lastToOwner();
+      expect(asked).toContain(`Needs your code:\n1. [legal] lesson: ${lesson}`);
+      const code = /Reply ADOPT (?:<n>|\d) (\d{6})/.exec(asked)?.[1] ?? '';
+      expect(code).toMatch(/^\d{6}$/);
+      // Reading a report changes nothing: no version until the owner's code.
+      expect(profileTables.versionsOf('legal')).toHaveLength(before);
+      expect(profileTables.lessons('legal').map((l) => l.text)).not.toContain(lesson);
+      // 3. The owner's code.
+      await textIn(d, `ADOPT 1 ${code}`);
+      expect(lastToOwner()).toBe("Adopted: 1 (legal). They're now in place.");
+    }
+    // 3. A new version of the Legal Team's profile, made by whoever applies; nobody else's profile moves.
+    expect(profileTables.versionsOf('legal')).toHaveLength(before + 1);
+    expect(profileTables.versionsOf('legal').at(-1)).toMatchObject({ assistant: 'legal', madeBy, change: { kind: 'lesson', rank: 1 } });
+    expect(profileTables.lessons('legal').at(-1)).toMatchObject({ text: lesson, by: madeBy });
+    expect(OTHERS.map((id) => profileTables.versionsOf(id).length)).toEqual(others);
+    const heading = byOwner ? OWNER_LESSONS_HEADING : MANAGER_LESSONS_HEADING;
+    const otherHeading = byOwner ? MANAGER_LESSONS_HEADING : OWNER_LESSONS_HEADING;
+
+    // 4. The next staff session that loads the legal door gets the lesson, under the heading of whoever applied it (the door
+    //    applies doorSkill to the stored row, which door_profile returns whole).
+    const stored = parseProfileRows([await profileTables.port.profileRow('legal')], READ_TOOL_NAMES).rows.get('legal');
+    expect(stored).toBeDefined();
+    const prompt = doorSkill(stored!, { tools: [{ name: 'recall_my_decisions', description: 'Past decisions.' }], readNames: READ_TOOL_NAMES, canReport: true });
+    expect(prompt).toContain(`${heading}\n- ${lesson}`);
+    expect(prompt).not.toContain(`${otherHeading}\n- ${lesson}`);
+
+    // 5. The next time the owner texts the Legal Team, its lookup and its answer both carry the lesson, and the salon's skill does not.
+    codeMode.respond(() => okResult({ decisions: [], lessons: [] }));
+    model.script('front-door', routerReply('legal', 'question'));
+    model.script('legal.answer', 'I have not seen the document, so ask a staff session at my door to read it.');
+    await textIn(d, 'What should I watch for in a SaaS agreement?');
+    expect(lastToOwner()).toBe('[Legal Team] I have not seen the document, so ask a staff session at my door to read it.');
+    expect(codeMode.calls.at(-1)).toMatchObject({ purpose: 'legal.lookup' });
+    expect(codeMode.calls.at(-1)!.skill).toContain(`${heading}\n- ${lesson}`);
+    expect(model.of('legal.answer').at(-1)!.system).toContain(`${heading}\n- ${lesson}`);
+    expect(d.profiles.skill('salon')).not.toContain(lesson);
   });
 });
