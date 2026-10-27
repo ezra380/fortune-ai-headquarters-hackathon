@@ -74,3 +74,10 @@ placeholder number as live; trusting a model status; reading the asker's tools i
 - **No env vars** are required. Optional: `NEEDS_MAX_TOKENS`, `BRIEF_MAX_TOKENS`.
 - **Shared test database:** other tests reset the queue and the outbox globally; mine settle only their own rows and read
   texts and codes from memory, because a flush by another test blanks a code at any moment.
+- **Full suite on 2026-10-27 (08:00 ET), three lanes testing at once:** `npm run typecheck` is clean and every brief test
+  passes (`brief.test.ts` 27, `brief-flow.test.ts` 22, repeated three times). Two failures are not from this lane:
+  - `supabase/tests/db.test.ts`, the two "public (anon) role" tests, fail every time on this local database: the `anon`
+    role has no table grants at all (not even on `tasks`), so the test gets "permission denied" instead of zero rows.
+  - `chain.test.ts`, `departments.test.ts`, `manager.test.ts` and `store.test.ts` failed in some full runs and passed alone
+    (manager 25, departments 24, store 8, chain 11 in three of four runs): they claim whatever is queued in the shared
+    database, including another lane's tasks. Run them when the other lanes are quiet before trusting a red.
