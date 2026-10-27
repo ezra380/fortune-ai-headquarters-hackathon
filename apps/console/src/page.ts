@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DEPARTMENTS } from './departments.ts';
+import { TABS } from './departments.ts';
 
 // The single page. Static HTML plus one small script that fetches /api/department/:id every 10
 // seconds and draws it. The script builds the page with createElement and textContent only (never
@@ -19,6 +19,7 @@ body{margin:0;background:var(--ivory);color:var(--ink);font:16px/1.5 Lato,system
 h1,h2{font-family:"Playfair Display",Georgia,"Times New Roman",serif;font-weight:600;margin:0;letter-spacing:.005em}
 h1{font-size:clamp(1.5rem,5.5vw,2.125rem);line-height:1.15}
 h2{font-size:1.25rem;line-height:1.25}
+h3{font:700 .9375rem/1.3 Lato,system-ui,sans-serif;margin:0}
 .sub{margin:8px 0 0;color:var(--muted);font-size:.9375rem;max-width:60ch}
 .tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:24px 0 0}
 .tab{font:inherit;font-size:.9375rem;font-weight:700;line-height:1.3;text-align:left;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--muted);cursor:pointer;min-height:44px}
@@ -39,6 +40,7 @@ h2{font-size:1.25rem;line-height:1.25}
 .notes{margin:16px 0 0;display:grid;gap:8px}
 .note{border:1px solid #ecd9a6;background:var(--amber-bg);color:#4d3400;border-radius:12px;padding:10px 14px;font-size:.9rem;overflow-wrap:anywhere}
 section{margin:36px 0 0}
+section section{margin:22px 0 0}
 .hint{margin:4px 0 12px;color:var(--muted);font-size:.9rem;max-width:62ch}
 .list{margin:0;padding:0;list-style:none;background:var(--paper);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .row{padding:12px 14px;border-top:1px solid var(--line);display:grid;gap:4px;min-width:0}
@@ -57,8 +59,7 @@ section{margin:36px 0 0}
 .chip.warn{background:var(--amber-bg);color:var(--amber)}
 .chip.fail{background:var(--red-bg);color:var(--red)}
 .empty{padding:16px 14px;color:var(--muted);font-size:.9375rem}
-.place{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:20px 18px;margin:24px 0 0}
-.place p{margin:8px 0 0;max-width:60ch}
+.digest{margin:2px 0 0}
 footer{margin:48px 0 0;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:.8125rem}
 footer.stale #updated{color:var(--red)}
 .loading{margin:32px 0 0;color:var(--muted)}
@@ -84,17 +85,27 @@ const SCRIPT = `
     refused: 'warn', skipped: 'warn', waiting: 'warn', pending: 'warn', queued: 'warn', running: 'warn',
     open: 'warn', sending: 'warn', expired: 'warn', locked: 'warn', cancelled: 'warn', declined: 'warn',
     retrying: 'warn', proposed: 'warn', unknown: 'warn',
+    normal: 'ok', watch: 'warn', act: 'fail', approved: 'ok',
+    awaiting: 'warn', code_expired: 'warn', code_locked: 'warn', rule: 'warn',
+    unanswered: 'warn', unavailable: 'fail', unreadable: 'warn',
     failed: 'fail'
   };
   var WORDS = {
     signed: 'approved', pending: 'waiting for a code', running: 'working', queued: 'waiting to start',
-    sending: 'sending', ok: 'ok'
+    sending: 'sending', ok: 'ok',
+    normal: 'running normally', watch: 'needs a look', act: 'needs a decision',
+    awaiting: 'waiting for a code', code_expired: 'code expired', code_locked: 'code locked', not_approved: 'not approved', no_code: 'no code sent',
+    rule: 'written by rules', unanswered: 'waiting for an answer', unavailable: 'could not answer', unreadable: 'could not be read'
   };
   var KINDS = {
     inbound_text: 'A text came in', mailbox: 'A message from another assistant', scheduled: 'A scheduled job',
     request: 'Request', proposal: 'Proposal', decision: 'Decision', report: 'Report'
   };
-  var ACTIONS = { forward_plan: 'Send a plan to the finance owner', decide_plan: 'Decide on a plan', adopt_change: 'Adopt a change' };
+  var ACTIONS = { forward_plan: 'Send a plan to the finance owner', decide_plan: 'Decide on a plan', adopt_change: 'Adopt a change', approve_action: 'Approve a brief action' };
+  var DIVISION = { salon: 'Salon', finance: 'Finance', online: 'Online' };
+  var ABOUT = {
+    salon: 'The salon assistant is a stand-in for Cindy, working on synthetic salon data. Cindy\\u2019s own app keeps her family and personal data; none of it is read here.'
+  };
   var CHANNELS = { sms: 'Text message', print: 'Printout' };
 
   function h(tag, cls, text) {
@@ -129,9 +140,9 @@ const SCRIPT = `
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
   function nameOf(id) { return Object.prototype.hasOwnProperty.call(NAMES, id) ? NAMES[id] : id; }
 
-  function section(title, hint, items, build, empty) {
+  function section(title, hint, items, build, empty, level) {
     var s = h('section');
-    s.appendChild(h('h2', null, title));
+    s.appendChild(h(level || 'h2', null, title));
     s.appendChild(h('p', 'hint', hint));
     if (!items || !items.length) {
       s.appendChild(h('div', 'list empty', empty));
@@ -216,16 +227,120 @@ const SCRIPT = `
     }, unread('lessons') ? 'The standing lessons could not be read right now. See the notes above.' : 'None yet. A recommendation becomes a standing lesson only after the owner adopts it with a code.'));
   }
 
+  function notesBlock(f, list) {
+    if (!list || !list.length) return;
+    var notes = h('div', 'notes');
+    list.forEach(function (n) { notes.appendChild(h('div', 'note', n)); });
+    f.appendChild(notes);
+  }
+  function has(list, part) { return !!list && list.indexOf(part) >= 0; }
+  function basedOn(cites) { return cites && cites.length ? 'Based on ' + cites.join(', ') : ''; }
+
+  function actionNote(ap) {
+    if (ap.state === 'approved') return 'Approved ' + when(ap.at);
+    if (ap.state === 'awaiting') return 'A code is waiting. It expires ' + when(ap.at);
+    if (ap.state === 'code_expired') return 'The code expired ' + when(ap.at) + ' and this action was not approved';
+    if (ap.state === 'code_locked') return 'The code was locked after wrong tries';
+    if (ap.state === 'not_approved') return 'The code was used for other actions ' + when(ap.at);
+    if (ap.state === 'no_code') return 'No code was sent for this brief';
+    return 'Where this action stands could not be read right now';
+  }
+
+  function briefRow(li, b) {
+    var top = h('div', 'head');
+    top.appendChild(h('div', 'title', 'Brief for ' + (b.date || 'an unknown day')));
+    var chips = h('div', 'chips');
+    chips.appendChild(chip(b.status));
+    if (b.writtenBy === 'rule') chips.appendChild(chip('rule'));
+    top.appendChild(chips);
+    li.appendChild(top);
+    li.appendChild(h('div', 'text', b.headline));
+    li.appendChild(h('div', 'meta', 'Written ' + when(b.createdAt)));
+    if (b.findings.length) {
+      var ul = h('ul', 'plans');
+      b.findings.forEach(function (x) {
+        var item = h('li', null, x.text);
+        if (x.cites.length) item.appendChild(h('div', 'meta', basedOn(x.cites)));
+        ul.appendChild(item);
+      });
+      li.appendChild(ul);
+    }
+    b.actions.forEach(function (a) {
+      var box = h('div', 'rec');
+      head(box, a.rank + '. ' + a.title, a.approval.state);
+      if (a.why) box.appendChild(h('div', 'text', 'Why: ' + a.why));
+      if (a.steps) box.appendChild(h('div', 'text', 'Steps: ' + a.steps));
+      box.appendChild(h('div', 'meta', join([actionNote(a.approval), basedOn(a.cites)])));
+      li.appendChild(box);
+    });
+    if (!b.actions.length) li.appendChild(h('div', 'meta', 'This brief proposes no action, so there is nothing for the head to approve.'));
+    li.appendChild(h('div', 'meta', 'Line to the CEO division: ' + b.ceoLine));
+  }
+
+  function requestSection(title, hint, list, empty) {
+    return section(title, hint, list, function (li, q) {
+      head(li, DIVISION[q.from] + ' asked ' + DIVISION[q.to], q.state);
+      li.appendChild(h('div', 'text', q.question));
+      if (q.reason) li.appendChild(h('div', 'bad', q.reason));
+      li.appendChild(h('div', 'meta', join(['Asked ' + when(q.askedAt), q.answeredAt ? 'Answered ' + when(q.answeredAt) : ''])));
+    }, empty, 'h3');
+  }
+
+  function divisionSection(v, requestsUnread) {
+    var s = h('section');
+    var top = h('div', 'head');
+    top.appendChild(h('h2', null, v.name + ' division'));
+    if (v.brief) top.appendChild(chip(v.brief.status));
+    s.appendChild(top);
+    s.appendChild(h('p', 'hint', 'Its assistant writes to ' + v.head + '. The head approves an action by texting back the one-time code.'));
+    if (v.brief) {
+      var ul = h('ul', 'list');
+      var li = h('li', 'row');
+      briefRow(li, v.brief);
+      ul.appendChild(li);
+      s.appendChild(ul);
+    } else {
+      s.appendChild(h('div', 'list empty', has(v.unread, 'brief')
+        ? 'The latest brief could not be read right now. See the notes above.'
+        : 'No brief yet. It is written each morning, or when the owner or the head texts BRIEF.'));
+    }
+    var gone = requestsUnread ? 'The data requests could not be read right now. See the notes above.' : '';
+    s.appendChild(requestSection('Questions it asked', 'What this division needed from another division, and what came back.', v.asked,
+      gone || 'None. It has asked nothing of the other divisions.'));
+    s.appendChild(requestSection('Questions it was asked', 'What other divisions needed from this one. It answers from its own data.', v.received,
+      gone || 'None. No other division has asked it anything.'));
+    return s;
+  }
+
+  function digestSection(d) {
+    return section('CEO digest', 'The very short text Owner HQ sends the owner: one line per division. The heads get the detail in their own briefs.',
+      d.digest ? [d.digest] : [], function (li, dg) {
+        head(li, 'Company status' + (dg.date ? ' for ' + dg.date : ''));
+        li.appendChild(h('div', 'text digest', dg.text));
+        var chips = h('div', 'chips');
+        dg.reports.forEach(function (r) {
+          var label = r.state === 'in' ? (WORDS[r.status] || r.status) : r.state === 'missing' ? 'no report yet' : 'report could not be read';
+          var tone = r.state === 'in' ? (TONE[r.status] || '') : 'warn';
+          chips.appendChild(h('span', 'chip ' + tone, (DIVISION[r.division] || r.division) + ': ' + label));
+        });
+        li.appendChild(chips);
+        li.appendChild(h('div', 'meta', 'Written ' + when(dg.createdAt)));
+      }, has(d.unread, 'digest')
+        ? 'The latest digest could not be read right now. See the notes above.'
+        : 'No digest yet. Owner HQ writes one each morning once the divisions have reported.');
+  }
+
+  function renderDivisions(d) {
+    var f = document.createDocumentFragment();
+    f.appendChild(h('p', 'who', 'The company at a glance: each division\\u2019s latest brief and where its actions stand, the questions the divisions asked each other, and the CEO digest. Read-only: approvals are made by text with a one-time code, never here.'));
+    notesBlock(f, d.notes);
+    f.appendChild(digestSection(d));
+    d.divisions.forEach(function (v) { f.appendChild(divisionSection(v, has(d.unread, 'requests'))); });
+    return f;
+  }
+
   function render(d) {
     var f = document.createDocumentFragment();
-
-    if (d.placeholder) {
-      var box = h('div', 'place');
-      box.appendChild(h('h2', null, d.name));
-      box.appendChild(h('p', null, d.message));
-      f.appendChild(box);
-      return f;
-    }
 
     var who = h('p', 'who');
     if (d.assistant) {
@@ -237,12 +352,9 @@ const SCRIPT = `
       who.appendChild(document.createTextNode('This assistant has no record yet.'));
     }
     f.appendChild(who);
+    if (ABOUT[d.id]) f.appendChild(h('p', 'hint', ABOUT[d.id]));
 
-    if (d.notes && d.notes.length) {
-      var notes = h('div', 'notes');
-      d.notes.forEach(function (n) { notes.appendChild(h('div', 'note', n)); });
-      f.appendChild(notes);
-    }
+    notesBlock(f, d.notes);
 
     var cards = h('div', 'cards');
     [['Open tasks', d.counts.openTasks], ['Proposals', d.counts.proposals], ['Approvals waiting', d.counts.pendingApprovals]].forEach(function (c) {
@@ -322,20 +434,21 @@ const SCRIPT = `
     var id = current;
     var mine = ++inflight;
     if (fresh) { lastKey = ''; panel.replaceChildren(h('p', 'loading', 'Loading\\u2026')); }
-    fetch('/api/department/' + encodeURIComponent(id), { cache: 'no-store', headers: { Accept: 'application/json' } })
+    var url = id === 'divisions' ? '/api/divisions' : '/api/department/' + encodeURIComponent(id);
+    fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } })
       .then(function (res) {
         return res.json().then(function (body) { return { ok: res.ok, body: body }; });
       })
       .then(function (r) {
         if (id !== current || mine !== inflight) return;
-        if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : 'The console could not load this department.');
+        if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : 'The console could not load this view.');
         var key = JSON.stringify(r.body, function (k, v) { return k === 'generatedAt' ? undefined : v; });
-        if (key !== lastKey) { panel.replaceChildren(render(r.body)); lastKey = key; }
+        if (key !== lastKey) { panel.replaceChildren(id === 'divisions' ? renderDivisions(r.body) : render(r.body)); lastKey = key; }
         stamp(true);
       })
       .catch(function (err) {
         if (id !== current || mine !== inflight) return;
-        if (!lastKey) panel.replaceChildren(h('p', 'loading', (err && err.message) || 'The console could not load this department.'));
+        if (!lastKey) panel.replaceChildren(h('p', 'loading', (err && err.message) || 'The console could not load this view.'));
         stamp(false);
       });
   }
@@ -388,7 +501,7 @@ export const PAGE_CSP = [
   "frame-ancestors 'none'",
 ].join('; ');
 
-const tabButtons = DEPARTMENTS.map(
+const tabButtons = TABS.map(
   (d) =>
     `<button class="tab" role="tab" type="button" id="tab-${d.id}" data-id="${d.id}" aria-controls="panel" aria-selected="false" tabindex="-1">${escapeHtml(d.name)}</button>`,
 ).join('\n    ');
@@ -410,9 +523,9 @@ export const PAGE_HTML = `<!doctype html>
 <div class="wrap">
   <header>
     <h1>Fortune AI Headquarters · Admin</h1>
-    <p class="sub">A read-only view of every assistant. Nothing here can send, approve or change anything.</p>
+    <p class="sub">A read-only view of the company's divisions and of every assistant. Nothing here can send, approve or change anything.</p>
   </header>
-  <nav class="tabs" role="tablist" aria-label="Departments">
+  <nav class="tabs" role="tablist" aria-label="Divisions and departments">
     ${tabButtons}
   </nav>
   <main id="panel" role="tabpanel">

@@ -5,20 +5,21 @@ import type { AssistantId } from '@fahq/contracts';
 // DepartmentView is the only thing that ever leaves the server (see shape.ts).
 
 export type DepartmentId = AssistantId;
-export type LiveDepartmentId = Exclude<DepartmentId, 'salon'>;
 
-export type DepartmentInfo = { id: DepartmentId; name: string; placeholder: boolean };
+export type DepartmentInfo = { id: DepartmentId; name: string };
 
+// Every department is live: the salon's assistant is a stand-in for Cindy on synthetic salon data, and it reads from the same
+// tables as the others. (Cindy's own app keeps her family and personal data; none of that is read here.)
 export const DEPARTMENTS: readonly DepartmentInfo[] = [
-  { id: 'owner', name: 'Owner HQ', placeholder: false },
-  { id: 'finance', name: 'Finance Department', placeholder: false },
-  { id: 'online', name: 'Online Customer Service Department', placeholder: false },
-  { id: 'manager', name: 'HQ Manager', placeholder: false },
-  { id: 'salon', name: 'Salon Department (stand-in for Cindy)', placeholder: false },
+  { id: 'owner', name: 'Owner HQ' },
+  { id: 'finance', name: 'Finance Department' },
+  { id: 'online', name: 'Online Customer Service Department' },
+  { id: 'manager', name: 'HQ Manager' },
+  { id: 'salon', name: 'Salon Department (stand-in for Cindy)' },
 ];
 
-export const SALON_MESSAGE =
-  "Cindy runs in her own app. This tab will mirror her backend at the same admin level, with the head stylist's knowledge; her family and personal data stay in her app.";
+/** The page's tabs: the Divisions view first (the company at a glance), then one tab per department. */
+export const TABS: readonly { id: string; name: string }[] = [{ id: 'divisions', name: 'Divisions' }, ...DEPARTMENTS];
 
 export const BRAIN_NOTE =
   'Memory and shared record: brain not available yet. They fill in as soon as the assistants record something.';
@@ -200,7 +201,6 @@ export type ManagerBlock = {
 export type DepartmentView = {
   id: DepartmentId;
   name: string;
-  placeholder: false;
   generatedAt: string;
   assistant: { displayName: string | null; number: string | null } | null;
   counts: { openTasks: number | null; proposals: number | null; pendingApprovals: number | null };
@@ -227,5 +227,3 @@ export type DepartmentView = {
   timeline: { id: string; type: string; at: string | null }[];
   notes: string[];
 };
-
-export type PlaceholderView = { id: DepartmentId; name: string; placeholder: true; message: string };
