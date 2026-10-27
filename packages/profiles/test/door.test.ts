@@ -84,6 +84,29 @@ describe('doorSkill: the skill text a door serves', () => {
     }
   });
 
+  it('corrects an older stored skill: its End of work is replaced, or added, so the tool is told to file the report', () => {
+    const old = files.finance.skill.replace(/## End of work[\s\S]*$/, '## End of work\nThe worker files your work report to the HQ Manager automatically. You do nothing for it.');
+    expect(old).toContain('You do nothing for it.');
+    const fixed = doorSkill({ skill: old, lessons: [] }, { tools: [], canReport: true, readNames: READ_TOOL_NAMES });
+    expect(fixed).not.toContain('You do nothing for it.');
+    expect(section(fixed, 'End of work')).toContain('call `file_work_report` once');
+    expect(headings(fixed)).toEqual(headings(old));
+
+    const without = files.finance.skill.replace(/## End of work[\s\S]*$/, '').trimEnd();
+    expect(headings(without)).not.toContain('End of work');
+    const added = doorSkill({ skill: without, lessons: [] }, { tools: [], canReport: true, readNames: READ_TOOL_NAMES });
+    expect(headings(added).at(-1)).toBe('End of work');
+    expect(section(added, 'End of work')).toContain('call `file_work_report` once');
+    expect(doorSkill({ skill: without, lessons: [] }, { tools: [], canReport: false, readNames: READ_TOOL_NAMES })).not.toContain('End of work'); // nothing to file, nothing to add
+  });
+
+  it('keeps the current End of work as it is, word for word', () => {
+    const mine = section(files.finance.skill, 'End of work');
+    expect(mine).toContain('`file_work_report`');
+    const text = doorSkill(files.finance, { tools: READ_TOOL_NAMES.map(tool), canReport: true, readNames: READ_TOOL_NAMES });
+    expect(section(text, 'End of work')).toBe(mine);
+  });
+
   it('adds the standing lessons as the worker does, leaving out one that names a tool the door lacks', () => {
     const lessons = [
       { text: 'Say the period with every number.', source: 'rec-1', adoptedAt: '2026-10-20T10:00:00Z' },
