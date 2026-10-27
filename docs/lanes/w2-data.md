@@ -265,5 +265,14 @@ it is one source and carries the only act rule.
 - `npm run typecheck` clean on `7fba53e` (14:26 ET).
 - `npx vitest run packages/data packages/contracts apps/worker/test/read-tools.test.ts packages/profiles
   packages/codemode/test/doors.test.ts` on `7fba53e` (14:28–14:30 ET, no database): 29 files, 482 tests, all passed.
-- Full `flock ~/.fahq-db-test.lock npm test` on `7fba53e`: queued at 14:26 ET behind the legal and manager lanes'
-  suites (result below when it ran).
+- Full `flock ~/.fahq-db-test.lock npm test` on the code of `7fba53e` (14:34–14:37 ET, after waiting for the legal and
+  manager lanes' suites): 57 files passed, 9 skipped (Meterless engines absent here), 2 failed; 1,017 tests passed,
+  236 skipped, 2 failed. **Neither failure is this branch's code:**
+  - `supabase/tests/profiles.test.ts`: its `beforeAll` timed out at 10 s while other lanes' suites loaded the machine.
+    Rerun alone under the lock (14:38 ET): passed.
+  - `apps/worker/test/profiles.test.ts`, the two "real store, real table" cases: the shared database's
+    `public.assistant_profiles` holds a sixth row, `legal` (version 1, written 2026-10-27 13:41 ET, by the legal lane's
+    work; read with a plain `select`), and this branch's assistant ids are the five of the base, so the stored row is
+    refused ("assistant_id: Invalid option"). Rerun under the lock at 14:38 ET: the same two fail, the rest pass. They
+    pass on a database holding only the five base profiles, or once the legal lane's assistant id is merged. This lane
+    did not touch the row (it is another lane's).
