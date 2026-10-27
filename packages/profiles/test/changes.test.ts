@@ -232,7 +232,7 @@ describe('a change of read tools', () => {
     const row = content('finance');
     const done = must(applyProfileChange(row, { kind: 'reads', add: ['usage_summary'], remove: ['latest_proposal'] }, options()));
     expect(done.changed).toBe(true);
-    expect(done.next.reads).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'explain_proposal', 'usage_summary']);
+    expect(done.next.reads).toEqual([...row.reads.filter((name) => name !== 'latest_proposal'), 'usage_summary']);
     expect(done.next).toMatchObject({ skill: row.skill, models: row.models, lessons: [] });
   });
 

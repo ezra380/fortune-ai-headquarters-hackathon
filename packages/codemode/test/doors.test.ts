@@ -389,7 +389,7 @@ describe('a door with a report to file (how serve.ts builds it)', () => {
   it('offers a plain door its reads and the report, and a Code Mode door `code` and the report', async () => {
     const deps = makeDeps({ fileReport: filed() }).deps;
     const plain = await connect(createBrainMcpServer(deps, 'finance'));
-    expect(await toolNames(plain)).toEqual(['file_work_report', 'get_finance_metrics', 'recall_my_decisions']);
+    expect(await toolNames(plain)).toEqual(['file_work_report', ...doorReads('finance')].sort());
     const code = await connect(await createCodeModeBrainServer(deps, {}, 'finance'));
     expect(await toolNames(code)).toEqual(['code', 'file_work_report']);
     await plain.close();

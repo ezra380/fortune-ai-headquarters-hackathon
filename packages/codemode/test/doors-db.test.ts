@@ -280,7 +280,7 @@ describe('serve.ts', () => {
       await client.connect(transport);
       const row = (await pool.query(`select version from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
       expect(log).toContain(`fortune-brain MCP ready (plain tools, profile finance version ${row.version} from the database)`);
-      expect(await toolNames(client)).toEqual(['file_work_report', 'get_finance_metrics', 'recall_my_decisions']);
+      expect(await toolNames(client)).toEqual(['file_work_report', ...doorReads('finance')].sort());
       const prompt = ((await client.getPrompt({ name: 'skill' })).messages[0]!.content as { text: string }).text;
       expect(prompt).toContain('call `file_work_report` once');
       const done = await client.callTool({ name: 'file_work_report', arguments: { summary: 'Started the finance door from serve.ts, called 5550101234.' } });
@@ -304,7 +304,7 @@ describe('serve.ts', () => {
     const client = new Client({ name: 'cursor', version: '1.0.0' });
     try {
       await client.connect(transport);
-      expect(await toolNames(client)).toEqual(['file_work_report', 'get_online_metrics', 'recall_my_decisions']);
+      expect(await toolNames(client)).toEqual(['file_work_report', ...doorReads('online')].sort());
     } finally {
       await client.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -332,7 +332,7 @@ describe('serve.ts', () => {
     const client = new Client({ name: 'claude-code', version: '1.0.0' });
     try {
       await client.connect(transport);
-      expect(await toolNames(client)).toEqual(['get_online_metrics', 'recall_my_decisions']);
+      expect(await toolNames(client)).toEqual([...doorReads('online')].sort());
       const prompt = ((await client.getPrompt({ name: 'skill' })).messages[0]!.content as { text: string }).text;
       expect(prompt).not.toContain('file_work_report');
       expect(prompt).toContain('This door has no database to file a work report in.');
