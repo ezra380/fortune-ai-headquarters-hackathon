@@ -18,7 +18,9 @@ import {
   CONTAINER, FINANCE_VIEW, MART, MART_TABLE, MART_VIEW, METRIC_BY_ID, PERIOD_VIEW_V2, computeAll, financeQuery, financeViewBody,
   martQuery, martSql,
 } from '../packages/data/src/finance-sql.ts';
-import { CATALOG_V2_BY_ID, DIVISIONS, LAYERS, divisionIds, divisionSlice, type Layer } from '../packages/data/src/divisions.ts';
+import type { Division, RowRead } from '@fahq/contracts';
+import { CATALOG_V2_BY_ID, DIVISIONS, LAYERS, divisionIds, divisionSlice, seriesOf, type Layer } from '../packages/data/src/divisions.ts';
+import { oracleRows } from '../packages/data/src/rows.ts';
 import { createZetarisDataPort } from '../packages/data/src/index.ts';
 import { DERIVED_VIEW_V2, STANDING_PERIOD, STANDING_VIEW_V2, computeLayers, type Layers } from '../packages/data/src/layers.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from '../packages/data/src/source-server.ts';
@@ -212,6 +214,52 @@ function layerWant(layers: Layers, layer: Layer, division?: (typeof DIVISIONS)[n
   return new Map([...layers[layer]].map(([p, values]) => [p, keep(values)]));
 }
 
+const ROW_READS: RowRead[] = [
+  { table: 'repairs', status: 'open' }, { table: 'repairs', status: 'late' }, { table: 'repairs', status: 'done' },
+  { table: 'invoices', status: 'open' }, { table: 'invoices', status: 'overdue' }, { table: 'invoices', status: 'due_30d', business: 'salon' },
+  { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' },
+];
+const SERIES: { division: Division; id: string }[] = [
+  { division: 'finance', id: 'm:online.revenue.total' }, { division: 'finance', id: 'm:online.budget.google.room' },
+  { division: 'salon', id: 'm:salon.no_show_rate' }, { division: 'online', id: 'm:online.service.replied_24h.share' },
+  { division: 'hq', id: 'm:salon.season.month_index' },
+];
+
+/** Equal as data: the same keys, strings exactly, numbers within a cent (or a hundredth of an hour). */
+function sameData(got: unknown, want: unknown): boolean {
+  if (typeof got === 'number' && typeof want === 'number') return Math.abs(got - want) <= 0.011;
+  if (got && want && typeof got === 'object' && typeof want === 'object') {
+    const keys = new Set([...Object.keys(got), ...Object.keys(want)]);
+    return [...keys].every((k) => sameData((got as Record<string, unknown>)[k], (want as Record<string, unknown>)[k]));
+  }
+  return got === want;
+}
+
+/** The row reads and the series, through the DataPort, against the oracle. */
+async function proveRowsAndSeries(port: ReturnType<typeof createZetarisDataPort>, layers: Layers, asOf: string): Promise<number> {
+  const year = generateYear();
+  let failures = 0;
+  console.log('\nrow reads (DataPort, version 2)');
+  for (const read of ROW_READS) {
+    const t = Date.now();
+    const got = await port.readRows!({ ...read, asOf });
+    const want = oracleRows(year, read);
+    const ok = got.rows.length === want.rows.length && sameData(got.rows, want.rows) && sameData(got.totals, want.totals);
+    console.log(`${ok ? '  ok ' : '  ✗  '} ${JSON.stringify(read)}: ${got.rows.length} rows, totals ${JSON.stringify(got.totals)} in ${Date.now() - t} ms`);
+    if (!ok) { failures += 1; console.log(`     expected ${want.rows.length} rows, totals ${JSON.stringify(want.totals)}`); }
+  }
+  console.log('\nseries (DataPort, version 2, from the division marts)');
+  for (const { division, id } of SERIES) {
+    const t = Date.now();
+    const got = await port.getMetricSeries!({ division, metricId: id, asOf });
+    const want = seriesOf(layers, id);
+    const ok = sameData(got.points, want) && got.points.length === want.length;
+    console.log(`${ok ? '  ok ' : '  ✗  '} ${division} ${id}: ${got.points.length} points, min ${got.stats.min}, max ${got.stats.max}, mean12 ${got.stats.mean12} in ${Date.now() - t} ms`);
+    if (!ok) failures += 1;
+  }
+  return failures;
+}
+
 /** Version 2's proof beyond the period view: the derived and standing views, every mart table, and the DataPort's own reads. */
 async function proveV2Layers(): Promise<number> {
   const layers = computeLayers(generateYear());
@@ -239,7 +287,7 @@ async function proveV2Layers(): Promise<number> {
       for (const a of r.attention) console.log(`  attention ${a.level.padEnd(5)} ${a.metricId}: ${a.rule}`);
     }
   }
-  return failures;
+  return failures + (await proveRowsAndSeries(port, layers, asOf));
 }
 
 try {

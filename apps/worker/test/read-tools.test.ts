@@ -1,3 +1,4 @@
+import { transformSync } from 'esbuild';
 import { describe, expect, it } from 'vitest';
 import { PERIOD_KEYS, type AssistantId, type Attention, type DataPort, type Division, type Metric, type MetricInfo } from '@fahq/contracts';
 import { createReadTools, pick, type ReadToolContext } from '../src/read-tools.ts';
@@ -113,6 +114,16 @@ describe('read tools', () => {
       expect(t.description.length).toBeGreaterThan(20);
       expect(t.signature).toMatch(/^\(args: .*\) => Promise<.*>$/);
     }
+  });
+
+  it('writes every signature as valid TypeScript, so the declarations a script is written against parse', () => {
+    // esbuild parses TypeScript types to strip them, so a broken signature is a syntax error here.
+    for (const data of [dataMock, v2Data().data]) {
+      for (const t of Object.values(createReadTools(setup({ data }).ctx, 'owner'))) {
+        expect(() => transformSync(`declare const ${t.name}: ${t.signature};`, { loader: 'ts' }), t.name).not.toThrow();
+      }
+    }
+    expect(() => transformSync('declare const x: (args: { a: }) => Promise<{ b: number[ }>;', { loader: 'ts' })).toThrow();
   });
 
   it('checks arguments with plain sentences: a wrong period, a stray name, a missing or wrong-typed value', async () => {

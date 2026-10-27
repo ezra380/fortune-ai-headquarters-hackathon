@@ -235,7 +235,28 @@ the waiting budget change and both businesses' overdue invoices; HQ sees all of 
     three mart table statements and the three queries. A row outside the division's own ids, a metric
     twice, an unknown division or period, or no rows at all fail the read. `attention` is
     `attentionFor(metrics)`.
-  - `catalog` lists every layer, each entry with its `layer` (new optional `MetricInfo.layer`).
+  - `catalog` lists every layer, each entry with its `layer` (new optional `MetricInfo.layer`), and, when
+    the metric has them, its `about`, its `nouns` (what a count counts) and `planUse`.
+  - `readRows({ table, …, asOf })` (`packages/data/src/rows.ts`): the rows behind a standing number. A read
+    is one of four fixed questions (`RowRead` in `@fahq/contracts`): `repairs` open / late / done in the
+    last 30 days; `invoices` open / overdue / due in 30 days, one business or both; `waiting` customer
+    messages of the last week with no first answer, older than N hours; `low_stock` on the data date. Its
+    one statement reads the source's row view (`fortune_hq_v2.salon_repairs`, `finance_invoices`,
+    `support_messages`, `online_inventory`) with the source's data-quality rule and the same fixed
+    condition its standing metric counts with; columns are selected by position, from a fixed list (no
+    customer, no message text, no name). "Older than N hours" and the row limit are applied after the
+    read, so nothing a script passes reaches the SQL. The port adds the totals (count, money per business,
+    counts by channel and topic, wanted and out-of-stock), so a Code Mode script never adds numbers
+    itself. More than 500 matching rows is refused, never cut short. The hash covers the row view body and
+    the statement.
+  - `getMetricSeries({ division, metricId, asOf })`: one period or derived metric in every period, from the
+    division's own mart table (`SELECT period, value … WHERE metric_id = '<the catalog's id>'`), oldest
+    first, with `min`, `max` and `mean12` (the mean of the whole months present: the season index's
+    denominator). An id the division does not read, or a standing one, is refused before Zetaris is asked.
+- The oracle `oracleRows(year, read)` computes a row read in TypeScript; `rows.test.ts` checks that its
+  totals equal the standing and month-so-far metrics computed from the metric definitions (open and late
+  repairs, each business's open, overdue and due-soon invoices, waiting and waiting-over-a-day messages,
+  low, wanted-low and wanted-out-of-stock products), and setup proves the SQL against it live.
 
 Live timings (08:25 ET, five sources): a division read 1.5–3.1 s; the unsliced read about 9–10 s (its
 derived view recomputes the whole period view); one mart table asked for every period at once about 30 s
@@ -243,6 +264,48 @@ for derived. **With twelve sources (09:20 ET, slice 3):** a division read 4.5–
 about 23 s; the period view about 8 s a period; a derived mart table for every period at once about 77 s.
 Every statement still scans every source (a metric filter cannot reach below the unpivot), so the division
 reads are the ones the worker should use.
+
+## The read tools and who gets them (design 3.7, without the customer join)
+
+`apps/worker/src/read-tools.ts` (Code Mode inside the worker) and the MCP door
+(`packages/codemode/src/brain-mcp.ts`, for outside AI tools) serve the same reads from the same port. The
+three metric tools read their division's mart when the port has `getDivisionMetrics` (each metric then
+carries its period, `standing` for as-of-now numbers, and the tool returns the attention list), and each
+tool's description lists exactly the ids it returns. On a version 1 port they slice by business as before,
+and the new tools refuse with a plain sentence.
+
+| Tool | Returns | owner | finance | online | salon | manager |
+|---|---|---|---|---|---|---|
+| `get_finance_metrics` | the finance division's metrics | ✓ | ✓ | | | |
+| `get_online_metrics` | the online division's metrics | | | ✓ | | |
+| `get_salon_metrics` | the salon division's metrics | | | | ✓ | |
+| `get_budget_room({period})` | per channel cap, spend, room, used; all ad spend; proposed changes; last-year index | ✓ | ✓ | | | |
+| `get_metric_series({metricId})` | ≤13 points + min, max, mean12, from the caller's division | ✓ | ✓ | ✓ | ✓ | |
+| `get_company_overview({period})` | HQ mart: salon, online and combined side by side, `normal`, attention | ✓ | | | | |
+| `get_data_quality({period})` | every rejected-rows count, their total, sources with any | | | | | ✓ |
+| `get_repair_tickets({status, limit})` | rows + count, fees, cost | ✓ | | | ✓ | |
+| `get_supplier_invoices({status, business?, limit})` | rows + count and amount per business | ✓ | ✓ | | | |
+| `get_waiting_conversations({olderThanHours?, limit})` | thread, channel, topic, hours waited + counts | ✓ | | ✓ | | |
+| `get_low_stock_interest({limit})` | sku, line, on hand, reorder point, views + counts | | | ✓ | | |
+
+The owner reads finance and HQ ids in a series; each department its own division's. The door adds
+`get_salon_metrics` (the salon door had no numbers before) and every tool above that needs only the data
+port. Plan rounds slice the read by the catalog's `divisions` (`sliceFor`, `departments.ts`): Finance plans
+from the money of both businesses side by side, not from every metric; a metric with `planUse: false` is
+never planned from.
+
+## The plan checker (`packages/contracts/src/validate.ts`)
+
+- **Ids are not amounts** (design 4e): digits right after a letter and a hyphen (`demo-rt-01234`,
+  `SUP-2201`) are part of an id. A minus sign or a range still reads (`-$3,000`, `10-20%`).
+- **Small counts** (design 4d): a number under 100 whose next two words name what a cited count metric
+  counts (the catalog's `nouns`: "3 overdue invoices") must be a count the plan holds (the metric, a count
+  projection or a count lever). `writePlans` passes the nouns from the port's catalog; without them small
+  counts are not checked, as before. The final check of a round does not pass them (the departments' own
+  checks already did).
+- `PLAN_SYSTEM` (rules 1, 2 and 4) says that a `standing` metric is as of the data date, that a seasonal
+  budget is the projection cap × last-year index, and the small-count rule; the plan writer now sees each
+  metric's period.
 
 ## The oracle
 
