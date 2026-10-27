@@ -139,3 +139,77 @@ failing on bb29578's own code against the shared local database).
   `fortune_hq_v2.<division>_<layer>_metrics` views and the four `fortune_demo_v2_*_mart` marts. Mart table
   names are per mart (four `period_metrics` coexist). Nothing of version 1 was named or changed.
 - Env: unchanged (`FAHQ_DATA_VERSION`, `FAHQ_SOURCE_PORT_V2`). No migration.
+
+## Slice 3 of 4: new sources (2026-10-27, 08:29–09:30 ET)
+
+### What works (with the tests that prove it)
+
+- **Seven new sources**, each its own seeded stream (`generateOperations(orders)` in `synthetic.ts`; the
+  year's orders are only read, for real order ids), its own row view and REST table, its data-quality rule
+  (`OPS_SOURCES` in the new `packages/data/src/operations.ts`), exactly one planted bad row and a
+  rejected-rows metric: order fees and shipping (`order_costs`), refunds, checkouts (abandoned and
+  recovered), inventory with product views, the support inbox (new database `FORTUNE_DEMO_SUPPORT`; no body,
+  subject or text column), salon repair tickets, supplier invoices. `operations.test.ts` "reject exactly the
+  one planted row of each source, and count it in its own month only", "say in SQL what they say in
+  TypeScript…"; `year.test.ts` "point every order a row names at a real sale…", "let nothing happen after
+  the data date…", "keep the salon closed on Saturdays…, plus one in each new source".
+- **Appointments' new columns** (`location`, `booked_via`, `labor_cost_usd`, own stream, version 1's
+  columns and values unchanged): version 2's rule checks them (`specOf('appointments', 2)`; version 1's
+  rule and view are frozen), planted `demo-a-bad-location`. Six metrics: no-show rate, revenue per location,
+  online-booked share, labor cost, salon gross profit after labor (salon, finance, hq). `frozen-v1.test.ts`
+  "carries version 1's rows unchanged among its own: every version 1 column and value…";
+  `operations.test.ts` "check version 2's appointment columns by version 2's rule only…".
+- **Metrics:** 81 period (was 41), 14 derived (adds `m:online.refund_rate`, `m:online.contribution` =
+  gross profit − fees − shipping − refunds − all ad spend), 15 standing (adds messages waiting now and over a
+  day from the last week, repairs open and open over two weeks, per business AP open, due within thirty days,
+  overdue amount and count). Every new number is checked against the rows directly in `operations.test.ts`
+  (online, salon and finance blocks). `MetricDef.test` (a `Cond`: SQL + TypeScript with SQL's NULL rules)
+  and `business: 'combined'` (only `m:combined.dq.rejected_invoices`, a count read by Finance and HQ) are new.
+  The oracle returns no value for a ratio over a zero denominator, as Zetaris does.
+- **Routing:** salon 24/2/3, finance 54/14/11, online 50/5/3, hq 19/14/11 ids per layer;
+  `divisions.test.ts` "route the day-to-day systems: repairs to the Salon, the inbox, checkouts and stock to
+  Online, what is owed and what sales cost to Finance" (also: HQ reads every rejected-rows count; a combined
+  metric is a count read only by Finance and HQ; Finance reads no inbox or stock; Online nothing owed).
+- **Attention:** six new rules (messages waiting over a day, act; missed buyers, watch; wanted out of stock,
+  act; wanted low stock, watch; repairs open over two weeks, act; overdue supplier invoices, act).
+  `divisions.test.ts` "fires on the day-to-day systems where their rows say so…"; `zetaris.test.ts`
+  "reports the attention rules that fired, each on the division's own numbers…".
+- **No-medical guard** (`no-medical.test.ts`, 4 tests): every column and string value of all 16 routes
+  (bad rows included), every allowed value of every enumerated column (`SOURCE_ENUMS`, proven complete
+  against the good rows), the inbox's columns (no body/text/subject), every metric id/label/about and every
+  view body.
+- **Proved live, `--v2 --recreate` 08:56–09:20 ET:** 145 comparisons, all matched, 0 mismatches; 81 of 81
+  period metrics in each of the 13 periods; DataPort unsliced 108, salon 28, finance 77, online 57, hq 42;
+  version 1's mart listed exactly as before; "version 2 verified". The version 2 period view pin in
+  `frozen-v1.test.ts` moved to that body (`e8198a3c…`).
+
+Test counts: `npm run typecheck` green; `packages/data` 96 tests in 11 files green. Full `npx vitest run`
+(09:00 ET): 601 passed, 2 failed, both in `supabase/tests/db.test.ts` (the same two RLS tests slice 1's
+tier-0 run showed failing on bb29578's own code against the shared local database).
+
+### Not done
+
+- The worker still reads none of this: read tools (`get_repair_tickets`, `get_supplier_invoices`,
+  `get_waiting_conversations`, `get_low_stock_interest`, `get_company_overview`, …), `sliceFor` by divisions,
+  SKILL.md "You can read" lists, `READ_TOOL_NAMES`/`SHAPES`, `DOOR_READS`, `PLAN_SYSTEM` rules.
+- Rejected-rows metrics and extra rules for ads and email; email flow/campaign split and unsubscribes;
+  Meta campaigns and late agent reports; store sessions and landing pages.
+- Average repair turnaround in days and average first-reply minutes: `Metric.unit` has no `days`/`minutes`
+  (the design's validator step 4c); the `within_14d` and `replied_1h/24h` shares carry them meanwhile.
+- No salon–online customer join and no combined money metric (Ezra's cut, unchanged).
+
+### What the merge must know
+
+- **Outside packages/data:** nothing this slice (contracts, worker, profiles, door and setup script
+  unchanged; `scripts/zetaris-setup.ts` proves the new metrics because its proof is generic).
+- New files: `packages/data/src/operations.ts` (new sources' rules and metrics), `packages/data/src/sql.ts`
+  (shared `Row`, `Field`, `Cond`, `SourceSpec`, `quoted`, …; `finance-sql.ts` re-exports `quoted` and
+  `Row`). `aggregate(d, rows, version)` now takes the version; `AS_OF` and `LAST_WEEK` live in
+  `synthetic.ts` (`layers.ts` re-exports `AS_OF`). `SyntheticYear.salon.appointments` is `SalonVisit[]`.
+- A metric's `business` can now be `combined` (one count). Anything that groups the catalog by business
+  must expect it (the worker's read tools filter by `salon`/`online`, so it shows only to Finance and Owner
+  through `get_finance_metrics`).
+- Zetaris: version 2 was dropped and rebuilt in place (all `fortune_hq_v2.*`, the four `fortune_demo_v2_*`
+  marts, the `*_v2` and new REST tables); new database `FORTUNE_DEMO_SUPPORT`. Version 1 untouched. Reads
+  are slower with twelve sources (division read 4.5–7.4 s, unsliced 23 s): prefer `getDivisionMetrics`.
+- Env: unchanged. No migration.

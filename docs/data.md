@@ -34,14 +34,37 @@ signature a model sees is unchanged.
 | Orders, appointments, Google and Amazon ad days, email days | 1,301 / 2,902 / 2,737 / 1,228 (version 1's three bad rows included) | `generateHistory()` (Oct 1, 2025 to Aug 31, 2026; its own seed) then version 1's rows unchanged |
 | Meta ad days | 1,173 (3 a day, all 13 periods) | `generateDivisions()`, its own named stream |
 | Budget sheet (finance owner's monthly caps) | 41 | `generateDivisions()`, its own named stream: 13 months × google, meta, amazon approved; one proposed October Google raise that must never count; one planted bad row (`demo-bu-bad-negative`, March) |
+| Appointments' new columns: `location`, `booked_via`, `labor_cost_usd` | on every one of the 2,902 rows, plus 1 | `generateYear()` (`salonVisits`, its own stream): version 1's columns and values unchanged (a test projects every row onto them); no labor cost for a no-show; planted `demo-a-bad-location` (April, a location the salon does not have) |
+
+The day-to-day systems (`generateOperations(orders)`, each its own stream; the year's orders are only read,
+for real order ids). Every source has rows in all 13 periods and exactly one planted bad row.
+
+| Source (Zetaris table) | Mirrors | Rows | Planted bad row |
+|---|---|---|---|
+| Order fees and shipping (`fortune_demo_online.order_costs`) | the payments export and the label account | 1,300: one per sale, and the bad row | `demo-oc-bad-negative` (May): a voided label exported as a negative cost |
+| Refunds (`fortune_demo_online.refunds`) | refunds issued by hand in the store | 78: about one sale in seventeen, 4–24 days after it, never above what was paid | `demo-rf-bad-zero` (June): a zero refund |
+| Checkouts (`fortune_demo_online.checkouts`) | abandoned checkouts and the recovery email or text | 1,749: about five a day; recovered ones name a real order of the same line within three days | `demo-ck-bad-recovery` (February): "recovered" by email but names no order |
+| Inventory (`fortune_demo_online.inventory`) | stock on hand plus the week's product views and carts | 781: 60 products on each period's last day (the month so far: Oct 26) | `demo-iv-bad-negative` (April): negative stock |
+| Support inbox (`fortune_demo_support.messages`, its own database) | support@ email, the shop's two texting numbers, site chat | 4,814: about twelve customer messages a day plus the shop's follow-ups; **no body, subject or text column** | `demo-msg-bad-reply` (August): answered before it arrived |
+| Repair tickets (`fortune_demo_salon.repair_tickets`) | the ops app's repair tickets | 321: about one a working day (salon closed Saturdays); online repairs go through Brooklyn and ship back | `demo-rt-bad-dates` (July): finished before it arrived |
+| Supplier invoices (`fortune_demo_finance.invoices`) | the factories' invoices (accounts payable), each to one business, never split | 141: each factory invoices each business once or twice a month | `demo-inv-bad-due` (January): falls due before it was issued |
+
+Nothing happens after the data date: a reply, payment, repair step or refund that would fall later has not
+happened yet (it is empty), and the support inbox's last moment is Oct 26, 23:59.
 
 - `SEASON` (exported) is the invented seasonality by calendar month, relative to Sept and Oct = 1 (version
   1's rows were drawn at the base rate). It drives history volumes, Meta spend and budget caps.
 - Each new source draws from its own seeded stream (FNV-1a of its name), so adding a source later never
   shifts another's rows.
 - New ids put a letter right before their digits (`demo-o-h00001`, `demo-ad-m00001`,
-  `demo-bu-google202610`), so the plan checker's number scan never reads an id as an amount.
-- No source has a medical or hair-loss field or value (`year.test.ts` scans every key and string).
+  `demo-bu-google202610`, `demo-rt-r00012`, `demo-sku-m04`), so the plan checker's number scan never reads an
+  id as an amount.
+- **No medical or hair-loss data anywhere** (`no-medical.test.ts`): no column or string value of any source
+  (version 1 and 2, bad rows included), no allowed value of any enumerated column (`SOURCE_ENUMS`, which the
+  test also proves complete), no metric id, label or note and no view body matches
+  `medical|hair.?loss|alopecia|chemo|diagnos|fj_interest|topper_interest`. Message intents are order status,
+  repair, consignment, product question, purchase, return and other. Interest counts are product views of the
+  store's own four lines only.
 
 ## Metrics
 
@@ -49,7 +72,8 @@ signature a model sees is unchanged.
 
 | Field | Meaning |
 |---|---|
-| `business` | the legal split (salon or online); unchanged, and the validator keeps using it |
+| `business` | the legal split (salon or online); unchanged, and the validator keeps using it. `combined` only for a count that belongs to neither (`m:combined.dq.rejected_invoices`: rows of a source both businesses share), never for money |
+| `test` | a row condition beyond equality (a comparison, NULL, a list), in SQL and in TypeScript, the TypeScript side following SQL's NULL rules |
 | `divisions` | who reads it (salon, finance, online, hq); the catalog passes it on as `MetricInfo.divisions` |
 | `layer` | `period` (a total over the period's rows), `derived` (from other metrics: `layers.ts`), `standing` (as of the data date, period key `standing`) |
 | `about` | thresholds and caveats, kept out of the label so a plan never echoes them |
@@ -71,11 +95,50 @@ Version 2 adds 8 metrics to version 1's 33 (41 per period, every period):
   `m:combined.dq.rejected_budgets`; the synthetic sheet lists only online ad channels, so it is online
   business here. If the sheet ever carries salon lines, it becomes combined.
 
+Slice 3 adds 40 more period metrics (81 per period, every period): 6 from the appointments' new columns and
+34 from the day-to-day systems (`packages/data/src/operations.ts`). Labels carry no number; thresholds are in
+`about`. A source's rejected-rows count goes to every division that reads the source, and to HQ.
+
+| Metrics | Unit | Rule (valid rows, dated in the period) | Divisions |
+|---|---|---|---|
+| `m:salon.no_show_rate` | ratio | no-shows / booked visits (completed + no-show) | salon, hq |
+| `m:salon.revenue.{brooklyn,lakewood}` | usd | completed visits by location | salon, finance |
+| `m:salon.booked_online.share` | ratio | completed visits booked through the online store | salon |
+| `m:salon.labor_cost`, `m:salon.gross_profit` | usd | stylist labor; price less labor (completed) | salon, finance (+ hq for profit) |
+| `m:online.fees.payment`, `m:online.shipping.cost` | usd | sums of the order cost rows, by order date | online, finance |
+| `m:online.refunds.total` / `.count` | usd / count | refunds by the day issued | online, finance |
+| `m:online.checkouts.abandoned.{count,value}`, `.recovered.{count,value}`, `.recovery_rate` | count / usd / ratio | checkouts by the day left; recovered = names an order | online (+ finance for recovered value) |
+| `m:online.inventory.low_stock.count` | count | on hand ≤ reorder point, on the period's last day | online |
+| `m:online.inventory.wanted_{low,out_of}_stock.count` | count | low (or none on hand) **and** at least 40 views in the week before | online, hq |
+| `m:online.service.inbound.count` | count | customer messages (not the shop's follow-ups) by the day they came | online |
+| `m:online.service.replied_{1h,24h}.share` | ratio | first answer within 60 / 1,440 minutes | online |
+| `m:online.service.unanswered_48h.count`, `.texts_unanswered_48h.count` | count | no first answer within 2,880 minutes (texts: the two shop numbers) | online |
+| `m:online.service.sale_intent.count` | count | messages whose topic is a purchase | online |
+| `m:online.service.missed_sale_intent.count` | count | a purchase question with no answer within a day and no order after it | online, hq |
+| `m:salon.repairs.received.count` | count | tickets by the day the piece arrived | salon |
+| `m:salon.repairs.revenue`, `.cost`, `.margin` | usd / usd / ratio | fees paid; parts and labor on finished repairs; margin on finished, paid ones | salon, finance |
+| `m:salon.repairs.within_14d.share` | ratio | finished within 14 days, of the tickets not cancelled | salon, hq |
+| `m:salon.repairs.online_intake.share` | ratio | tickets from the online form | salon |
+| `m:{salon,online}.ap.invoiced` | usd | supplier invoices by invoice date, each business on its own | finance |
+| `m:online.dq.rejected_{order_costs,refunds}`, `m:online.dq.rejected_{checkouts,inventory,messages}`, `m:salon.dq.rejected_repairs`, `m:combined.dq.rejected_invoices` | count | rows the source's rule rejected | the source's readers, hq |
+
+Reply minutes come from `DATEDIFF` on the dates plus the clock digits (`substr`), never from
+`unix_timestamp`, so no session time zone can move a message across the hour or the day.
+
+The data-quality rules (each with its planted row): order costs: fee and shipping ≥ 0, a `demo-o-` order
+id; refunds: amount > 0, a known reason, a `demo-o-` order id; checkouts: value ≥ 0, a known line and
+recovery channel, recovered exactly when it names an order; inventory: all counts ≥ 0, one of the store's
+four lines; messages: known channel, direction and intent, the date matches the moment, never answered
+before it came; repairs: money ≥ 0, known type, status, channel and location, never finished before it
+came; invoices: amount > 0, due on or after issue, paid (if paid) on or after issue, salon or online, a
+known factory. Version 2's appointments add: status completed or no-show, a known location and booking
+channel, labor ≥ 0 (`specOf('appointments', 2)`; version 1's view keeps its own rule, frozen).
+
 ### The derived and standing layers (`packages/data/src/layers.ts`)
 
 Each layer is its own Zetaris view and its own statement, never UNION'd with another (Spark rejects a
-statement that reads one exploded view twice). `CATALOG_V2` (`divisions.ts`) holds all three layers: 41
-period metrics, 10 derived, 3 standing.
+statement that reads one exploded view twice). `CATALOG_V2` (`divisions.ts`) holds all three layers: 81
+period metrics, 14 derived, 15 standing.
 
 **Derived** (`fortune_hq_v2.derived_metrics`): the period view read once, pivoted to one row per period,
 the formulas over it, then unpivoted.
@@ -88,6 +151,8 @@ the formulas over it, then unpivoted.
 | `m:online.mer` | ratio | online revenue / ad spend, all channels | online, finance, hq |
 | `m:{salon,online}.season.month_index` | ratio | the month's revenue / the average of the twelve whole months (2025-10 … 2026-09); none for `2026-10-mtd` | the business's own, finance, hq |
 | `m:{salon,online}.season.last_year_index` | ratio | the month index twelve periods back; only `2026-10-mtd` has one (2025-10's) | the business's own, finance, hq |
+| `m:online.refund_rate` | ratio | refunds issued / online revenue, same period | online, finance, hq |
+| `m:online.contribution` | usd | gross profit − payment fees − shipping − refunds − ad spend on all three channels, same period (email, staff and rent are not in it) | finance, hq |
 
 The season index's average is `AVG(...) OVER ()` over all thirteen rows, so asking one period still
 averages the year (the filter is not pushed below the window; proved live). The last-year index is
@@ -102,9 +167,16 @@ source over all of its rows, period `'standing'`, no GROUP BY.
 | `m:online.revenue.last_7d` | usd | valid orders dated Oct 20–26, net | online, finance, hq |
 | `m:salon.revenue.last_7d` | usd | valid completed appointments dated Oct 20–26 | salon, finance, hq |
 | `m:online.budget.proposed.count` | count | valid budget lines with status `proposed` for this month or later (1: the October Google raise) | finance, hq |
+| `m:online.service.waiting_now.count` | count | customer messages of the last seven days with no answer by the end of the data date | online, hq |
+| `m:online.service.waiting_over_24h.count` | count | the same, and came before Oct 26, 00:00 (waiting over a day) | online, hq |
+| `m:salon.repairs.open.count` | count | tickets waiting for payment or in repair | salon, hq |
+| `m:salon.repairs.open_over_14d.count` | count | the same, arrived more than 14 days before the data date (late) | salon, hq |
+| `m:{salon,online}.ap.open` | usd | owed on unpaid supplier invoices, each business | finance |
+| `m:{salon,online}.ap.due_30d` | usd | unpaid and due Oct 26 – Nov 25 | finance |
+| `m:{salon,online}.ap.overdue` / `.overdue.count` | usd / count | unpaid and due before Oct 26 | finance, hq |
 
-Not built yet (later slices): every source beyond the budget sheet and Meta (repairs, invoices, messages,
-inventory, …), their standing counts, contribution and refund rate.
+The inbox counts look at the last week because a never-answered message from last winter is not "waiting":
+it is already in that month's `unanswered_48h` count.
 
 ## The divisions in Zetaris (`packages/data/src/divisions.ts`)
 
@@ -117,10 +189,11 @@ inventory, …), their standing counts, contribution and refund rate.
   `fortune_demo_v2_finance_mart`, `fortune_demo_v2_online_mart`, `fortune_demo_v2_hq_mart`. The names
   neither equal nor start with version 1's mart (`fortune_demo_finance_mart`). Mart table names are per
   mart (four `period_metrics` tables coexist; seen live).
-- Ids per division (period / derived / standing): salon 11 / 2 / 1; finance 36 / 12 / 3; online 26 / 4 / 1;
-  hq 6 / 12 / 3. A season pair gives one value per period, so a `2026-10-mtd` read returns salon 13,
-  finance 49, online 30, hq 19 metrics. Salon never reads an online id and Online never a salon id (a test
-  on every layer).
+- Ids per division (period / derived / standing), slice 3: salon 24 / 2 / 3; finance 54 / 14 / 11; online
+  50 / 5 / 3; hq 19 / 14 / 11. A season pair gives one value per period, so a `2026-10-mtd` read returns
+  salon 28, finance 77, online 57, hq 42 metrics. Salon never reads an online id and Online never a salon id
+  (a test on every layer). Finance reads no inbox, stock or checkout count; Online reads nothing owed to the
+  factories and not the contribution; a `combined` metric is a count, read by Finance and HQ only.
 
 ### The attention list
 
@@ -135,6 +208,16 @@ number: the number is the metric's own value.
 | `m:online.budget.*.used` | > 1 | act | Ad spend went over the approved budget. |
 | `m:online.budget.*.used` | over 0.9, up to 1 | watch | Ad spend is close to the approved budget. |
 | `m:online.budget.proposed.count` | > 0 | act | A proposed ad budget change is waiting for the finance owner's decision. |
+| `m:online.service.waiting_over_24h.count` | > 0 | act | Customer messages have waited more than a day for a first answer. |
+| `m:online.service.missed_sale_intent.count` | > 0 | watch | Customers who asked to buy got no answer in time and did not order. |
+| `m:online.inventory.wanted_out_of_stock.count` | > 0 | act | Products customers are looking at are out of stock. |
+| `m:online.inventory.wanted_low_stock.count` | > 0 | watch | Products customers are looking at are low on stock. |
+| `m:salon.repairs.open_over_14d.count` | > 0 | act | Repairs have been open longer than two weeks. |
+| `m:{salon,online}.ap.overdue.count` | > 0 | act | Supplier invoices are past their due date and unpaid. |
+
+On the synthetic year (2026-10-mtd): the salon sees its late repairs; Online sees the planted order row, the
+wanted products low and out of stock, the missed buyers and the messages waiting over a day; Finance sees
+the waiting budget change and both businesses' overdue invoices; HQ sees all of them.
 
 ## The DataPort
 
@@ -154,8 +237,12 @@ number: the number is the metric's own value.
     `attentionFor(metrics)`.
   - `catalog` lists every layer, each entry with its `layer` (new optional `MetricInfo.layer`).
 
-Live timings (08:25 ET): a division read 1.5–3.1 s; the unsliced read about 9–10 s (its derived view
-recomputes the whole period view); one mart table asked for every period at once about 30 s for derived.
+Live timings (08:25 ET, five sources): a division read 1.5–3.1 s; the unsliced read about 9–10 s (its
+derived view recomputes the whole period view); one mart table asked for every period at once about 30 s
+for derived. **With twelve sources (09:20 ET, slice 3):** a division read 4.5–7.4 s; the unsliced read
+about 23 s; the period view about 8 s a period; a derived mart table for every period at once about 77 s.
+Every statement still scans every source (a metric filter cannot reach below the unpivot), so the division
+reads are the ones the worker should use.
 
 ## The oracle
 
@@ -168,9 +255,9 @@ SQL. It replaces `computeFinanceMetricsLocally`. All periods at once, because a 
 | | Version 1 (live, untouched) | Version 2 (beside it) |
 |---|---|---|
 | Source port | 18120 | 18121 (`FAHQ_SOURCE_PORT_V2`) |
-| REST tables | `fortune_demo_salon.appointments`, `fortune_demo_online.orders`, `fortune_demo_marketing.{ads,email}` | `…appointments_v2`, `…orders_v2`, `…ads_v2`, `…email_v2` in the same databases, and `fortune_demo_finance.budgets` (new database `FORTUNE_DEMO_FINANCE`) |
-| Row views | `fortune_hq.*` | `fortune_hq_v2.*` (`salon_appointments`, `online_orders`, `marketing_ads`, `marketing_email`, `finance_budgets`) |
-| Period view | `fortune_hq.finance_metrics` | `fortune_hq_v2.period_metrics` (unchanged since its live build; its body's sha256 is pinned in `frozen-v1.test.ts`) |
+| REST tables | `fortune_demo_salon.appointments`, `fortune_demo_online.orders`, `fortune_demo_marketing.{ads,email}` | `…appointments_v2`, `…orders_v2`, `…ads_v2`, `…email_v2` in the same databases; `fortune_demo_finance.{budgets,invoices}` (database `FORTUNE_DEMO_FINANCE`); `fortune_demo_online.{order_costs,refunds,checkouts,inventory}`; `fortune_demo_salon.repair_tickets`; `fortune_demo_support.messages` (new database `FORTUNE_DEMO_SUPPORT`) |
+| Row views | `fortune_hq.*` | `fortune_hq_v2.*` (`salon_appointments`, `online_orders`, `marketing_ads`, `marketing_email`, `finance_budgets`, `online_order_costs`, `online_refunds`, `online_checkouts`, `online_inventory`, `support_messages`, `salon_repairs`, `finance_invoices`) |
+| Period view | `fortune_hq.finance_metrics` | `fortune_hq_v2.period_metrics`, twelve sources (its body's sha256 is pinned in `frozen-v1.test.ts` to the body last built live) |
 | Derived and standing views | none | `fortune_hq_v2.derived_metrics`, `fortune_hq_v2.standing_metrics` |
 | Division filter views | none | `fortune_hq_v2.{salon,finance,online,hq}_{period,derived,standing}_metrics` (twelve) |
 | Marts | `fortune_demo_finance_mart.finance_metrics` | `fortune_demo_v2_{salon,finance,online,hq}_mart.{period,derived,standing}_metrics` |
@@ -191,6 +278,18 @@ twelve filter views and the four marts with their twelve tables; 145 comparisons
 mismatches; version 1's mart listed exactly as before. Attention that fired: Finance and HQ, the waiting
 budget change (act) in both periods; Amazon spend close to its budget in 2026-09 (watch); the planted bad
 rows (watch) where each division sees them.
+
+**Slice 3, `--v2 --recreate`, 08:56–09:20 ET:** dropped and rebuilt every version 2 object with the seven
+new sources (database `FORTUNE_DEMO_SUPPORT` created) and the appointments' new columns; 81 of 81 period
+metrics matched in each of the 13 periods; derived 12 of 12 in every period; standing 15 of 15; every mart
+table for every period; the DataPort's reads (unsliced 108 of 108; salon 28, finance 77, online 57, hq 42,
+in `2026-10-mtd` and `2026-09`): **145 comparisons, all matched, 0 mismatches; version 1's mart listed
+exactly as before; "version 2 verified".** Zetaris accepted the nullable columns (JSON `null`), the
+boolean equality in the checkout rule, `substr`/`DATEDIFF` reply minutes and the date literals. Attention
+that fired in `2026-10-mtd`: Salon, the late repairs; Online, the planted order row, wanted products low and
+out of stock, missed buyers, messages waiting over a day; Finance, both businesses' overdue invoices and the
+waiting budget change; HQ, all of these. An earlier run of the same session (08:44, without the appointment
+columns) matched 27 of 27 period, derived and standing comparisons before it was stopped for the final one.
 
 Version 1 was not re-proved live in this slice: its REST tables read port 18120, and starting a server there
 could race the live worker. Its view text is byte-identical to bb29578 (frozen test), and no version 2
@@ -233,5 +332,9 @@ Two things learned the hard way:
   and the client profiles wait for a matching rule both owners agree. Until then no metric, view or tool
   links a salon client to an online customer.
 - **No combined money metrics** (`m:combined.revenue.*`, `m:combined.gross_profit`): HQ shows salon and
-  online side by side.
+  online side by side. The one `combined` metric is a count of rejected invoice rows.
 - Store sessions and landing pages come last, only if time remains.
+- Not built: rejected-rows metrics for ads and email (their extra rules from the design), average repair
+  turnaround in days and average first-reply minutes (the contract's metric units have no `days` or
+  `minutes`; the share metrics carry turnaround and reply speed instead), email flow/campaign splits and
+  unsubscribes, Meta campaigns and agents' late reports.
