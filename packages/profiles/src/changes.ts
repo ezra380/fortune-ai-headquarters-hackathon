@@ -78,10 +78,23 @@ const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Words that would turn a line of advice into an order or a way around the rules, or bring in what must never be
 // stored. This is a net, not a proof: what keeps the rest safe is that a lesson or a note is one short line that can
 // be added and nothing more, that it is shown to the owner, and that every version can be put back.
-const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
-  // The same shapes the database masks in a session report (redact_text): a phone number, a ten-digit run, a six-digit code.
-  [/\+\d[\d ().-]{7,18}\d|(?<!\d)\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\d)|(?<!\d)1?\d{10}(?!\d)|(?<![\d.,$])\d{6}(?!\d)(?!\.\d)/, 'it holds a phone number or a code'],
+// What is never stored or sent on, wherever it appears: a phone number, and anything medical or about hair loss.
+const NEVER_STORED: readonly (readonly [RegExp, string])[] = [
+  // The same shapes the database masks in a session report (redact_text): a phone number, and a ten-digit run.
+  [/\+\d[\d ().-]{7,18}\d|(?<!\d)\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\d)|(?<!\d)1?\d{10}(?!\d)/, 'it holds a phone number'],
   [/\b(hair[- ]?loss|alopecia|chemo(therapy)?|cancer|medical|diagnos\w*|patients?)\b/i, 'it touches medical or hair-loss data, which is never stored'],
+];
+
+/** A plain reason a piece of text may not be stored or sent on (a phone number, medical or hair-loss data), or null. */
+export function dataNeverStored(text: string): string | null {
+  for (const [pattern, reason] of NEVER_STORED) if (pattern.test(text)) return reason;
+  return null;
+}
+
+const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
+  ...NEVER_STORED,
+  // A six-digit group is a one-time code (the database masks it too). A lesson never needs one.
+  [/(?<![\d.,$])\d{6}(?!\d)(?!\.\d)/, 'it holds a code'],
   [/\b(ignore|disregard|forget|override|bypass)\b.{0,40}\b(rules?|instructions?|limits?|safety|screen|previous|above|approval)s?\b/i, 'it tries to get around the rules'],
   [/\b(without|bypassing|skipping)\b.{0,20}\b(one-?time )?(code|approval)\b/i, 'it tries to do without a person\'s code'],
   [/\bplain\s*["'“]?(yes|ok)\b/i, 'it treats a plain "yes" as a decision'],

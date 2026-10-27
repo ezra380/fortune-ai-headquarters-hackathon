@@ -180,7 +180,7 @@ export type { RestoreResult } from './restore.ts';
 export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
 export type { ParsedProfileRows } from './rows.ts';
 export { DEFAULT_PROFILE_TTL_MS, skillWithLessons } from './source.ts';
-export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, describeChange, managerNotes, withManagerNotes } from './changes.ts';
+export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, dataNeverStored, describeChange, managerNotes, withManagerNotes } from './changes.ts';
 export type { AppliedChange, ChangeOptions, ProfileChange, ProfileContent } from './changes.ts';
 export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './source.ts';
 export { canonicalJson } from './seed.ts';

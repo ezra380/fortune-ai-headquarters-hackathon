@@ -1,7 +1,7 @@
 import { MANAGER_APPLIES, TypedManagerReview, type AssistantId, type CodeModeResult, type TypedRecommendation } from '@fahq/contracts';
 import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
-import { KIND_LABEL, changeOf, describeChange } from '@fahq/profiles';
+import { KIND_LABEL, changeOf, dataNeverStored, describeChange } from '@fahq/profiles';
 import type { Command } from './commands.ts';
 import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
 import { applyRecommendation, objectionToChange, profilesOverview, type Applied } from './profile-changes.ts';
@@ -102,6 +102,11 @@ export function checkReview(
     ...review.findings.map((f, i) => [`finding ${i + 1}`, f.text] as const),
     ...review.recommendations.flatMap((r) => [[`recommendation ${r.rank} change`, r.change], [`recommendation ${r.rank} why`, r.why]] as const),
   ];
+  // A phone number or anything medical in a review would go on to the owner's text and the shared record.
+  for (const [where, t] of texts) {
+    const why = dataNeverStored(t);
+    if (why) objections.push(`${where}: ${why}`);
+  }
   objections.push(...numberTrace(texts, digest));
   return objections.length > 0 ? { ok: false, objections } : { ok: true, review };
 }

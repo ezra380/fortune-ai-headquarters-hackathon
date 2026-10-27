@@ -492,10 +492,12 @@ describe.skipIf(!api)('the HQ Manager decides what changes (real database and Me
       const queued = await queueDailyReview(future);
       keys.push(queued.key);
       expect(queued.queued).toBe(true);
-      await runUntilIdle(future);
+      // Run the queued task itself (a worker clock that far ahead would also claim every stale task in the shared database).
+      const row = (await pool.query(`select id, assistant_id, kind, status, payload, attempts, max_attempts from public.tasks where idempotency_key = $1`, [queued.key])).rows[0] as TaskRow;
+      expect(await handleTask(row, future)).toEqual({ status: 'done' });
+      await runUntilIdle(deps);
       expect(sms.filter((m) => m.to === ownerPhone)).toEqual([]);
       expect(codeMode.calls).toHaveLength(0);
-      expect((await pool.query(`select status from public.tasks where idempotency_key = $1`, [queued.key])).rows[0].status).toBe('done');
 
       // With work to review, the same kind of task reads, applies and tells the owner, as a review the owner asked for.
       await addOutsideReport(); // work for certain, however quiet the rest of the database is

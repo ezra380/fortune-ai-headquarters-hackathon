@@ -78,13 +78,14 @@ describe.skipIf(!api)('store: what the HQ Manager changes (real local database a
     if (!migrated) skip();
     const id = await reviewWith();
     const [a, b] = await store.saveRecommendations(id, [{ ...review.recommendations[0]!, rank: 1 }, { ...review.recommendations[0]!, rank: 2, assistant: 'online' }]);
-    expect(await store.putInForce(a!.id, { by: 'manager', personId: null, version: 7, now: T0 })).toBe(true);
-    expect(await store.putInForce(a!.id, { by: 'owner', personId: 'demo-p-owner', version: 8, now: T0 })).toBe(false); // already in force: the first caller's record stands
-    expect(await store.putInForce(b!.id, { by: 'owner', personId: 'demo-p-owner', version: null, now: T0 })).toBe(true);
+    const now = new Date(); // the standing lessons are the newest adopted ones, so these must be newer than any other test's
+    expect(await store.putInForce(a!.id, { by: 'manager', personId: null, version: 7, now })).toBe(true);
+    expect(await store.putInForce(a!.id, { by: 'owner', personId: 'demo-p-owner', version: 8, now })).toBe(false); // already in force: the first caller's record stands
+    expect(await store.putInForce(b!.id, { by: 'owner', personId: 'demo-p-owner', version: null, now })).toBe(true);
     const [one, two] = await store.recommendationsOf(id);
     expect(one).toMatchObject({ status: 'adopted', applied_by: 'manager', applied_version: 7, decided_by: null });
     expect(two).toMatchObject({ status: 'adopted', applied_by: 'owner', applied_version: null, decided_by: 'demo-p-owner' });
-    expect(new Date(one!.decided_at!).toISOString()).toBe(T0.toISOString());
+    expect(new Date(one!.decided_at!).toISOString()).toBe(now.toISOString());
     const lessons = await store.adoptedLessons(undefined, 200); // the standing lessons see both
     expect(lessons.map((l) => l.id)).toEqual(expect.arrayContaining([a!.id, b!.id]));
   });
