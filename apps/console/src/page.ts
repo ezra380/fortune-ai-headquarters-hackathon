@@ -71,8 +71,10 @@ section section{margin:22px 0 0}
 .link{display:inline-block;color:var(--ink);font-size:.875rem;font-weight:700;text-decoration:underline;text-underline-offset:3px;margin:2px 12px 2px 0;overflow-wrap:anywhere}
 h3.sec{margin:14px 0 4px}
 .label{margin:10px 0 2px;color:var(--muted);font-size:.8125rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
-details.worker summary{cursor:pointer;display:grid;gap:4px;list-style:none}
+details.worker summary{cursor:pointer;display:grid;gap:4px;list-style:none;position:relative;padding-right:22px}
 details.worker summary::-webkit-details-marker{display:none}
+details.worker summary::after{content:"+";position:absolute;right:2px;top:-2px;color:var(--muted);font-size:1.25rem;font-weight:700;line-height:1}
+details.worker[open] summary::after{content:"−"}
 details.worker .wline{font-size:.9375rem;overflow-wrap:anywhere}
 details.worker .wbody{margin:10px 0 0;padding-top:8px;border-top:1px solid var(--line)}
 .nums{margin:2px 0 0;padding:0;list-style:none;display:grid;gap:2px}
