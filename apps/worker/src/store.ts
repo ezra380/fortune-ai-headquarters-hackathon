@@ -64,6 +64,10 @@ export type ReviewRow = {
   model: string | null;
   message_id: string | null;
   created_at: string;
+  /** The outside reports the review's digest carried ({ id, assistant }, from the reader tool's output); null on a row from before it was kept. */
+  carried_reports?: unknown;
+  /** 'internal' (work reports only), 'doors' (outside reports only) or 'all' (REVIEW); null on a row from before it was kept. */
+  scope?: string | null;
 };
 export type RecommendationRow = {
   id: string;
@@ -306,12 +310,15 @@ export function createStore(url: string, serviceKey: string) {
     async saveManagerReview(r: {
       key: string; taskId: string | null; coversFrom: Date; coversTo: Date; reportCount: number;
       review: ManagerReview; digest: unknown; model: string;
+      /** What the digest carried from the doors, and which review this is: what decides, on every retry, whether anything applies by itself. */
+      carried?: readonly { id: string; assistant: string }[]; scope?: 'internal' | 'doors' | 'all';
     }): Promise<ReviewRow> {
       // The table keeps the digest as a JSON object; a script that returned a list or a number is wrapped.
       const digest = r.digest !== null && typeof r.digest === 'object' && !Array.isArray(r.digest) ? r.digest : { result: r.digest ?? null };
       must(await db.from('manager_reviews').upsert({
         review_key: r.key, task_id: r.taskId, covers_from: r.coversFrom.toISOString(), covers_to: r.coversTo.toISOString(),
         report_count: r.reportCount, review: r.review, digest, model: r.model.slice(0, 120),
+        ...(r.carried ? { carried_reports: r.carried } : {}), ...(r.scope ? { scope: r.scope } : {}),
       }, { onConflict: 'review_key', ignoreDuplicates: true }), 'save review');
       return must(await db.from('manager_reviews').select('*').eq('review_key', r.key).single(), 'read review') as ReviewRow;
     },
@@ -486,6 +493,15 @@ export function createStore(url: string, serviceKey: string) {
         status: 'adopted', decided_by: a.personId, decided_at: a.now.toISOString(), applied_by: a.by, applied_version: a.version,
       }).eq('id', id).eq('status', 'proposed').select('id'), 'put recommendation in force') as { id: string }[];
       return rows.length === 1;
+    },
+    /**
+     * The skill notes in force, with who applied each and whether it wrote the note (applied_version) or found it there:
+     * how the program tells a note the HQ Manager added from one the owner did.
+     */
+    async skillNotesInForce(assistant?: AssistantId): Promise<{ assistant_id: AssistantId; change: string; applied_by: 'manager' | 'owner' | null; applied_version: number | null }[]> {
+      let query = db.from('recommendations').select('assistant_id, change, applied_by, applied_version').eq('kind', 'skill_note').eq('status', 'adopted');
+      if (assistant) query = query.eq('assistant_id', assistant);
+      return must(await query.limit(1000), 'skill notes in force') as { assistant_id: AssistantId; change: string; applied_by: 'manager' | 'owner' | null; applied_version: number | null }[];
     },
     /** proposed → expired with the reason the program would not apply it (an expired recommendation is never adopted). */
     async refuseRecommendation(id: string, detail: RecommendationDetail): Promise<boolean> {

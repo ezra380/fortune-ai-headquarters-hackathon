@@ -48,8 +48,9 @@ export async function enqueueDayDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, 
 export const SCHEDULE: ScheduledJob[] = [
   { name: 'division-briefs', at: '08:00', enqueue: async (deps, date) => { for (const division of ROUND_DEPARTMENTS) await enqueueBrief(deps, division, date); } },
   { name: 'ceo-digest', at: '08:30', enqueue: (deps, date) => enqueueDayDigest(deps, date) },
-  // The review's key is the New York day of `now` (the same day as `date`), so a second ask queues nothing; quiet on a
-  // day with nothing to review (docs/manager.md, "The daily review").
+  // Two reviews, the internal one (work reports only; it may apply lessons, notes and retires by itself) and the doors
+  // one (outside reports only; it applies nothing by itself). Each key is the New York day of `now` (the same day as
+  // `date`), so a second ask queues nothing; quiet on a day with nothing to review (docs/manager.md, "The daily review").
   { name: 'manager-review', at: '09:00', enqueue: async (deps) => { await queueDailyReview(deps); } },
 ];
 

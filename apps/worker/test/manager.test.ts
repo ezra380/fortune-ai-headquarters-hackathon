@@ -19,9 +19,9 @@ import { memoryProfiles } from './profile-port.ts';
 // The HQ Manager end to end on the real local database and the real Meterless engines. Only the models,
 // Code Mode and the Zetaris adapter are fakes (scripted below); SMS is a dry run. The profile tables are in memory
 // (profile-port.ts): a profile version cannot be taken back from the real table, so no test writes one there.
-// As shipped, every change waits for the owner's one-time code (MANAGER_APPLIES is all false). The mechanism that lets the
-// manager apply a lesson or a note itself is off and tested in manager-decides.test.ts; two tests here switch it on
-// (deps.managerApplies, which nothing in production sets) to show the whole loop with it.
+// As shipped (Ezra, in writing, 2026-10-27) the manager applies a lesson, a skill note or a retire by itself when the
+// review carried no outside report (manager-decides.test.ts has every rule). Most tests here switch that off
+// (deps.managerApplies all false, which nothing in production sets) to show the owner's code path whole; two run as shipped.
 
 const api = haveMeterless ? localApi() : null;
 if (!api) console.warn('SKIPPED manager tests: needs local Supabase (npm run db:start) and Meterless (scripts/setup-meterless.sh)');
@@ -31,7 +31,7 @@ afterAll(async () => pool.end());
 
 const sid = () => 'SM' + randomBytes(16).toString('hex');
 const OWNER_NUMBER = '+15550100001';
-const RULE_ON = { lesson: true, skill_note: true, retire: true, reads: false, model: false } as const;
+const ALL_OFF = { lesson: false, skill_note: false, retire: false, reads: false, model: false } as const;
 
 // ---- Fakes (fixtures.ts) --------------------------------------------------------------------------
 
@@ -57,8 +57,8 @@ let reviewCount = 0;
 const skillOf = (id: string) => `SKILL(${id}) This assistant is read-only.\n\n## You never\nChange anything.`;
 
 type Rec = { rank: number; assistant: string; kind?: string; change: string; why: string; reads?: unknown; model?: unknown };
-// Recommendation 1 is a lesson for finance. Recommendation 2 gives the online assistant a read tool. As shipped both wait
-// for the owner's code; with the rule on, the manager applies the lesson by itself and only the read tool waits.
+// Recommendation 1 is a lesson for finance. Recommendation 2 gives the online assistant a read tool. With the manager switched
+// off both wait for the owner's code; as shipped, the manager applies the lesson by itself and only the read tool waits.
 function makeReview(over: { summary?: string; recs?: Rec[] } = {}) {
   const tag = `${RUN_TAG}${letters(reviewCount++)}`;
   const lesson = `Give every stop-loss a lever so the first plan check passes (${tag}).`;
@@ -86,9 +86,9 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
   const sms: { to: string; body: string }[] = [];
   const profileTables = memoryProfiles();
   let deps: WorkerDeps;
-  const use = { rule: false };
-  /** The worker's dependencies as shipped, or with the manager allowed to apply lessons and skill notes (the mechanism, off). */
-  const current = (): WorkerDeps => (use.rule ? { ...deps, managerApplies: RULE_ON } : deps);
+  const use = { off: true };
+  /** The worker's dependencies with the manager applying nothing by itself (most tests here), or as shipped. */
+  const current = (): WorkerDeps => (use.off ? { ...deps, managerApplies: ALL_OFF } : deps);
   let model: ReturnType<typeof scriptedModel>;
   let codeMode: ReturnType<typeof fakeCodeMode>;
   let ownerPhone = '';
@@ -130,7 +130,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     await pool.query(`update public.approvals set status = 'expired' where status = 'pending'`);
     await pool.query(`update public.outbox set status = 'skipped', last_error = 'reset by manager test' where status in ('pending','sending')`);
     sms.length = 0;
-    use.rule = false;
+    use.off = true;
     model = scriptedModel();
     codeMode = fakeCodeMode();
     deps.models = { ...deps.models, nvidia: model.port };
@@ -196,7 +196,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect((await stepsOf(taskId))[0]).toMatchObject({ step: 'finance.plans', input_tokens: 300, output_tokens: 600 });
   });
 
-  it('REVIEW → digest through Code Mode → a checked review → every change waits for the owner\'s code → ADOPT puts each in place as a version made by the owner', async () => {
+  it('with the manager switched off: REVIEW → digest through Code Mode → a checked review → every change waits for the owner\'s code → ADOPT puts each in place as a version made by the owner', async () => {
     const r = makeReview();
     const financeBefore = profileTables.versionsOf('finance').length;
     const onlineBefore = profileTables.versionsOf('online').length;
@@ -285,8 +285,8 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
 
     // The ADOPT task run again (a crash after the code was spent) resumes: same reply, no second version.
     const smsBefore = sms.length;
-    expect((await handleTask(await taskOfText(adoptSid), deps)).status).toBe('done');
-    await runUntilIdle(deps);
+    expect((await handleTask(await taskOfText(adoptSid), current())).status).toBe('done');
+    await runUntilIdle(current());
     expect(profileTables.history).toHaveLength(versionsBefore);
     expect(sms.length).toBe(smsBefore);
 
@@ -298,8 +298,8 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(next.lessonsAlreadyAdopted).toContainEqual({ assistant: 'online', text: r.readsLine });
   });
 
-  it('with the rule on: the manager applies the lesson itself, the owner is told, and ADOPT applies what still needs his code', async () => {
-    use.rule = true;
+  it('as shipped: the manager applies the lesson itself, the owner is told, and ADOPT applies what still needs his code', async () => {
+    use.off = false;
     profileTables.row('online').reads = [...loadProfiles({}).online.reads]; // the test before adopted this read for online already
     const r = makeReview();
     const financeBefore = profileTables.versionsOf('finance').length;
@@ -308,7 +308,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     const body = lastTo(ownerPhone);
     expect(code).toMatch(/^\d{6}$/);
     expect(body).toContain('HQ Manager review (last 24 h): Finance handled 5 tasks and 1 failed; it used 1500 tokens in and 3000 out.');
-    expect(body).toContain(`I changed (each is a new profile version; the old one stays in the history):\n1. [finance] lesson: ${r.lesson}`);
+    expect(body).toContain(`I changed (each is a new profile version; the old one stays in the history):\n1. [finance] lesson, version ${profileTables.row('finance').version}: ${r.lesson}`);
     expect(body).toContain(`Needs your code:\n2. [online] data access: ${r.readsLine}`);
     expect(body).not.toContain('I did not apply');
     expect(body.endsWith(`Reply ADOPT 2 ${code} to approve it. The code works for 12 hours.`)).toBe(true);
@@ -453,8 +453,8 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     const { code, task } = await askForReview();
     const counts = () => ({ code: codeMode.calls.length, review: model.of('manager.review').length, sms: sms.length, versions: profileTables.history.length });
     const before = counts();
-    expect((await handleTask(task, deps)).status).toBe('done');
-    await runUntilIdle(deps);
+    expect((await handleTask(task, current())).status).toBe('done');
+    await runUntilIdle(current());
     expect(counts()).toEqual(before);
     const reviews = (await pool.query('select id from public.manager_reviews where review_key = $1', [`review:${task.id}`])).rows;
     expect(reviews).toHaveLength(1);
@@ -471,7 +471,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
       ['manager-test:' + randomUUID(), { job: 'manager_review', hours: 1, requestedBy: 'demo-p-owner' }],
     )).rows[0] as TaskRow;
     expect(await handleTask(row, future)).toEqual({ status: 'done' });
-    await runUntilIdle(deps);
+    await runUntilIdle(current());
     expect(lastTo(ownerPhone)).toBe('HQ Manager: no assistant work to review in the last 1 hours.');
     expect(codeMode.calls).toHaveLength(0);
     expect(model.calls).toHaveLength(0);
@@ -483,7 +483,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
         `insert into public.tasks (assistant_id, kind, idempotency_key, payload, status) values ('manager', 'scheduled', $1, $2, 'done') returning id, assistant_id, kind, status, payload, attempts, max_attempts`,
         ['manager-test:' + randomUUID(), { job: 'manager_review', hours, requestedBy: 'demo-p-owner' }],
       )).rows[0] as TaskRow;
-      expect(await handleTask(row, deps), String(hours)).toEqual({ status: 'failed', error: 'the review window must be a whole number of hours from 1 to 168' });
+      expect(await handleTask(row, current()), String(hours)).toEqual({ status: 'failed', error: 'the review window must be a whole number of hours from 1 to 168' });
     }
     expect(codeMode.calls).toHaveLength(0);
   });
@@ -568,7 +568,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(JSON.parse(lastPlanCall.user).ownerLessons).toContain(r.lesson);
   });
 
-  it('says which ranks were not adopted, and (with the rule on) which the manager had already applied', async () => {
+  it('says which ranks were not adopted, and (as shipped) which the manager had already applied', async () => {
     // Merge wave 1, item d: a rank the review lacks is refused whole BEFORE the code is spent (as APPROVE does with
     // peek_approval_code), so one wrong digit never costs the owner his code.
     const { code } = await askForReview();
@@ -580,8 +580,8 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     const again = await askForReview();
     await textIn(ownerPhone, `ADOPT 3 ${again.code}`);
     expect(lastTo(ownerPhone)).toBe('This review has no open recommendation 3. Nothing was adopted, and your code still works.');
-    // With the rule on, rank 1 is a lesson the manager applied without a code: the owner's code does not need to, and does not, redo it.
-    use.rule = true;
+    // As shipped, rank 1 is a lesson the manager applied without a code: the owner's code does not need to, and does not, redo it.
+    use.off = false;
     const third = await askForReview();
     const versions = profileTables.history.length;
     await textIn(ownerPhone, `ADOPT 1 2 ${third.code}`);

@@ -26,9 +26,9 @@ export type WorkerDeps = {
     refresh?(): Promise<void>;
   };
   /**
-   * Which kinds of change the HQ Manager may apply by itself. Absent = MANAGER_APPLIES in @fahq/contracts, which is
-   * all false: every change waits for the owner's one-time code. Nothing in production sets this; the tests do, to
-   * prove the mechanism that stays dormant until Ezra approves it.
+   * Which kinds of change the HQ Manager may apply by itself. Absent = MANAGER_APPLIES in @fahq/contracts (a lesson, a
+   * skill note and a retire, approved by Ezra in writing on 2026-10-27; read tools and the model always wait for the
+   * owner's code). Nothing in production sets this; the tests set it all false to prove ADOPT for every kind.
    */
   managerApplies?: Readonly<Record<ChangeKind, boolean>>;
   now: () => Date;
