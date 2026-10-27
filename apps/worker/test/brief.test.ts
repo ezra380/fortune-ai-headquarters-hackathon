@@ -3,7 +3,7 @@ import { DivisionBrief, type Attention, type DataPort, type Receipt } from '@fah
 import { parseCommand } from '../src/commands.ts';
 import type { WorkerDeps } from '../src/common.ts';
 import {
-  briefKey, briefSms, checkBrief, divisionData, fallbackBrief, isLiveNumber, mixedBusinessSentences, parseNeeds, replyMetrics, statusOf, type Reply,
+  briefKey, briefSms, checkBrief, divisionData, fallbackBrief, isLiveNumber, mixedBusinessSentences, parseNeeds, replyMetrics, replySources, statusOf, type Reply,
 } from '../src/brief.ts';
 import { numberTrace } from '../src/reports.ts';
 import type { DivisionBriefRow } from '../src/store.ts';
@@ -255,6 +255,21 @@ describe('replyMetrics: the only numbers another division can hand over', () => 
     let deep: unknown = { id: 'm:salon.deep', value: 1 };
     for (let i = 0; i < 12; i++) deep = { inner: deep };
     expect(replyMetrics(deep, 'salon')).toEqual([]);
+  });
+});
+
+describe('replySources: where the answering division read each number', () => {
+  const salonMart = { view: 'fortune_demo_v2_salon_mart', queryHash: 'c'.repeat(64) };
+  const rowsView = { view: 'fortune_demo_rows', queryHash: 'e'.repeat(64) };
+  it("is the view and query hash of the tool output that names the metric's id, never the asker's", () => {
+    const metrics = [{ id: 'm:salon.clients.frequent.count', value: 42 }, { id: 'm:salon.repairs.late.count', value: 6 }, { id: 'm:salon.repairs.avg_days', value: 9.5 }];
+    const outputs = [
+      { tool: 'get_repair_tickets', output: { ...rowsView, dataDate: '2026-10-26', totals: { count: 6 }, rows: [] } }, // its total has no id: a script's label is not a source
+      { tool: 'get_salon_metrics', output: { ...salonMart, metrics: { 'm:salon.clients.frequent.count': { value: 42, unit: 'count' } } } },
+      { tool: 'get_metric_series', output: { metricId: 'm:salon.repairs.avg_days', points: [{ period: '2026-09', value: 9.5 }], view: 'fortune_demo_v2_salon_mart', queryHash: 'not a hash' } },
+    ];
+    expect(replySources(metrics, outputs)).toEqual({ 'm:salon.clients.frequent.count': salonMart });
+    expect(replySources(metrics, [{ tool: 'get_metrics', output: metrics }])).toEqual({}); // an output that says nothing of where it read
   });
 });
 

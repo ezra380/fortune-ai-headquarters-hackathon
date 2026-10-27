@@ -287,6 +287,46 @@ describe.skipIf(!api)('daily workers (real database; the model and the data port
     expect((await stepsOf(first.task.id)).find((s) => s.step === 'worker.reuse')!.detail).toBe(`the finance.google_ads report of ${first.date} was already stored; no model was asked again`);
   });
 
+  it('a save that fails after the model wrote: the task runs again on the words it kept, and asks no model twice', async () => {
+    model.script('finance.google_ads.report', JSON.stringify(googleWords));
+    const date = freshDate();
+    const task = await workerTask('finance.google_ads', date);
+    const real = deps.store;
+    deps.store = { ...real, saveWorkerReport: async () => { throw new Error('the database went away'); } };
+    try {
+      await expect(handleTask(task, deps)).rejects.toThrow('the database went away');
+    } finally {
+      deps.store = real;
+    }
+    expect(await handleTask(task, deps)).toEqual({ status: 'done' });
+    expect(model.calls).toHaveLength(1);
+    const row = await stored(`worker:finance.google_ads:${date}`);
+    expect(row).toMatchObject({ written_by: 'model', report: { writtenBy: 'model', ...googleWords } });
+    expect((await stepsOf(task.id)).filter((s) => s.step === 'worker.write').map((s) => s.detail)).toEqual([
+      'attempts 1, 2 findings', 'the words an earlier run of this report wrote and checked are used; no model was asked again',
+    ]);
+  });
+
+  it('a kept rule-written outcome is kept too: the run again writes from the rules and asks no model', async () => {
+    model.script('finance.google_ads.report', new Error('the provider is down'));
+    const date = freshDate();
+    const task = await workerTask('finance.google_ads', date);
+    const real = deps.store;
+    deps.store = { ...real, saveWorkerReport: async () => { throw new Error('the database went away'); } };
+    try {
+      await expect(handleTask(task, deps)).rejects.toThrow('the database went away');
+    } finally {
+      deps.store = real;
+    }
+    model.script('finance.google_ads.report', JSON.stringify(googleWords)); // the provider is back: it is still not asked again
+    expect(await handleTask(task, deps)).toEqual({ status: 'done' });
+    expect(model.calls).toHaveLength(1);
+    expect(await stored(`worker:finance.google_ads:${date}`)).toMatchObject({ written_by: 'rule' });
+    expect((await stepsOf(task.id)).filter((s) => s.step === 'worker.write').map((s) => s.detail)).toEqual([
+      'attempts 1; rule-written report used; the provider is down', 'an earlier run of this report wrote it from the rules; no model was asked again',
+    ]);
+  });
+
   it("never sees another division's metric, even when the division read hands one over", async () => {
     // Finance's read wrongly carries Online's email sends and a salon repairs count.
     leaks.finance = [metricOf(DEFS.find((d) => d[0] === 'm:online.email.sends')!), metricOf(DEFS.find((d) => d[0] === 'm:salon.repairs.open.count')!)];

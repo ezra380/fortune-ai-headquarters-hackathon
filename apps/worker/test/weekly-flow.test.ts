@@ -50,7 +50,10 @@ async function pickFreeMondays(count: number): Promise<string[]> {
 
 // ---- A version 2 data port, faked -----------------------------------------------------------------------
 
-const source = { system: 'zetaris' as const, view: 'fortune_demo_finance_mart', queryHash: 'd'.repeat(64), asOf: '2026-10-26T12:00:00Z' };
+// Each division reads its own mart, with its own query hash: a number keeps the source of the division that read it.
+const VIEW: Record<Division, string> = { finance: 'fortune_demo_v2_finance_mart', online: 'fortune_demo_v2_online_mart', salon: 'fortune_demo_v2_salon_mart', hq: 'fortune_demo_v2_hq_mart' };
+const HASH: Record<Division, string> = { finance: 'f'.repeat(64), online: 'b'.repeat(64), salon: 'c'.repeat(64), hq: 'a'.repeat(64) };
+const sourceOf = (division: Division) => ({ system: 'zetaris' as const, view: VIEW[division], queryHash: HASH[division], asOf: '2026-10-26T12:00:00Z' });
 const DEFS: [id: string, label: string, value: number, unit: Metric['unit'], divisions: Division[]][] = [
   ['m:online.revenue.total', 'Online revenue', 48200, 'usd', ['online', 'finance', 'hq']],
   ['m:online.email.revenue', 'Email revenue', 5300, 'usd', ['online', 'finance']],
@@ -66,10 +69,14 @@ const DEFS: [id: string, label: string, value: number, unit: Metric['unit'], div
   ['m:salon.repairs.open_over_14d.count', 'Repairs open over two weeks', 6, 'count', ['salon', 'hq']],
 ];
 const businessOf = (id: string) => id.slice(2, id.indexOf('.')) as 'salon' | 'online';
-const catalog: MetricInfo[] = DEFS.map(([id, label, , unit, divisions]) => ({ id, label, unit, business: businessOf(id), divisions }));
-const metricOf = (id: string): Metric => {
+// The salon's repair turnaround in days: in the catalog only (no division read here), and kept out of plan writing.
+const catalog: MetricInfo[] = [
+  ...DEFS.map(([id, label, , unit, divisions]): MetricInfo => ({ id, label, unit, business: businessOf(id), divisions })),
+  { id: 'm:salon.repairs.avg_days', label: 'Average repair days', unit: 'days', business: 'salon', divisions: ['salon'], planUse: false },
+];
+const metricOf = (id: string, division: Division = 'finance'): Metric => {
   const [, label, value, unit] = DEFS.find((d) => d[0] === id)!;
-  return { id, label, value, unit, business: businessOf(id), period: '2026-09', source };
+  return { id, label, value, unit, business: businessOf(id), period: '2026-09', source: sourceOf(division) };
 };
 const reads: Record<string, string[]> = { finance: ['get_finance_metrics', 'get_budget_room'], online: ['get_online_metrics'], salon: ['get_salon_metrics'] };
 
@@ -131,8 +138,12 @@ const onlineWords = {
 };
 
 const amazonOut = [{ id: 'm:online.amazon.stock.out.count', value: 2, unit: 'count' }];
-const lateRepairs = [{ id: 'm:salon.repairs.open_over_14d.count', value: 6, unit: 'count' }];
+const lateRepairs = [{ id: 'm:salon.repairs.open_over_14d.count', value: 6, unit: 'count' }, { id: 'm:salon.repairs.avg_days', value: 9.5, unit: 'days' }];
 const clientSegments = [{ id: 'm:salon.clients.frequent.count', value: 42, unit: 'count' }];
+/** What the answering division's own metrics tool returned: its mart, its query hash and the ids it read. */
+const metricsTool = (division: Division, facts: readonly { id: string; value: number; unit: string }[]) => ({
+  tool: `get_${division}_metrics`, output: { view: VIEW[division], queryHash: HASH[division], metrics: Object.fromEntries(facts.map((f) => [f.id, { value: f.value, unit: f.unit }])) },
+});
 
 describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and the data port scripted)', () => {
   const attention: Partial<Record<Division, Attention[]>> = {};
@@ -157,8 +168,8 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
       health: async () => ({ ok: true, detail: 'MOCK data' }),
       getFinanceMetrics: async () => { throw new Error('a version 2 port is read by division'); },
       getDivisionMetrics: async ({ division }) => ({
-        division, metrics: DEFS.filter((d) => d[4].includes(division)).map((d) => metricOf(d[0])),
-        attention: attention[division] ?? [], queryHash: source.queryHash, view: source.view,
+        division, metrics: DEFS.filter((d) => d[4].includes(division)).map((d) => metricOf(d[0], division)),
+        attention: attention[division] ?? [], queryHash: HASH[division], view: VIEW[division],
       }),
       readRows: async (r) => ({ table: r.table, rows: [], totals: {}, dataDate: '2026-10-26', queryHash: 'e'.repeat(64), view: 'fortune_demo_rows' }),
       catalog,
@@ -206,7 +217,7 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     codeMode = fakeCodeMode();
     codeMode.respond((input) => {
       const result = input.purpose === 'finance.lookup' ? amazonOut : input.purpose === 'salon.lookup' && input.question.includes('Online') ? lateRepairs : clientSegments;
-      return okResult(result, { toolOutputs: [{ tool: 'get_metrics', output: result }] });
+      return okResult(result, { toolOutputs: [metricsTool(input.purpose.split('.')[0] as Division, result)] });
     });
     deps.models = { ...deps.models, nvidia: model.port };
     deps.codeMode = codeMode.runner;
@@ -253,9 +264,9 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
   const googleReport = (day: string, headline: string): WorkerReport => ({
     workerId: 'finance.google_ads', day, period: '2026-09', status: 'watch', writtenBy: 'model', headline,
     findings: [{ text: 'Google ads return 2.4x on $1,800 of spend.', cites: ['m:online.ads.google.roas', 'm:online.ads.google.spend'] }],
-    metrics: ['m:online.ads.google.spend', 'm:online.ads.google.roas', 'm:online.budget.google.room'].map(metricOf),
+    metrics: ['m:online.ads.google.spend', 'm:online.ads.google.roas', 'm:online.budget.google.room'].map((id) => metricOf(id)),
     attention: [{ metricId: 'm:online.budget.google.room', level: 'watch', rule: 'Little of the Google budget is left.' }],
-    rows: [{ read: 'budget_room.google', totals: { roomUsd: 700 } }], dataSource: 'fortune_demo_finance_mart#dddddddddddd',
+    rows: [{ read: 'budget_room.google', totals: { roomUsd: 700 } }], dataSource: `${VIEW.finance}#ffffffffffff`,
   });
   const approve = async (person: string, body: string) => {
     const task = await taskOf(DIVISION_ASSISTANT[Object.entries(HEAD).find(([, id]) => id === person)![0] as ManagedDivision], 'inbound_text', { from: phone[person], body, personId: person });
@@ -274,7 +285,7 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     expect(outcome).toEqual({ status: 'done' });
 
     // Stored once, with the program's status (the Google report's watch), the model's words, the goal and the three checked paths.
-    expect(row).toMatchObject({ division: 'finance', week: monday, period: '2026-09', status: 'watch', written_by: 'model', ceo_line: financeWords(monday).ceoLine, task_id: task.id, data_source: 'fortune_demo_finance_mart#dddddddddddd' });
+    expect(row).toMatchObject({ division: 'finance', week: monday, period: '2026-09', status: 'watch', written_by: 'model', ceo_line: financeWords(monday).ceoLine, task_id: task.id, data_source: `${VIEW.finance}#ffffffffffff` });
     const report = row.report;
     expect(report).toMatchObject({ division: 'finance', weekOf: monday, manager: 'George', head: 'Alan', status: 'watch', writtenBy: 'model', summary: financeWords(monday).summary, goal: financeWords(monday).goal, actions: [] });
     expect(report.paths.plans.map((p: { title: string }) => p.title)).toEqual(financePaths.plans.map((p) => p.title));
@@ -289,7 +300,10 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     ]);
     expect(report.workerReportIds).toContain(google.id);
     expect(report.asked).toEqual([{ division: 'salon', question: 'What are your client segments this week?', answer: 'm:salon.clients.frequent.count = 42', ok: true }]);
-    expect(report.metrics.map((m: Metric) => m.id)).toContain('m:salon.clients.frequent.count');
+    // Cindy's number keeps the salon mart it was read from; George's own keep the finance mart.
+    expect(report.metrics.find((m: Metric) => m.id === 'm:salon.clients.frequent.count')).toMatchObject({ value: 42, unit: 'count', business: 'salon', source: { view: VIEW.salon, queryHash: HASH.salon } });
+    expect(report.metrics.find((m: Metric) => m.id === 'm:online.revenue.total').source).toMatchObject({ view: VIEW.finance, queryHash: HASH.finance });
+    expect(await message(`datareply:${(await message(`datareq:${key}:salon`)).id}`)).toMatchObject({ body: { sources: { 'm:salon.clients.frequent.count': { view: VIEW.salon, queryHash: HASH.salon } } } });
 
     // The models: the workers that had no report, the needs call with the standing asks, the writer, the plan writer.
     expect(model.calls.map((c) => c.purpose)).toEqual(['finance.email.report', 'finance.online_money.report', 'finance.salon_money.report', 'finance.weekly_needs', 'finance.weekly', 'finance.plans']);
@@ -350,16 +364,22 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
       { division: 'finance', question: 'How many Amazon and Walmart products are out of stock or low?' },
       { division: 'salon', question: 'How long do repairs and personalization take at the salon?' },
     ] }));
-    model.script('online.weekly', JSON.stringify(onlineWords));
+    const summary = `${onlineWords.summary} Repairs take 9.5 days at the salon.`;
+    model.script('online.weekly', JSON.stringify({ ...onlineWords, summary }));
     const { outcome, key, row, monday } = await run('online');
     expect(outcome).toEqual({ status: 'done' });
-    expect(row).toMatchObject({ division: 'online', status: 'act', written_by: 'model' });
-    expect(row.report).toMatchObject({ manager: 'Georgette', head: 'Emma', goal: null, paths: null, actions: onlineWords.actions, summary: onlineWords.summary });
+    expect(row).toMatchObject({ division: 'online', status: 'act', written_by: 'model', data_source: `${VIEW.online}#bbbbbbbbbbbb` });
+    expect(row.report).toMatchObject({ manager: 'Georgette', head: 'Emma', goal: null, paths: null, actions: onlineWords.actions, summary });
     expect(row.report.sections).toEqual([{ ...onlineWords.sections[0], status: 'act' }]);
     expect(row.report.asked).toEqual([
       { division: 'finance', question: 'How many Amazon and Walmart products are out of stock or low?', answer: 'm:online.amazon.stock.out.count = 2', ok: true },
-      { division: 'salon', question: 'How long do repairs and personalization take at the salon?', answer: 'm:salon.repairs.open_over_14d.count = 6', ok: true },
+      { division: 'salon', question: 'How long do repairs and personalization take at the salon?', answer: 'm:salon.repairs.open_over_14d.count = 6; m:salon.repairs.avg_days = 9.5', ok: true },
     ]);
+    // Every number Emma can read is stored with the mart of the division that read it, in its own unit: George's stock from
+    // the finance mart, Cindy's days from the salon mart.
+    expect(row.report.metrics.find((m: Metric) => m.id === 'm:online.amazon.stock.out.count')).toMatchObject({ value: 2, unit: 'count', business: 'online', source: { view: VIEW.finance, queryHash: HASH.finance } });
+    expect(row.report.metrics.find((m: Metric) => m.id === 'm:salon.repairs.avg_days')).toMatchObject({ value: 9.5, unit: 'days', business: 'salon', source: { view: VIEW.salon, queryHash: HASH.salon } });
+    expect(row.report.metrics.find((m: Metric) => m.id === 'm:online.service.waiting_now.count').source).toMatchObject({ view: VIEW.online, queryHash: HASH.online });
     expect(model.of('online.weekly_needs')[0]!.system).toBe(`SKILL(online)\n\n${NEEDS_RULES}\n${STANDING_ASKS.online}`);
     expect(model.of('online.weekly')[0]!.system).toBe(`SKILL(online)\n\n${WEEKLY_RULES}\n${WEEKLY_ENDING.other}`);
     expect(codeMode.calls.map((c) => c.purpose).sort()).toEqual(['finance.lookup', 'salon.lookup']);
@@ -400,7 +420,7 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     expect(await outbox(`weekly-print:${row.id}`)).toMatchObject({ channel: 'print', to_person_id: HEAD.salon });
     const steps = await stepsOf(task.id);
     expect(steps.find((s) => s.step === 'weekly.write')).toMatchObject({ outcome: 'failed', detail: 'attempts 1; rule-written report used; the provider is down' });
-    expect(steps.find((s) => s.step === 'weekly.sms')).toMatchObject({ outcome: 'refused', detail: 'no text sent: the Salon assistant has no live number; the report is stored, emailed and printed' });
+    expect(steps.find((s) => s.step === 'weekly.sms')).toMatchObject({ outcome: 'refused', detail: 'no text sent: the Salon assistant has no live number; the report is stored, and its email and printout are queued' });
   });
 
   it("Finance: a goal that does not start at its metric's value is corrected once; paths that never pass leave a rule-written report with no goal and nothing to approve", async () => {
@@ -435,6 +455,61 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     expect(await rows('select id from public.weekly_reports where report_key = $1', [first.key])).toHaveLength(1);
     expect(issued.filter((i) => i.key === `weekly-sms:${first.row.id}`).map((i) => i.created)).toEqual([true, false]);
     expect(await rows('select id from public.assistant_messages where dedupe_key = $1', [`weeklystatus:${first.key}`])).toHaveLength(1);
+  });
+
+  it('a step that fails after the writers answered: the task runs again on the words and paths it kept, and no model is asked twice', async () => {
+    const monday = freshMonday();
+    await storeWorkerReport(googleReport(addDays(monday, -2), 'Google ads return 2.4x; little budget room is left.'));
+    model.script('finance.weekly_needs', JSON.stringify({ requests: [] }));
+    model.script('finance.weekly', JSON.stringify({ ...financeWords(monday), summary: 'Google ads return 2.4x on $1,800 of spend.' }));
+    model.script('finance.plans', JSON.stringify(financePaths));
+    const key = `weekly:finance:${monday}`;
+    const task = await taskOf('finance', 'scheduled', { job: 'weekly_report', division: 'finance', date: monday }, key);
+    const real = deps.store;
+    deps.store = { ...real, saveWeeklyReport: async () => { throw new Error('the database went away'); } };
+    try {
+      await expect(handleTask(task, deps)).rejects.toThrow('the database went away');
+    } finally {
+      deps.store = real;
+    }
+    const asked = model.calls.map((c) => c.purpose);
+    expect(asked.filter((p) => p === 'finance.weekly' || p === 'finance.plans')).toEqual(['finance.weekly', 'finance.plans']);
+
+    expect(await handleTask(task, deps)).toEqual({ status: 'done' });
+    expect(model.calls.map((c) => c.purpose)).toEqual(asked);
+    const row = (await rows('select * from public.weekly_reports where report_key = $1', [key]))[0];
+    mine.reports.add(row.id);
+    expect(row).toMatchObject({ written_by: 'model' });
+    expect(row.report.goal).toEqual(financeWords(monday).goal);
+    expect(row.report.paths.plans.map((p: { title: string }) => p.title)).toEqual(financePaths.plans.map((p) => p.title));
+    const steps = await stepsOf(task.id);
+    expect(steps.filter((s) => s.step === 'weekly.write').map((s) => s.detail)).toEqual([
+      'attempts 1, 4 sections, 0 actions, a goal of the week, 0 replies used', 'the words an earlier run of this report wrote and checked are used; no model was asked again',
+    ]);
+    const paths = steps.filter((s) => s.step === 'weekly.paths');
+    expect(paths.map((s) => s.outcome)).toEqual(['ok', 'ok']);
+    expect(paths[0]!.detail).toMatch(/^attempts 1, cited \d+ metrics$/);
+    expect(paths[1]!.detail).toBe('the paths an earlier run of this report wrote and checked are used; no model was asked again');
+  });
+
+  it("a worker whose own run for the day is still open is not run a second time: the report names it as still running", async () => {
+    const monday = freshMonday();
+    await storeWorkerReport(googleReport(addDays(monday, -1), 'Google ads return 2.4x; little budget room is left.'));
+    const open = (await pool.query(
+      `insert into public.tasks (assistant_id, kind, idempotency_key, payload, status, run_after) values ('finance', 'scheduled', $1, $2::jsonb, 'queued', '2199-12-31T00:00:00Z') returning id`,
+      [`worker:finance.email:${monday}`, JSON.stringify({ job: 'division_worker', worker: 'finance.email', date: monday })])).rows[0].id as string;
+    try {
+      model.script('finance.weekly_needs', JSON.stringify({ requests: [] }));
+      model.script('finance.weekly', new Error('the provider is down'));
+      const { task, row } = await run('finance', monday);
+      expect(model.of('finance.email.report')).toEqual([]);
+      expect(model.calls.map((c) => c.purpose)).toEqual(['finance.online_money.report', 'finance.salon_money.report', 'finance.weekly_needs', 'finance.weekly']);
+      expect(row.report.sections.map((s: { workerId: string }) => s.workerId)).toEqual(['finance.google_ads', 'finance.online_money', 'finance.salon_money']);
+      expect((await stepsOf(task.id)).find((s) => s.step === 'weekly.workers')!.detail).toContain(
+        `no report: finance.email (its run for ${monday} is still queued or running, so it is not run a second time);`);
+    } finally {
+      await pool.query(`update public.tasks set status = 'cancelled' where id = $1`, [open]);
+    }
   });
 
   it("the third weekly report of the day queues the weekly CEO digest: one line per division from the managers' CEO lines, texted to the owner once", async () => {
@@ -503,7 +578,7 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     expect(all.queued.map((t) => t.key)).toEqual(['finance', 'online', 'salon'].map((d) => `weekly:${d}:${monday}:${all.task.id}`));
     expect(all.queued.map((t) => t.assistant_id)).toEqual(['finance', 'online', 'salon']);
     expect(all.queued[0].payload).toEqual({ job: 'weekly_report', division: 'finance', date: monday, request: all.task.id });
-    expect(all.reply).toBe('Asking George (Finance), Georgette (Online) and Cindy (Salon) for the weekly report now. Each head gets hers by text, email and printout, and you see it on the console.');
+    expect(all.reply).toBe('Asking George (Finance), Georgette (Online) and Cindy (Salon) for the weekly report now. Each head sees hers in her view, and you see them all on the console; their emails come to you until real data is connected.');
 
     const salon = await text('demo-p-owner', 'owner', 'report salon', `${addDays(monday, 2)}T15:00:00Z`);
     expect(salon.queued.map((t) => t.key)).toEqual([`weekly:salon:${monday}:${salon.task.id}`]);
@@ -511,7 +586,13 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
 
     const emma = await text(HEAD.online, 'online', 'REPORT');
     expect(emma.queued.map((t) => t.key)).toEqual([`weekly:online:${monday}:${emma.task.id}`]);
-    expect(emma.reply).toBe('Georgette is writing your Online weekly report now. It will reach you by text, email and printout when it is ready.');
+    // Emma's assistant has a live number and no printer: she is told of the text, and of no printout and no email.
+    expect(emma.reply).toBe('Georgette is writing your Online weekly report now. It will reach you in your view on the console and by text when it is ready.');
+    numbers.online = null;
+    deps.printers = { online: 'printer-1' };
+    const noText = await text(HEAD.online, 'online', 'REPORT');
+    deps.printers = {};
+    expect(noText.reply).toBe('Georgette is writing your Online weekly report now. It will reach you in your view on the console and on your printer when it is ready.');
 
     const notHers = await text(HEAD.online, 'online', 'REPORT FINANCE');
     expect(notHers.queued).toEqual([]);

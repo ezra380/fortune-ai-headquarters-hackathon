@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   DataRequest, DivisionBrief, DIVISION_ASSISTANT, MANAGERS,
-  type AssistantId, type Attention, type BriefStatus, type CodeModeResult, type Division, type DivisionData, type Metric, type WeeklyReport,
+  type AssistantId, type Attention, type BriefStatus, type CodeModeResult, type Division, type DivisionData, type Metric, type ToolOutput, type WeeklyReport,
 } from '@fahq/contracts';
 import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
@@ -255,8 +255,14 @@ export async function decideNeeds(run: AskingRun, read: DivisionData, weekly?: {
 
 // ---- Asking, and answering with the other division's own profile -------------------------------------
 
-/** `facts` of a usable reply are its metric values (see `replyMetrics`). */
-export type Reply = { from: BriefDivision; question: string; ok: boolean; facts: unknown; reason: string | null };
+/** Where the answering division read a number: the Zetaris view and query hash its own tool returned with it. */
+export type ReplySource = { view: string; queryHash: string };
+
+/**
+ * `facts` of a usable reply are its metric values (see `replyMetrics`). `sources` says, per metric id, where the answering
+ * division read it (see `replySources`); a reply stored before sources were kept has none.
+ */
+export type Reply = { from: BriefDivision; question: string; ok: boolean; facts: unknown; reason: string | null; sources?: Readonly<Record<string, ReplySource>> };
 
 // ---- What a reply may carry ----------------------------------------------------------------------------
 
@@ -306,6 +312,27 @@ export function replyMetrics(facts: unknown, from: BriefDivision): ReplyMetric[]
   return [...found.values()].slice(0, MAX_REPLY_METRICS);
 }
 
+const ReplySourceOf = z.object({ view: z.string().min(1).max(120), queryHash: z.string().regex(/^[0-9a-f]{64}$/) });
+const ReplySources = z.record(z.string(), ReplySourceOf);
+
+/**
+ * Where the answering division read each of its reply's metric values: the view and query hash of the first tool output
+ * that names the metric's id and carries them (every data read tool returns its own). An id no such output names has no
+ * source: a script can put an id beside any number, so only an output that holds the id itself says where it was read.
+ */
+export function replySources(metrics: readonly ReplyMetric[], outputs: readonly ToolOutput[]): Record<string, ReplySource> {
+  const read = outputs.flatMap((o) => {
+    const at = o.output !== null && typeof o.output === 'object' ? ReplySourceOf.safeParse(o.output) : null;
+    return at?.success ? [{ source: { view: at.data.view, queryHash: at.data.queryHash }, text: JSON.stringify(o.output) }] : [];
+  });
+  const out: Record<string, ReplySource> = {};
+  for (const m of metrics) {
+    const found = read.find((r) => r.text.includes(JSON.stringify(m.id)));
+    if (found) out[m.id] = found.source;
+  }
+  return out;
+}
+
 /** Posts each question to its division's assistant, has that assistant answer it, and returns the replies. */
 export async function consult(run: AskingRun, requests: readonly DataRequest[]): Promise<Reply[]> {
   const { deps, runId, assistant, head } = run;
@@ -331,15 +358,18 @@ function replyOf(row: MessageRow): Reply {
   const question = String(row.body.question ?? '');
   if (row.body.ok !== true) return { from, question, ok: false, facts: null, reason: String(row.body.reason ?? 'no reason was recorded') };
   const metrics = replyMetrics(row.body.facts, from);
-  return metrics.length > 0 ? { from, question, ok: true, facts: metrics, reason: null } : { from, question, ok: false, facts: null, reason: NO_METRICS };
+  const sources = ReplySources.safeParse(row.body.sources ?? {});
+  return metrics.length > 0
+    ? { from, question, ok: true, facts: metrics, reason: null, sources: sources.success ? sources.data : {} }
+    : { from, question, ok: false, facts: null, reason: NO_METRICS };
 }
 
 /**
  * The target division answers a data request with its OWN profile: its skill, its model and its read tools, in one
- * Code Mode lookup. The reply is a mailbox row carrying only the metric values of the answer (`replyMetrics`), or the
- * plain reason it could not answer. An answer with a number no tool returned (a sum, say, which may add the two
- * businesses together) or with no metric value tied to an id is refused whole. A reply that is already stored is reused:
- * the lookup is not run twice.
+ * Code Mode lookup. The reply is a mailbox row carrying only the metric values of the answer (`replyMetrics`) and where its
+ * tools read each one (`replySources`), or the plain reason it could not answer. An answer with a number no tool returned
+ * (a sum, say, which may add the two businesses together) or with no metric value tied to an id is refused whole. A reply
+ * that is already stored is reused: the lookup is not run twice.
  */
 async function answerDataRequest(run: Pick<Run, 'deps' | 'task' | 'runId'>, request: MessageRow): Promise<MessageRow> {
   const { deps, task, runId } = run;
@@ -371,7 +401,10 @@ async function answerDataRequest(run: Pick<Run, 'deps' | 'task' | 'runId'>, requ
   });
   const reply = await deps.store.postMessage({
     from: target, to: asker, kind: 'report', replyTo: request.id, dedupeKey: replyKey,
-    body: { type: 'data_reply', briefKey: request.body.briefKey ?? null, question, ...(reason ? { ok: false, reason: clip(reason, 300) } : { ok: true, facts: metrics }) },
+    body: {
+      type: 'data_reply', briefKey: request.body.briefKey ?? null, question,
+      ...(reason ? { ok: false, reason: clip(reason, 300) } : { ok: true, facts: metrics, sources: replySources(metrics, r?.toolOutputs ?? []) }),
+    },
   });
   await deps.store.setMessageStatus(request.id, 'answered');
   return reply;

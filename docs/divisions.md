@@ -131,7 +131,8 @@ Once a day each of Finance, Online and Salon writes its head a brief, as a `sche
    (`brain.record.request`). The target answers with its OWN profile: one Code Mode lookup with its own skill, its own
    `code` model and its own read tools. The asking division never reads the other's tools. The reply is a mailbox row
    (`kind: 'report'`, `body.type: 'data_reply'`, `replyTo` the request, key `datareply:<request id>`) carrying the lookup's
-   **metric values** as `facts` (a list of `{ id, value, unit? }`, `replyMetrics`), or `ok: false` with the plain reason (Code
+   **metric values** as `facts` (a list of `{ id, value, unit? }`, `replyMetrics`) and, per id, the view and query hash of the
+   answering division's tool output that named it as `sources` (`replySources`; the weekly reports use it), or `ok: false` with the plain reason (Code
    Mode not connected, the script failed, the result was too large to check, the result held a number no tool returned, the
    result held no metric value tied to an id). Only ids of a business count (`m:salon.*`, `m:online.*`), and only those the
    answering division may hold: a salon answer carries salon ids, an online answer online ids, finance either. Every other

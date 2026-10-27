@@ -212,10 +212,10 @@ Spec of record: docs/wave2.md ("The workers", "Reports"). How it works in plain 
   now "George: Finance brief for ..."), `apps/worker/test/chain.test.ts` and `apps/worker/test/digest-flow.test.ts` (the
   owner's and Alan's names read from `public.people` instead of the literals 'Demo Owner' / 'Demo Finance Owner', so they
   pass on the shared database as it is and after a reset with the new seed), `supabase/seed.sql`, new
-  `supabase/tests/seed.test.ts`. These three test files need the Meterless engines and are skipped here: they typecheck,
-  but run them once at the merge (`flock ~/.fahq-db-test.lock npx vitest run apps/worker/test/brief-flow.test.ts
-  apps/worker/test/chain.test.ts apps/worker/test/digest-flow.test.ts`). digest-flow's `toContain('Finance brief for')`
-  still holds.
+  `supabase/tests/seed.test.ts`. These three test files need the Meterless engines. **Corrected in the review round:**
+  slice 3 said they "typecheck, but run them once at the merge" without running them, and digest-flow in fact had 5
+  failures (its BRIEF_JOBS filter missed the two new clock jobs). They have now been run with the engines (see "Review
+  fixes" below) and pass. digest-flow's `toContain('Finance brief for')` still holds.
 - The SKILL.md personas reach a worker that reads profiles from the database only after `npx tsx scripts/seed-profiles.ts
   --force` (it keeps what the owner approved). The data lane's "You can read" lines merge beside them without touching the
   same lines; keep each body at 48 lines or fewer (finance 47 here).
@@ -227,3 +227,82 @@ Spec of record: docs/wave2.md ("The workers", "Reports"). How it works in plain 
   (online)' where id = 'online';`. People names on the shared stack are better left until a reset, since other lanes'
   tests in their own worktrees still expect 'Demo Finance Owner'.
 - No contract or migration change; no new migration.
+
+## Review fixes (2026-10-27)
+
+An independent review found 1 blocker, 2 majors and 4 minors. All seven are fixed; none was judged wrong. Each fix has a
+test that was seen failing first (the blocker's 5 digest-flow tests; the 8 new or changed flow tests and the 1 new workers
+unit test before the code changed), and the tests written after their code (replySources) were proven by mutation.
+
+### What works (with the tests that prove it)
+
+- **Blocker: digest-flow's clock tests** (commit 11eb1be). `BRIEF_JOBS` in `apps/worker/test/digest-flow.test.ts` now leaves
+  out `division-workers` and `weekly-reports`, as digest.test.ts already did. With the Meterless engines copied into this
+  worktree's ignored `.local/meterless` (from `~/fahq-l1`, an old lane worktree; nothing read from the live, merge or
+  other wave-2 worktrees), brief-flow, chain and digest-flow were run under the lock: 5 failed before (each "expected
+  ['division-workers', 'division-briefs'] to equal ['division-briefs']"), 63 of 63 pass after.
+- **Major: a reply's number keeps the answering division's source.** `answerDataRequest` (brief.ts) now stores `sources` in
+  the `data_reply` body: per metric id, the view and query hash of the answering division's tool output that names that id
+  (`replySources`; an output without a 64-hex hash, or one that does not name the id, gives none: a script's label on a row
+  total is not a source). `replyOf` reads it back through zod. weekly.ts `traceReplies` turns each reply's values into
+  Metrics with that source; `replyPlanMetrics` no longer stamps the asker's view and hash on them. Tests:
+  brief.test.ts "replySources: ... is the view and query hash of the tool output that names the metric's id, never the
+  asker's"; weekly.test.ts "the other divisions' answers" (2); weekly-flow.test.ts: each division now has its own mart and
+  hash in the fake port, and the Finance test asserts Cindy's `m:salon.clients.frequent.count` carries the salon mart (and
+  the stored `data_reply` carries it), the Online test that George's `m:online.amazon.stock.out.count` carries the finance
+  mart and Cindy's `m:salon.repairs.avg_days` the salon mart. Mutations (each red, then restored): a source from any output
+  whatever ids it names; a hash that is not 64 hex; a reply number with no source still counting.
+- **Major: one set of numbers.** `reportMetrics(src)` (the division's metrics, the workers' that differ, the replies' traced
+  values, at most 250) is both what `checkWeeklyWords` accepts (ids, numbers, businesses) and what `assemble` stores; a
+  reply number counts only with a source and a known unit (the reply's, or the catalog's: days, minutes, seconds and score
+  included), and the writer's input, the asked notes and the plan writer (`replyPlanMetrics`: plan units, `planUse`) all
+  read the same traced numbers. A reply with none left counts as one that could not answer ("the answer's numbers could
+  not be traced to where that division read them"); the `weekly.write` receipt counts the reply numbers left out. In
+  workers.ts, `workerSource` keeps the first 60 metrics, the attention on them and the first 4 row reads, and the words are
+  checked against exactly that. Tests: weekly.test.ts "uses a reply's number in any unit once it is traced, and never one
+  that is not", "is checked against exactly the numbers the report stores: at most 250, the replies last", the asked notes
+  test (an untraced reply now says so); weekly-flow.test.ts Online (Cindy answers 9.5 days, Emma's summary quotes it, and
+  it is stored with unit `days`); workers.test.ts "checks the words against the numbers the report keeps: its first 60
+  metrics, the attention rules on them and 4 row reads". Mutation: the stored set leaving out `days` replies turned 2 red.
+- **Minor: keyed writer calls.** The weekly words (`weeklywords:<key>`), George's paths (`weeklypaths:<key>`) and a worker's
+  words (`workerwords:<key>`) are kept as mailbox notes (as `needs:<key>` already was) right after their model call, model
+  or rule outcome alike. A task that runs again reuses them, checks kept words and paths again against this run's numbers
+  (`checkWeeklyWords`, `checkPlans`, `checkWorkerWords`) and asks no model; any that no longer pass give the rule-written
+  report, never a second call. Tests: weekly-flow.test.ts "a step that fails after the writers answered: the task runs
+  again on the words and paths it kept, and no model is asked twice"; workers-flow.test.ts "a save that fails after the
+  model wrote: ..." and "a kept rule-written outcome is kept too: ...".
+- **Minor: no doubled worker run.** `gatherWorkers` checks `openTasksByKey([workerKey(id, date)])` before running a worker
+  inline; an open one is listed as missing ("its run for <date> is still queued or running, so it is not run a second
+  time"). Test: weekly-flow.test.ts "a worker whose own run for the day is still open is not run a second time: ...".
+- **Minor: the words to people say what is true now.** The head's text ends "The full report is in your view on the
+  console[ and on your printer]. Its email goes to the owner until real data is connected." (the printer only when
+  `deps.printers[assistant]` is set). REPORT acknowledgments: the owner "Each head sees hers in her view, and you see them
+  all on the console; their emails come to you until real data is connected."; a head "It will reach you in your view on
+  the console[, by text][ and on your printer] when it is ready." (text only with a live number). The `weekly.sms` receipt
+  says the email and printout are "queued", not sent. Tests: weekly.test.ts the head's text (with and without a printer);
+  weekly-flow.test.ts REPORT (Emma with a live number and no printer, then with a printer and no number) and the Salon
+  receipt.
+- docs/workers.md and docs/divisions.md (the `data_reply` body's `sources`) say the same.
+- Proof: `npm run typecheck` clean; full suite under the lock (`flock ~/.fahq-db-test.lock npm test`) with the Meterless
+  engines present, so nothing is skipped: 71 files passed, 1304 tests passed, none skipped (slice 3 ran 62 files and 1121
+  tests with 9 files and 173 tests skipped for want of the engines).
+
+### Not done
+
+- The daily brief (brief.ts `checkBrief`, owned by the brief lane before this wave) still accepts any reply value, traced
+  or not, as before; it stores no metrics list, so nothing it shows carries a wrong source. Only the weekly report uses
+  `sources`.
+- A row tool's total that a script labels with a metric id has no source (the output does not name the id), so it is left
+  out of a weekly report. When the data lane's marketplace and turnaround metrics are in the marts, the answering
+  division's metrics tool names them and they trace.
+
+### What the merge must know
+
+- brief.ts gained `ReplySource`, `Reply.sources` (optional), `replySources`, and the `sources` field of the `data_reply`
+  body; replies stored before this change have no sources, so a weekly report treats their numbers as untraced. The
+  console reads `data_reply` rows by `datareply:%` and is unaffected.
+- New mailbox note keys: `weeklywords:<key>`, `weeklypaths:<key>`, `workerwords:<key>` (kind `report`, the assistant to
+  itself; the console lists none of them).
+- `weeklySms(row, tail, { printer })` has a third, optional argument.
+- Files outside the lane's list: `apps/worker/test/digest-flow.test.ts` (the filter), `docs/divisions.md` (one sentence).
+  No contract or migration change; no new migration. `.local/meterless` is ignored by git and not committed.

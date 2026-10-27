@@ -68,10 +68,12 @@ At **07:00** the clock queues all fifteen workers, each as a `scheduled` task fo
 3. **Status.** From those attention rules (`statusOf`): act, watch or normal. A model never sets it.
 4. **Words.** One model call (the brief writer's model, JSON, reasoning on) writes a headline and up to
    five findings that cite the worker's own metric ids. A program checks every number (`numberTrace`:
-   each must be a metric value or a row total it was given), every cite, that no sentence puts a salon
-   number next to an online number, and that there are no medical words. One correction round with the
-   exact objections; otherwise the program writes the report from the rules (`writtenBy: 'rule'`). A
-   model that cannot be reached also gets the rule-written report. Receipt `worker.write`.
+   each must be a metric value or a row total the report keeps: its first 60 metrics and 4 row reads,
+   `workerSource`), every cite, that no sentence puts a salon number next to an online number, and that
+   there are no medical words. One correction round with the exact objections; otherwise the program
+   writes the report from the rules (`writtenBy: 'rule'`). A model that cannot be reached also gets the
+   rule-written report. What was decided is kept before the save (`workerwords:<key>`): a task that runs
+   again after the save failed checks the kept words again and asks no model. Receipt `worker.write`.
 5. **Save.** The report is checked against `WorkerReport` (contracts) and stored once per key in
    `worker_reports`. A task that runs again finds it and stops: nothing is read or asked twice (receipt
    `worker.reuse`). Receipt `worker.save`.
@@ -91,32 +93,41 @@ asks for the same run and a new text for a new one. Every step below is keyed by
 1. **Numbers.** The division's numbers and attention rules, read once. Receipt `weekly.data`.
 2. **Workers.** The newest report of each of the division's workers from the seven days up to the run's
    day. A worker with none runs now (the same code as its 07:00 run, under today's key, so the 07:00 task
-   finds it stored). One that still has none (its data is not connected yet, say) is named with the
-   reason, never left out silently. No report at all stops the task plainly. Receipt `weekly.workers`.
+   finds it stored), unless its own task for today is still queued or running: then it is named as still
+   running, so the model is never asked twice for one worker's day. One that still has none (its data is
+   not connected yet, say) is named with the reason, never left out silently. No report at all stops the
+   task plainly. Receipt `weekly.workers`.
 3. **Asking.** See "The asks between the managers" below. Receipts `weekly.needs` and `<division>.lookup`.
 4. **Words.** One model call (the plan model, reasoning on, JSON) writes the summary, one section per
    worker that reported, and the CEO line; Online and Salon up to three actions (the brief's shape);
    Finance a **goal of the week** (one of its metrics, `from` exactly its value, a target, a date within
-   seven days). A program checks every number against the division's metrics, the workers' metrics and
-   row totals and the replies' values (the goal's target is allowed only in the goal), every cite (a
-   section cites only its own worker's ids), no salon number next to an online one, no medical words.
-   One correction round; otherwise the program writes it from the rules: each worker's own checked
-   headline as its section, the act rules as actions, no goal. Receipt `weekly.write`.
+   seven days). A program checks every number against exactly the numbers the report stores
+   (`reportMetrics`: the division's metrics, the workers' metrics and the replies' traced values, at most
+   250) and the workers' row totals (the goal's target is allowed only in the goal), every cite (a section
+   cites only its own worker's ids), no salon number next to an online one, no medical words. One
+   correction round; otherwise the program writes it from the rules: each worker's own checked headline as
+   its section, the act rules as actions, no goal. What was decided is kept (`weeklywords:<key>`) before
+   the next step. Receipt `weekly.write`.
 5. **Paths (Finance).** Three profit paths toward the goal through the plan writer and `checkPlans`, from
-   Finance's metrics and the replies' traced values. Paths that never pass mean a rule-written report
-   with no goal and no paths. Receipt `weekly.paths`.
-6. **Save.** The program assembles the `WeeklyReport` (the asked notes, every metric as read, the worker
-   report ids, each section's status from its worker report) and stores it once per key in
-   `weekly_reports`. Its status is the worst of the worker reports' and the division's attention.
-   Receipt `weekly.save`.
+   Finance's metrics and the replies' traced values in a unit the plan checker can check. Paths that never
+   pass mean a rule-written report with no goal and no paths. Kept as `weeklypaths:<key>`. Receipt
+   `weekly.paths`.
+6. **Save.** The program assembles the `WeeklyReport` (the asked notes, every metric as read with the
+   source it was read from, the worker report ids, each section's status from its worker report) and stores
+   it once per key in `weekly_reports`. Its status is the worst of the worker reports' and the division's
+   attention. Receipt `weekly.save`. A task that runs again after a failed save reuses the kept words and
+   paths (checked again against this run's numbers; any that no longer pass give the rule-written report)
+   and asks no model twice.
 7. **Deliver.** A mailbox row the head's code hangs from (`weeklydoc:<key>`, also kept as the report's
    `message_id`); a `weekly_status` line to the owner with the CEO line (`weeklystatus:<key>`); an email outbox
    row to the head (`attachment_ref weekly_report:<id>`, body = the subject "For <head>: <manager>'s weekly
-   report, week of <Monday>"; the delivery lane sends it to `HQ_REPORT_TO` only); a print row; and a text to the
-   head: "George, Finance: your weekly report is in ...", the summary, the goal, the paths or actions, and
-   "Reply APPROVE <1-3> <code> to approve a path" (or an action), one code that lasts 24 hours. A head whose
-   assistant has no live number gets no text (receipt `weekly.sms`); the email and printout are still queued.
-   The third weekly report of a run queues the weekly CEO digest. Receipt `weekly.deliver`.
+   report, week of <Monday>"; the delivery lane sends it to `HQ_REPORT_TO` only); a print row (printed only
+   when the head has a printer); and a text to the head: "George, Finance: your weekly report is in ...", the
+   summary, the goal, the paths or actions, where the full report is ("in your view on the console", "and on
+   your printer" only when she has one, and that its email goes to the owner until real data is connected),
+   and "Reply APPROVE <1-3> <code> to approve a path" (or an action), one code that lasts 24 hours. A head
+   whose assistant has no live number gets no text (receipt `weekly.sms`); the email and printout rows are
+   still queued. The third weekly report of a run queues the weekly CEO digest. Receipt `weekly.deliver`.
 
 ## The asks between the managers
 
@@ -124,6 +135,11 @@ The weekly report uses the briefs' data-request route (`decideNeeds` and `consul
 decides what to ask; the needs prompt carries the owner's standing asks (`STANDING_ASKS`). Each question is a
 mailbox request that the **other** division answers with its own tools, and a reply's numbers count only when they
 come back tied to a metric id of that division's business (`replyMetrics`). A division never reads another's tools.
+The reply also keeps, per metric id, the view and query hash of the answering division's tool output that named it
+(`replySources`: George's stock numbers carry the finance mart, Cindy's the salon mart, never the asker's). The weekly
+report uses a reply's number only when it has that source and a known unit (from the reply or the catalog;
+`traceReplies`); one without is left out of the words, the check, the stored metrics and the asked notes alike, and a
+reply with none left counts as one that could not answer.
 
 | Who asks | Whom | For what | Why it is an ask |
 |---|---|---|---|
@@ -170,8 +186,9 @@ All of this is the local stack (`postgresql://postgres:postgres@127.0.0.1:54322/
 running (`npm run worker`); the running worker claims a queued task within a few seconds.
 
 - **A weekly report:** text `REPORT` from the owner's phone (all three, or `REPORT FINANCE` / `ONLINE` / `SALON`),
-  or `REPORT` from a head's phone for her own division. Each head gets hers by text, email and printout, and the
-  owner sees it on the console. On the local stack without phones, queue the task directly (the request id makes
+  or `REPORT` from a head's phone for her own division. Each head sees hers in her view (and by text with a live
+  number, on her printer with one), the owner sees them on the console, and every email goes to the owner until
+  real data is connected. On the local stack without phones, queue the task directly (the request id makes
   it a new run beside the week's):
 
   ```sql

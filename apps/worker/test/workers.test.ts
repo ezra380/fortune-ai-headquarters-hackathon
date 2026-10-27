@@ -6,7 +6,7 @@ import type { WorkerDeps } from '../src/common.ts';
 import { createReadTools } from '../src/read-tools.ts';
 import { SCHEDULE, dueJobs, runDueJobs } from '../src/scheduler.ts';
 import {
-  PENDING_DATA_PREFIXES, PENDING_ROW_TOOLS, WORKERS, checkWorkerWords, ruleWords, totalsAt, workerBusiness, workerKey, workerSlice, type WorkerDef,
+  PENDING_DATA_PREFIXES, PENDING_ROW_TOOLS, WORKERS, checkWorkerWords, ruleWords, totalsAt, workerBusiness, workerKey, workerSlice, workerSource, type WorkerDef,
 } from '../src/workers.ts';
 
 // The parts of the daily workers that need no database: the registry against the v2 catalog and the profiles, what a
@@ -153,6 +153,19 @@ describe("checking a worker's words", () => {
     const mixed = { ...src, metrics: [...src.metrics, m('m:salon.revenue.total', 52000, 'usd', 'salon')] };
     const check = checkWorkerWords(words([{ text: 'Google spend was $1,800 while the salon made $52,000.', cites: [] }]), mixed);
     expect(check.ok ? [] : check.objections).toEqual(['finding 1: one sentence mixes a salon number and an online number (1,800, 52,000)']);
+  });
+
+  it('checks the words against the numbers the report keeps: its first 60 metrics, the attention rules on them and 4 row reads', () => {
+    const many = Array.from({ length: 61 }, (_, i) => m(`m:online.email.n${i}`, 1000 + i, 'count', 'online', 'Email sends'));
+    const rows = Array.from({ length: 5 }, (_, i) => ({ read: `r${i}`, totals: { count: 2000 + i } }));
+    const kept = workerSource({ metrics: many, attention: [{ metricId: many[60]!.id, level: 'act', rule: 'Too many.' }, { metricId: many[0]!.id, level: 'watch', rule: 'Look.' }] }, rows, 'online');
+    expect(kept.metrics).toEqual(many.slice(0, 60));
+    expect(kept.attention).toEqual([{ metricId: many[0]!.id, level: 'watch', rule: 'Look.' }]);
+    expect(kept.rows).toEqual(rows.slice(0, 4));
+    expect(checkWorkerWords(words([], 'Sends reached 1059 and 2003.'), kept).ok).toBe(true);
+    expect(checkWorkerWords(words([], 'Sends reached 1060 and 2004.'), kept)).toEqual({
+      ok: false, objections: ['headline: "1060" is not a number in the data', 'headline: "2004" is not a number in the data'],
+    });
   });
 
   it('writes the rule report from the attention rules and the metrics\' own labels and values', () => {

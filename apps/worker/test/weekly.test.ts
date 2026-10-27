@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Metric, WorkerReport } from '@fahq/contracts';
+import type { DataPort, Metric, MetricInfo, WorkerReport } from '@fahq/contracts';
 import type { Reply } from '../src/brief.ts';
 import { parseCommand } from '../src/commands.ts';
 import { DIGEST_MAX, buildWeeklyDigest, digestKey, weeklyDigestKey } from '../src/digest.ts';
@@ -7,7 +7,8 @@ import type { WorkerDeps } from '../src/flows.ts';
 import { SCHEDULE, dueJobs } from '../src/scheduler.ts';
 import type { WeeklyReportRow, WorkerReportRow } from '../src/store.ts';
 import {
-  WEEKLY_WAITS_MINUTES, addDays, askedNotes, checkWeeklyWords, enqueueWeeklyReports, isoWeekday, mondayOf, ruleWords, weeklyKey, weeklySms, weeklySubject, worstStatus,
+  WEEKLY_WAITS_MINUTES, addDays, askedNotes, checkWeeklyWords, enqueueWeeklyReports, isoWeekday, mondayOf, replyPlanMetrics, reportMetrics, ruleWords, traceReplies,
+  weeklyKey, weeklySms, weeklySubject, worstStatus,
 } from '../src/weekly.ts';
 
 // The weekly report's rules that need no database: its week, its key, the REPORT command, the Monday clock, the checks on the
@@ -37,8 +38,21 @@ const google = workerRow('finance.google_ads', 'watch', [spend, roas], { rows: [
 const money = workerRow('finance.online_money', 'normal', [revenue]);
 const salonMoney = workerRow('finance.salon_money', 'normal', [salonRevenue]);
 const read = { division: 'finance' as const, metrics: [revenue, spend, roas, salonRevenue], attention: [], queryHash: 'd'.repeat(64), view: 'fortune_demo_finance_mart' };
-const clients: Reply = { from: 'salon', question: 'What are the client segments?', ok: true, facts: [{ id: 'm:salon.clients.frequent.count', value: 42, unit: 'count' }], reason: null };
-const src = { read, reports: [google, money, salonMoney], missing: [{ workerId: 'finance.meta' as const, reason: 'no metrics yet' }], replies: [clients] };
+// Where the salon's own tools read its answers: its mart, never the asking division's.
+const SALON = { view: 'fortune_demo_v2_salon_mart', queryHash: 'c'.repeat(64) };
+const avgDays: MetricInfo = { id: 'm:salon.repairs.avg_days', label: 'Average repair days', unit: 'days', business: 'salon', divisions: ['salon'], planUse: false };
+const deps = { data: { catalog: [avgDays] } as unknown as DataPort, period: '2026-09' as const, now: () => new Date('2100-03-01T12:00:00Z') };
+const clients: Reply = {
+  from: 'salon', question: 'What are the client segments?', ok: true, facts: [{ id: 'm:salon.clients.frequent.count', value: 42, unit: 'count' }], reason: null,
+  sources: { 'm:salon.clients.frequent.count': SALON },
+};
+// 9.5 days (its unit only in the catalog), 6 late repairs with no source, and an id with a source but no known unit.
+const turnaround: Reply = {
+  from: 'salon', question: 'How long do repairs take?', ok: true, reason: null,
+  facts: [{ id: 'm:salon.repairs.avg_days', value: 9.5, unit: 'days' }, { id: 'm:salon.repairs.late.count', value: 6, unit: 'count' }, { id: 'm:salon.repairs.mystery', value: 4 }],
+  sources: { 'm:salon.repairs.avg_days': SALON, 'm:salon.repairs.mystery': SALON },
+};
+const src = { read, reports: [google, money, salonMoney], missing: [{ workerId: 'finance.meta' as const, reason: 'no metrics yet' }], replies: traceReplies([clients], deps) };
 const run = { division: 'finance' as const, date: '2100-03-01' };
 
 const goodWords = {
@@ -177,8 +191,24 @@ describe("the check on the manager's words", () => {
   });
 
   it("uses a reply's number only when it came with its id from the division that answered", () => {
-    const untagged: Reply = { from: 'salon', question: 'q', ok: true, facts: { total: 42 }, reason: null };
-    const check = checkWeeklyWords(goodWords, { ...src, replies: [untagged] }, run);
+    const untagged: Reply = { from: 'salon', question: 'q', ok: true, facts: { total: 42 }, reason: null, sources: { total: SALON } };
+    const check = checkWeeklyWords(goodWords, { ...src, replies: traceReplies([untagged], deps) }, run);
+    expect(!check.ok && check.objections).toEqual(['summary: "42" is not a number in the data']);
+  });
+
+  it("uses a reply's number in any unit once it is traced, and never one that is not", () => {
+    const both = { ...src, replies: traceReplies([clients, turnaround], deps) };
+    expect(checkWeeklyWords({ ...goodWords, summary: `${goodWords.summary} Repairs take 9.5 days at the salon.` }, both, run).ok).toBe(true);
+    const late = checkWeeklyWords({ ...goodWords, summary: `${goodWords.summary} 6 repairs are late.` }, both, run);
+    expect(!late.ok && late.objections).toEqual(['summary: "6" is not a number in the data']);
+  });
+
+  it('is checked against exactly the numbers the report stores: at most 250, the replies last', () => {
+    const crowd = Array.from({ length: 250 }, (_, i) => metric(`m:online.n${i}`, `N${i}`, 10_000 + i, 'count'));
+    const full = { ...src, read: { ...read, metrics: [...read.metrics, ...crowd] } };
+    expect(reportMetrics(full)).toHaveLength(250);
+    expect(reportMetrics(full).some((m) => m.id === 'm:salon.clients.frequent.count')).toBe(false);
+    const check = checkWeeklyWords(goodWords, full, run);
     expect(!check.ok && check.objections).toEqual(['summary: "42" is not a number in the data']);
   });
 
@@ -199,6 +229,31 @@ describe("the check on the manager's words", () => {
   });
 });
 
+describe("the other divisions' answers", () => {
+  it("keeps a reply's number with where the answering division read it and its unit; one it cannot place is left out", () => {
+    const [traced] = traceReplies([turnaround], deps);
+    expect(traced).toMatchObject({ ok: true, untraced: 2 }); // 6 has no source; the mystery id has no known unit
+    expect(traced!.numbers).toEqual([{
+      id: 'm:salon.repairs.avg_days', label: 'Average repair days', value: 9.5, unit: 'days', business: 'salon', period: '2026-09',
+      source: { system: 'zetaris', ...SALON, asOf: '2100-03-01T12:00:00.000Z' },
+    }]);
+    const [none] = traceReplies([{ ...turnaround, sources: undefined }], deps); // a reply stored before sources were kept
+    expect(none).toMatchObject({ ok: false, numbers: [], untraced: 3, reason: "the answer's numbers could not be traced to where that division read them" });
+    const failed: Reply = { from: 'online', question: 'q', ok: false, facts: null, reason: 'Code Mode is not connected' };
+    expect(traceReplies([failed], deps)).toEqual([{ ...failed, numbers: [], untraced: 0 }]);
+  });
+
+  it('stores every traced reply number with its own source, and gives the plan writer only the ones it can check', () => {
+    const both = { ...src, replies: traceReplies([clients, turnaround], deps) };
+    const stored = reportMetrics(both);
+    expect(stored.slice(-2).map((m) => [m.id, m.unit, m.source.view, m.source.queryHash])).toEqual([
+      ['m:salon.clients.frequent.count', 'count', SALON.view, SALON.queryHash], ['m:salon.repairs.avg_days', 'days', SALON.view, SALON.queryHash],
+    ]);
+    expect(stored.find((m) => m.id === revenue.id)!.source.view).toBe('fortune_demo_finance_mart'); // the division's own keep its own
+    expect(replyPlanMetrics(both.replies, deps).map((m) => m.id)).toEqual(['m:salon.clients.frequent.count']);
+  });
+});
+
 describe('the rule-written report, the asked notes and the head', () => {
   it("is each worker's own headline as its section, the act rules as actions, and no goal", () => {
     const words = ruleWords({ division: 'finance', label: 'Finance' }, src, 'watch');
@@ -215,9 +270,11 @@ describe('the rule-written report, the asked notes and the head', () => {
 
   it("notes what was asked and the answer: a reply's metric values as they came, or why it could not answer", () => {
     const failed: Reply = { from: 'online', question: 'Which products lose money?', ok: false, facts: null, reason: 'Code Mode isn\'t connected on this machine' };
-    expect(askedNotes([clients, failed])).toEqual([
+    expect(askedNotes(traceReplies([clients, failed, turnaround, { ...turnaround, sources: {} }], deps))).toEqual([
       { division: 'salon', question: 'What are the client segments?', answer: 'm:salon.clients.frequent.count = 42', ok: true },
       { division: 'online', question: 'Which products lose money?', answer: "Could not answer: Code Mode isn't connected on this machine", ok: false },
+      { division: 'salon', question: 'How long do repairs take?', answer: 'm:salon.repairs.avg_days = 9.5', ok: true }, // only what it traced
+      { division: 'salon', question: 'How long do repairs take?', answer: "Could not answer: the answer's numbers could not be traced to where that division read them", ok: false },
     ]);
   });
 
@@ -234,8 +291,10 @@ describe('the rule-written report, the asked notes and the head', () => {
       'George, Finance: your weekly report is in (week of 2100-03-01, status WATCH).', goodWords.summary,
       'Goal of the week: Lift online revenue from $48,200 to $50,000 (by 2100-03-05)',
       'Paths:', 'Path 1: Path title 1', 'Path 2: Path title 2', 'Path 3: Path title 3',
-      'The full report is in your email and on your printer.', tail,
+      'The full report is in your view on the console. Its email goes to the owner until real data is connected.', tail,
     ].join('\n'));
+    // The printer is named only when the head has one.
+    expect(weeklySms(row, tail, { printer: true })).toContain('\nThe full report is in your view on the console and on your printer. Its email goes to the owner until real data is connected.\n');
     const long = weeklySms({ ...row, report: { ...report, summary: 'x'.repeat(790), paths: { ...report.paths, plans: report.paths.plans.map((p) => ({ ...p, title: 'y'.repeat(90) })) } } } as unknown as WeeklyReportRow, tail);
     expect(long.length).toBeLessThanOrEqual(1600);
     expect(long.endsWith(tail)).toBe(true);

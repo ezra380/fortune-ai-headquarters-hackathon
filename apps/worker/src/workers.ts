@@ -21,8 +21,8 @@ import type { TaskRow } from './store.ts';
 //            every number, every cite, the salon/online line and medical words. One correction round, then a report a
 //            program writes from the rules (written by 'rule').
 //   save   → worker_reports, once per key. No text message: the manager's weekly report is built from these.
-// worker:<id>:<date> is the day's run; worker:<id>:<date>:<task id> a run asked for by hand. A task that runs again after
-// its report was stored finds it and asks no model again.
+// worker:<id>:<date> is the day's run; worker:<id>:<date>:<task id> a run asked for by hand. The writer's words are kept under
+// it (workerwords:<key>) before the save, and the report is stored under it: a task that runs again asks no model again.
 
 const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}…`);
 
@@ -199,10 +199,24 @@ export async function dailyWorker(task: TaskRow, deps: WorkerDeps, runId: string
   const rows = await readRowTotals(run);
   if ('stop' in rows) return rows.stop;
   const { read } = numbers;
-  const src: Source = { metrics: read.metrics, attention: read.attention, rows: rows.rows, business: workerBusiness(def) };
+  const src = workerSource(read, rows.rows, workerBusiness(def));
   const status = statusOf(src.attention);
   const words = await writeOrRule(run, src, status);
   return save(run, src, status, words, `${read.view}#${read.queryHash.slice(0, 12)}`);
+}
+
+/** The most metrics and row reads a worker report keeps (its contract). */
+const MAX_WORKER_METRICS = 60;
+const MAX_WORKER_ROWS = 4;
+
+/**
+ * What the worker's words are written from and checked against: exactly what its report keeps, its first 60 metrics with the
+ * attention rules that fired on them, and its first 4 row reads. A number the report does not keep can never pass the check.
+ */
+export function workerSource(read: Pick<DivisionData, 'metrics' | 'attention'>, rows: readonly RowTotals[], business: 'salon' | 'online'): Source {
+  const metrics = read.metrics.slice(0, MAX_WORKER_METRICS);
+  const ids = new Set(metrics.map((m) => m.id));
+  return { metrics, attention: read.attention.filter((a) => ids.has(a.metricId)), rows: rows.slice(0, MAX_WORKER_ROWS), business };
 }
 
 /** The division's numbers, cut to this worker's. Nothing to read, or nothing of this worker's, stops the task plainly. */
@@ -351,16 +365,41 @@ async function writeWords(run: Run, src: Source, status: ReportStatus): Promise<
   return { ok: false, why: 'check', reason: objections.slice(0, 3).join(' | '), attempts: 2, ...used };
 }
 
+// What the writer decided is kept in the mailbox under the run's key (workerwords:<key>) before the report is saved, so a
+// task that runs again after the save failed asks no model twice. Kept words are checked again against this run's numbers;
+// words that no longer pass give the rule-written report, never a second call.
+const KeptWords = z.object({ type: z.literal('worker_words'), writtenBy: z.enum(['model', 'rule']), words: WorkerWords.nullable() });
+
 async function writeOrRule(run: Run, src: Source, status: ReportStatus): Promise<{ words: WorkerWords; writtenBy: 'model' | 'rule' }> {
   const { deps, task, runId, assistant } = run;
   const started = deps.now();
+  const noteKey = `workerwords:${run.key}`;
+  const note = await deps.store.messageByKey(noteKey);
+  const kept = note ? KeptWords.safeParse(note.body) : null;
+  if (kept?.success) {
+    const again = kept.data.words ? checkWorkerWords(kept.data.words, src) : null;
+    const step = { runId, taskId: task.id, step: 'worker.write', assistant, started };
+    if (again?.ok) {
+      await receipt(deps, { ...step, outcome: 'ok', detail: 'the words an earlier run of this report wrote and checked are used; no model was asked again' });
+      return { words: again.words, writtenBy: 'model' };
+    }
+    await receipt(deps, {
+      ...step, outcome: again ? 'refused' : 'ok',
+      detail: again ? `the words an earlier run wrote no longer pass their check, so the report is written from the rules; no model was asked again; ${clip(again.objections.slice(0, 3).join(' | '), 300)}`
+        : 'an earlier run of this report wrote it from the rules; no model was asked again',
+    });
+    return { words: ruleWords(src, status), writtenBy: 'rule' };
+  }
+  const keep = (body: Record<string, unknown>) => deps.store.postMessage({ from: assistant, to: assistant, kind: 'report', replyTo: null, dedupeKey: noteKey, body });
   const written = await writeWords(run, src, status);
   const base = { runId, taskId: task.id, step: 'worker.write', assistant, started, model: written.model, inputTokens: written.inputTokens, outputTokens: written.outputTokens };
   if (written.ok) {
+    await keep({ type: 'worker_words', writtenBy: 'model', words: written.words });
     const corrected = written.attempts > 1 && written.firstObjection ? `; first objection: ${clip(written.firstObjection.replace(/\s+/g, ' '), 200)}` : '';
     await receipt(deps, { ...base, outcome: 'ok', detail: `attempts ${written.attempts}, ${written.words.findings.length} findings${corrected}` });
     return { words: written.words, writtenBy: 'model' };
   }
+  await keep({ type: 'worker_words', writtenBy: 'rule', words: null });
   await receipt(deps, { ...base, outcome: written.why === 'model' ? 'failed' : 'refused', detail: `attempts ${written.attempts}; rule-written report used; ${clip(written.reason, 300)}` });
   return { words: ruleWords(src, status), writtenBy: 'rule' };
 }
@@ -373,8 +412,8 @@ async function save(run: Run, src: Source, status: ReportStatus, written: { word
   const started = deps.now();
   const report = WorkerReport.safeParse({
     workerId: def.id, day: run.date, period: deps.period, status, writtenBy: written.writtenBy, ...written.words,
-    metrics: src.metrics.slice(0, 60), attention: src.attention.slice(0, 20).map((a) => ({ metricId: a.metricId, level: a.level, rule: clip(a.rule, 200) })),
-    rows: src.rows.slice(0, 4), dataSource,
+    metrics: src.metrics, attention: src.attention.slice(0, 20).map((a) => ({ metricId: a.metricId, level: a.level, rule: clip(a.rule, 200) })),
+    rows: src.rows, dataSource,
   });
   if (!report.success) {
     const why = report.error.issues.slice(0, 3).map((i) => `${i.path.join('.') || 'report'}: ${i.message}`).join('; ');

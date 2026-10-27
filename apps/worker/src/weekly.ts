@@ -1,16 +1,16 @@
 import { z } from 'zod';
 import {
-  DIVISION_ASSISTANT, DivisionBrief, MANAGERS, ManagedDivision, WORKER_IDS, WeeklyGoal, WeeklyReport, WeeklySection, weeklyReportRef, workerDivision,
-  type AskedNote, type DivisionData, type Metric, type ProfitPlans, type ReportStatus, type WorkerId,
+  DIVISION_ASSISTANT, DivisionBrief, MANAGERS, ManagedDivision, ProfitPlans, WORKER_IDS, WeeklyGoal, WeeklyReport, WeeklySection, checkPlans, weeklyReportRef, workerDivision,
+  type AskedNote, type DivisionData, type Metric, type ReportStatus, type WorkerId,
 } from '@fahq/contracts';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import type { Command } from './commands.ts';
 import {
   CEO_LINE, MEDICAL, arrivedAt, consult, decideNeeds, divisionData, fallbackBrief, mixedBusinessSentences, replyMetrics, shownMetric, sourceTag, statusOf, weeklyItems,
-  type AskingRun, type Reply, type ReplyMetric,
+  type AskingRun, type Reply,
 } from './brief.ts';
 import { done, errorText, fail, fitSms, isLiveNumber, newCode, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
-import { sliceFor } from './departments.ts';
+import { countNouns, sliceFor } from './departments.ts';
 import { companyDay, enqueueWeeklyDigest } from './digest.ts';
 import { PlanError, writePlans } from './finance.ts';
 import { numberTrace } from './reports.ts';
@@ -24,20 +24,24 @@ import { WORKERS, dailyWorker, workerKey } from './workers.ts';
 //   workers  → the newest report of each of the division's workers from the last seven days; a worker with none runs now
 //              (the same code as its 07:00 run, under today's key, so the 07:00 task finds it stored)
 //   ask      → the briefs' data-request route: one model call decides what to ask (the owner's standing asks are in its
-//              rules), each question is a mailbox request that the OTHER division answers with its own tools, and a reply's
-//              numbers count only when that division's tools returned them (replyMetrics)
+//              rules), each question is a mailbox request that the OTHER division answers with its own tools. A reply's
+//              number counts only when that division's tools returned it with its id (replyMetrics), with the view and query
+//              hash it was read from (Reply.sources) and a known unit (traceReplies): it keeps that division's source.
 //   write    → one model call (the plan model, thinking on) writes the summary, one section per worker and the CEO line;
 //              online and salon up to three actions, finance a goal of the week. A program checks every number, every cite,
-//              the goal's starting value and date, the salon/online line and medical words. One correction round.
+//              the goal's starting value and date, the salon/online line and medical words, against exactly the numbers the
+//              report stores (reportMetrics). One correction round.
 //   paths    → finance only: three profit paths through the plan writer and checkPlans, from the division's metrics and the
 //              replies' traced values. No paths that pass means no goal either: the report is written from the rules.
 //   save     → weekly_reports, once per key; the status is the worst of the worker reports' and the division's attention.
 //   deliver  → a mailbox row the head's code hangs from, a status line for the CEO division, a text to the head with one
-//              code (APPROVE <1-3> <code>, 24 hours), an email row and a print row. The delivery lane sends the email and
-//              the printout; nothing here is sent anywhere but the outbox. The third weekly report of a run queues the
-//              weekly CEO digest (digest.ts): one line per division from the managers' CEO lines.
+//              code (APPROVE <1-3> <code>, 24 hours), an email row and a print row. The delivery lane sends the email (to the
+//              owner's address only, until real data is connected) and the printout (when the head has a printer); nothing here
+//              is sent anywhere but the outbox. The third weekly report of a run queues the weekly CEO digest (digest.ts).
 // weekly:<division>:<Monday> is the week's run; weekly:<division>:<Monday>:<task id> the run a REPORT text asked for. Every
-// step is keyed by it, so a task that runs again asks no model twice and sends no second code.
+// step is keyed by it: what to ask (needs:<key>), each question and answer (datareq:/datareply:), the writer's words
+// (weeklywords:<key>) and the paths (weeklypaths:<key>) are kept before the next step, so a task that runs again asks no
+// model twice and sends no second code.
 
 const APPROVAL_MINUTES = 24 * 60;
 const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}…`);
@@ -116,7 +120,7 @@ type Source = {
   read: DivisionData;
   reports: readonly WorkerReportRow[];
   missing: readonly { workerId: WorkerId; reason: string }[];
-  replies: readonly Reply[];
+  replies: readonly WeeklyReply[];
 };
 
 async function makeWeekly(run: Run): Promise<{ row: WeeklyReportRow } | { stop: Outcome }> {
@@ -135,7 +139,7 @@ async function makeWeekly(run: Run): Promise<{ row: WeeklyReportRow } | { stop: 
   const { reports, missing } = await gatherWorkers(run);
   if (reports.length === 0) return { stop: fail(`no ${division} worker has a report this week, so there is nothing to build the weekly report from`) };
   const requests = await decideNeeds(run, read, { purpose: `${division}.weekly_needs`, asks: STANDING_ASKS[division] });
-  const replies = await consult(run, requests);
+  const replies = traceReplies(await consult(run, requests), deps);
   const src: Source = { read, reports, missing, replies };
   const status = worstStatus([...reports.map((r) => r.status), statusOf(read.attention)]);
   const written = await writeOrRule(run, src, status);
@@ -165,8 +169,9 @@ export const workersOf = (division: ManagedDivision): WorkerId[] => WORKER_IDS.f
 
 /**
  * The newest report of each of the division's workers written in the seven days up to the run's day. A worker with none
- * runs now, with the same code and under today's key; one that still has none (its data is not connected, say) is listed
- * with the reason, never left out silently.
+ * runs now, with the same code and under today's key, unless its own task for today is still queued or running (two runs
+ * would each ask the model). One that still has none (its data is not connected, say) is listed with the reason, never
+ * left out silently.
  */
 async function gatherWorkers(run: Run): Promise<{ reports: WorkerReportRow[]; missing: { workerId: WorkerId; reason: string }[] }> {
   const { deps, task, runId, assistant, division, date } = run;
@@ -178,6 +183,10 @@ async function gatherWorkers(run: Run): Promise<{ reports: WorkerReportRow[]; mi
     const found = await deps.store.latestWorkerReport(id, addDays(date, -6), date);
     if (found) {
       reports.push(found);
+      continue;
+    }
+    if ((await deps.store.openTasksByKey([workerKey(id, date)])).open > 0) {
+      missing.push({ workerId: id, reason: `its run for ${date} is still queued or running, so it is not run a second time` });
       continue;
     }
     const outcome = await dailyWorker({ ...task, payload: { job: 'division_worker', worker: id, date } }, deps, runId);
@@ -208,6 +217,66 @@ export const STANDING_ASKS: Record<ManagedDivision, string> = {
   online: "This time you are writing your head's WEEKLY report. The owner's standing asks for it: ask finance for Amazon and Walmart stock (low cover, out of stock, inbound units), so you know when to send goods or restock, and ask salon how long repairs and personalization take at the salon. Ask them every week unless your own numbers already answer them.",
   salon: "This time you are writing your head's WEEKLY report. The owner's standing ask for it: you may ask online how many repairs and personalization orders came in online (online intake), when it would change what you tell your head.",
 };
+
+// ---- What the other divisions answered -----------------------------------------------------------------
+
+/**
+ * A reply as the weekly report uses it. `numbers` are its metric values that can be traced: each with the view and query
+ * hash the ANSWERING division's tool read it from (Reply.sources) and a known unit (the reply's or the catalog's). Only these
+ * reach the writer, the check, the stored metrics, the asked notes and the plan writer, so the words and the stored numbers
+ * are one set. `untraced` counts the values left out. A reply none of whose numbers can be traced could not answer.
+ */
+export type WeeklyReply = Reply & { numbers: readonly Metric[]; untraced: number };
+
+const UNTRACED_REPLY = "the answer's numbers could not be traced to where that division read them";
+
+export function traceReplies(replies: readonly Reply[], deps: Pick<WorkerDeps, 'data' | 'period' | 'now'>): WeeklyReply[] {
+  const info = new Map((deps.data?.catalog ?? []).map((m) => [m.id, m]));
+  const asOf = deps.now().toISOString();
+  return replies.map((r) => {
+    if (!r.ok) return { ...r, numbers: [], untraced: 0 };
+    const values = replyMetrics(r.facts, r.from);
+    const numbers: Metric[] = values.flatMap((v) => {
+      const known = info.get(v.id);
+      const unit = v.unit ?? known?.unit;
+      const at = r.sources?.[v.id];
+      if (!unit || !at) return [];
+      return [{
+        id: v.id, label: clip(known?.label ?? v.id, 120), value: v.value, unit, business: businessOfId(v.id) as Metric['business'], period: deps.period,
+        source: { system: 'zetaris' as const, view: at.view, queryHash: at.queryHash, asOf },
+      }];
+    });
+    const untraced = values.length - numbers.length;
+    return numbers.length > 0 ? { ...r, numbers, untraced } : { ...r, ok: false, facts: null, reason: UNTRACED_REPLY, numbers: [], untraced };
+  });
+}
+
+/** The most numbers a weekly report stores (its contract). */
+const MAX_REPORT_METRICS = 250;
+
+/**
+ * Every number the report may show, exactly as read and with the source it was read from: the division's metrics, then any
+ * worker's that differ, then the replies' traced ones; at most 250. The check accepts exactly these, and the report stores them.
+ */
+export function reportMetrics(src: Pick<Source, 'read' | 'reports' | 'replies'>): Metric[] {
+  const out = new Map<string, Metric>();
+  for (const m of [...src.read.metrics, ...src.reports.flatMap((r) => r.report.metrics), ...src.replies.flatMap((r) => r.numbers)]) {
+    if (!out.has(`${m.id}=${m.value}`)) out.set(`${m.id}=${m.value}`, m);
+  }
+  return [...out.values()].slice(0, MAX_REPORT_METRICS);
+}
+
+const PLAN_UNITS: ReadonlySet<string> = new Set(['usd', 'count', 'ratio', 'percent']);
+
+/** The replies' traced numbers the plan writer may cite: a unit the plan checker can check, not kept out of plan writing, one per id. */
+export function replyPlanMetrics(replies: readonly WeeklyReply[], deps: Pick<WorkerDeps, 'data'>): Metric[] {
+  const info = new Map((deps.data?.catalog ?? []).map((m) => [m.id, m]));
+  const out = new Map<string, Metric>();
+  for (const m of replies.flatMap((r) => r.numbers)) {
+    if (PLAN_UNITS.has(m.unit) && info.get(m.id)?.planUse !== false && !out.has(m.id)) out.set(m.id, m);
+  }
+  return [...out.values()];
+}
 
 // ---- Writing ---------------------------------------------------------------------------------------
 
@@ -242,15 +311,14 @@ const WeeklyWords = z.object({
 });
 export type WeeklyWords = z.infer<typeof WeeklyWords>;
 
-/** The metric values in the replies that could answer: the only numbers from another division the report may use. */
-const replyValues = (replies: readonly Reply[]): ReplyMetric[] => replies.flatMap((r) => (r.ok ? replyMetrics(r.facts, r.from) : []));
 const businessOfId = (id: string) => id.slice(2, id.indexOf('.'));
 const businessOfWorker = (r: WorkerReportRow) => r.report.metrics[0]?.business ?? 'online';
 
 /**
  * The schema, then what a schema cannot state: one section per worker that reported, citing that worker's own ids; actions
  * with different ranks citing ids that were given (online and salon); a goal on one of the division's metrics, starting at its
- * value, due within 7 days (finance); every number traced; no salon and online number in one sentence; no medical words.
+ * value, due within 7 days (finance); every number traced to the numbers the report stores (reportMetrics) or a worker's row
+ * totals; no salon and online number in one sentence; no medical words.
  */
 export function checkWeeklyWords(raw: unknown, src: Source, run: Pick<Run, 'division' | 'date'>): { ok: true; words: WeeklyWords } | { ok: false; objections: string[] } {
   const parsed = WeeklyWords.safeParse(raw);
@@ -268,8 +336,8 @@ export function checkWeeklyWords(raw: unknown, src: Source, run: Pick<Run, 'divi
     for (const id of section.cites) if (!own.has(id)) objections.push(`section ${section.workerId}: "${id}" is not one of that worker's metric ids`);
   }
 
-  const replies = replyValues(src.replies);
-  const known = new Set([...src.read.metrics.map((m) => m.id), ...src.reports.flatMap((r) => r.report.metrics.map((m) => m.id)), ...replies.map((m) => m.id)]);
+  const stored = reportMetrics(src);
+  const known = new Set(stored.map((m) => m.id));
   const ranks = words.actions.map((a) => a.rank);
   if (new Set(ranks).size !== ranks.length) objections.push('action ranks must be different: rank each one 1, 2 or 3, once');
   for (const a of words.actions) for (const id of a.cites) if (!known.has(id)) objections.push(`action ${a.rank}: "${id}" is not a metric id in the data you were given`);
@@ -284,12 +352,10 @@ export function checkWeeklyWords(raw: unknown, src: Source, run: Pick<Run, 'divi
     if (!(goal.by > run.date && goal.by <= addDays(run.date, 7))) objections.push(`goal: "by" must be after ${run.date} and no later than ${addDays(run.date, 7)}`);
   }
 
-  // Every number traces to what was read: the division's metrics and attention, the workers' metrics and row totals, the
-  // replies' metric values (an untagged number in a reply is nobody's). The goal's own title and why may also carry its target.
-  const source = {
-    metrics: src.read.metrics.map(shownMetric), attention: src.read.attention, replies,
-    workers: src.reports.map((r) => ({ metrics: r.report.metrics.map(shownMetric), rows: r.report.rows })),
-  };
+  // Every number traces to what was read and is stored: the report's metrics (the division's, the workers', the replies'
+  // traced values; an untagged or untraced number in a reply is nobody's), the attention and the workers' row totals. The
+  // goal's own title and why may also carry its target.
+  const source = { metrics: stored.map(shownMetric), attention: src.read.attention, workers: src.reports.map((r) => ({ rows: r.report.rows })) };
   const texts: (readonly [string, string])[] = [
     ['summary', words.summary],
     ...words.sections.map((s) => [`section ${s.workerId}`, s.summary] as const),
@@ -300,12 +366,8 @@ export function checkWeeklyWords(raw: unknown, src: Source, run: Pick<Run, 'divi
   objections.push(...numberTrace(texts, source), ...numberTrace(goalTexts, { ...source, goal: [goal?.from, goal?.to] }));
 
   const values = [
-    ...src.read.metrics.map((m) => ({ value: m.value, business: m.business as string })),
-    ...src.reports.flatMap((r) => [
-      ...r.report.metrics.map((m) => ({ value: m.value, business: m.business as string })),
-      ...r.report.rows.flatMap((x) => Object.values(x.totals).map((value) => ({ value, business: businessOfWorker(r) as string }))),
-    ]),
-    ...replies.map((m) => ({ value: m.value, business: businessOfId(m.id) })),
+    ...stored.map((m) => ({ value: m.value, business: m.business as string })),
+    ...src.reports.flatMap((r) => r.report.rows.flatMap((x) => Object.values(x.totals).map((value) => ({ value, business: businessOfWorker(r) as string })))),
   ];
   for (const [label, t] of [...texts, ...goalTexts]) {
     objections.push(...mixedBusinessSentences(label, t, values));
@@ -332,7 +394,7 @@ async function writeWords(run: Run, src: Source, status: ReportStatus): Promise<
     })),
     missingWorkers: src.missing,
     metrics: src.read.metrics.map(shownMetric), attention: src.read.attention,
-    replies: src.replies.map((r) => ({ from: r.from, question: r.question, ...(r.ok ? { facts: r.facts } : { unavailable: r.reason }) })),
+    replies: src.replies.map((r) => ({ from: r.from, question: r.question, ...(r.ok ? { facts: r.numbers.map(({ id, value, unit }) => ({ id, value, unit })) } : { unavailable: r.reason }) })),
     ...(division === 'finance' ? { goalBy: { after: run.date, latest: addDays(run.date, 7) } } : {}),
     ownerLessons: deps.brain.memory(assistant).lessons(10).map((m) => m.content),
   };
@@ -373,45 +435,88 @@ async function writeWords(run: Run, src: Source, status: ReportStatus): Promise<
 type Final = { words: WeeklyWords; paths: ProfitPlans | null; writtenBy: 'model' | 'rule' };
 
 async function writeOrRule(run: Run, src: Source, status: ReportStatus): Promise<Final> {
+  const rule = (): Final => ({ words: ruleWords(run, src, status), paths: null, writtenBy: 'rule' });
+  const words = await wordsOnce(run, src, status);
+  if (!words) return rule();
+  if (run.division !== 'finance' || !words.goal) return { words, paths: null, writtenBy: 'model' };
+  const paths = await pathsOnce(run, src, words);
+  return paths ? { words, paths, writtenBy: 'model' } : rule();
+}
+
+// ---- Keeping what the models wrote ---------------------------------------------------------------------
+
+// What a writer call decided is kept in the mailbox under the run's key before the next step (as decideNeeds keeps its
+// needs), so a task that runs again after a later step failed asks no model twice. Kept words and paths are checked again
+// against this run's numbers; any that no longer pass give the rule-written report, never a second call.
+const KeptWords = z.object({ type: z.literal('weekly_words'), writtenBy: z.enum(['model', 'rule']), words: WeeklyWords.nullable() });
+const KeptPaths = z.object({ type: z.literal('weekly_paths'), paths: ProfitPlans.nullable() });
+
+async function keptNote<T>(run: Run, note: 'weeklywords' | 'weeklypaths', schema: z.ZodType<T>): Promise<T | null> {
+  const row = await run.deps.store.messageByKey(`${note}:${run.key}`);
+  const parsed = row ? schema.safeParse(row.body) : null;
+  return parsed?.success ? parsed.data : null;
+}
+
+async function keepNote(run: Run, note: 'weeklywords' | 'weeklypaths', body: Record<string, unknown>): Promise<void> {
+  await run.deps.store.postMessage({ from: run.assistant, to: run.assistant, kind: 'report', replyTo: null, dedupeKey: `${note}:${run.key}`, body });
+}
+
+/** The writer's checked words, or null for the rule-written report: kept by an earlier run of this report, or one writer call (then kept). */
+async function wordsOnce(run: Run, src: Source, status: ReportStatus): Promise<WeeklyWords | null> {
   const { deps, task, runId, assistant } = run;
   const started = deps.now();
+  const kept = await keptNote(run, 'weeklywords', KeptWords);
+  if (kept) {
+    const again = kept.words ? checkWeeklyWords(kept.words, src, run) : null;
+    const step = { runId, taskId: task.id, step: 'weekly.write', assistant, started };
+    if (again?.ok) {
+      await receipt(deps, { ...step, outcome: 'ok', detail: 'the words an earlier run of this report wrote and checked are used; no model was asked again' });
+      return again.words;
+    }
+    await receipt(deps, {
+      ...step, outcome: kept.writtenBy === 'rule' ? 'ok' : 'refused',
+      detail: again ? `the words an earlier run wrote no longer pass their check, so the report is written from the rules; no model was asked again; ${clip(again.objections.slice(0, 3).join(' | '), 300)}`
+        : 'an earlier run of this report wrote it from the rules; no model was asked again',
+    });
+    return null;
+  }
   const written = await writeWords(run, src, status);
   const base = { runId, taskId: task.id, step: 'weekly.write', assistant, started, model: written.model, inputTokens: written.inputTokens, outputTokens: written.outputTokens };
   if (!written.ok) {
+    await keepNote(run, 'weeklywords', { type: 'weekly_words', writtenBy: 'rule', words: null });
     await receipt(deps, { ...base, outcome: written.why === 'model' ? 'failed' : 'refused', detail: `attempts ${written.attempts}; rule-written report used; ${clip(written.reason, 300)}` });
-    return { words: ruleWords(run, src, status), paths: null, writtenBy: 'rule' };
+    return null;
   }
+  await keepNote(run, 'weeklywords', { type: 'weekly_words', writtenBy: 'model', words: written.words });
   const corrected = written.attempts > 1 && written.firstObjection ? `; first objection: ${clip(written.firstObjection.replace(/\s+/g, ' '), 200)}` : '';
+  const dropped = src.replies.reduce((n, r) => n + r.untraced, 0);
   await receipt(deps, {
     ...base, outcome: 'ok',
-    detail: `attempts ${written.attempts}, ${written.words.sections.length} sections, ${written.words.actions.length} actions${written.words.goal ? ', a goal of the week' : ''}, ${src.replies.filter((r) => r.ok).length} replies used${corrected}`,
+    detail: `attempts ${written.attempts}, ${written.words.sections.length} sections, ${written.words.actions.length} actions${written.words.goal ? ', a goal of the week' : ''}, ${src.replies.filter((r) => r.ok).length} replies used${dropped > 0 ? ` (${dropped} reply numbers left out: no source or unit)` : ''}${corrected}`,
   });
-  if (run.division !== 'finance' || !written.words.goal) return { words: written.words, paths: null, writtenBy: 'model' };
-  const paths = await writePaths(run, src, written.words);
-  return paths ? { words: written.words, paths, writtenBy: 'model' } : { words: ruleWords(run, src, status), paths: null, writtenBy: 'rule' };
+  return written.words;
 }
 
-const PLAN_UNITS: ReadonlySet<string> = new Set(['usd', 'count', 'ratio', 'percent']);
+/** The finance numbers and the replies' traced numbers the plan writer and its checker work from. */
+const planMetrics = (src: Source, deps: WorkerDeps): Metric[] => [...sliceFor('finance', src.read.metrics, deps.data?.catalog), ...replyPlanMetrics(src.replies, deps)];
 
-/**
- * The replies' metric values as metrics the plan writer may cite: only those whose unit is known (from the reply or the
- * catalog), one the plan checker can check, and not kept out of plan writing. The answering division's tools read the
- * same mart, so they carry its view and query hash.
- */
-export function replyPlanMetrics(replies: readonly Reply[], read: Pick<DivisionData, 'view' | 'queryHash'>, deps: Pick<WorkerDeps, 'data' | 'period' | 'now'>): Metric[] {
-  const info = new Map((deps.data?.catalog ?? []).map((m) => [m.id, m]));
-  const out = new Map<string, Metric>();
-  for (const v of replyValues(replies)) {
-    const known = info.get(v.id);
-    const unit = v.unit ?? known?.unit;
-    if (!unit || !PLAN_UNITS.has(unit) || known?.planUse === false || out.has(v.id)) continue;
-    const business = businessOfId(v.id) as Metric['business'];
-    out.set(v.id, {
-      id: v.id, label: known?.label ?? v.id, value: v.value, unit, business, period: deps.period,
-      source: { system: 'zetaris', view: read.view, queryHash: read.queryHash, asOf: deps.now().toISOString() },
-    });
+/** George's checked paths, or null: kept by an earlier run of this report, or one plan writer run (then kept). */
+async function pathsOnce(run: Run, src: Source, words: WeeklyWords): Promise<ProfitPlans | null> {
+  const { deps, task, runId, assistant } = run;
+  const kept = await keptNote(run, 'weeklypaths', KeptPaths);
+  if (!kept) {
+    const paths = await writePaths(run, src, words);
+    await keepNote(run, 'weeklypaths', { type: 'weekly_paths', paths });
+    return paths;
   }
-  return [...out.values()];
+  const again = kept.paths ? checkPlans(kept.paths, planMetrics(src, deps), countNouns(deps.data?.catalog)) : null;
+  await receipt(deps, {
+    runId, taskId: task.id, step: 'weekly.paths', assistant, started: deps.now(), outcome: again?.ok || !kept.paths ? 'ok' : 'refused',
+    detail: again?.ok ? 'the paths an earlier run of this report wrote and checked are used; no model was asked again'
+      : again ? `the paths an earlier run wrote no longer pass their check, so the report is written from the rules; no model was asked again; ${clip(again.errors.slice(0, 3).join(' | '), 300)}`
+        : 'no paths passed their check in an earlier run of this report, so it is written from the rules; no model was asked again',
+  });
+  return again?.ok ? again.plans : null;
 }
 
 /** George's three profit paths toward the goal: the plan writer and its checker (checkPlans), with its own correction round. */
@@ -419,7 +524,7 @@ async function writePaths(run: Run, src: Source, words: WeeklyWords): Promise<Pr
   const { deps, task, runId, assistant } = run;
   const started = deps.now();
   const goal = words.goal!;
-  const metrics = [...sliceFor('finance', src.read.metrics, deps.data?.catalog), ...replyPlanMetrics(src.replies, src.read, deps)];
+  const metrics = planMetrics(src, deps);
   try {
     const result = await writePlans({
       model: deps.models.nvidia, planModel: deps.models.planModel, data: deps.data ?? undefined,
@@ -465,11 +570,10 @@ export function ruleWords(run: Pick<Run, 'division' | 'label'>, src: Pick<Source
 
 // ---- Assembling ------------------------------------------------------------------------------------
 
-/** What the manager asked and what came back: an answer is the reply's metric values as they came, or the reason it could not answer. */
-export function askedNotes(replies: readonly Reply[]): AskedNote[] {
+/** What the manager asked and what came back: an answer is the reply's traced numbers as they came, or the reason it could not answer. */
+export function askedNotes(replies: readonly WeeklyReply[]): AskedNote[] {
   return replies.slice(0, 4).map((r) => {
-    const values = r.ok ? replyMetrics(r.facts, r.from) : [];
-    const answer = r.ok ? values.map((v) => `${v.id} = ${v.value}`).join('; ') : `Could not answer: ${r.reason ?? 'no reason was recorded'}`;
+    const answer = r.ok ? r.numbers.map((v) => `${v.id} = ${v.value}`).join('; ') : `Could not answer: ${r.reason ?? 'no reason was recorded'}`;
     return { division: r.from, question: clip(r.question || 'no question was recorded', 300), answer: clip(answer || 'no metric values', 500), ok: r.ok };
   });
 }
@@ -478,11 +582,6 @@ export function askedNotes(replies: readonly Reply[]): AskedNote[] {
 function assemble(run: Run, src: Source, status: ReportStatus, final: Final): unknown {
   const { division, deps } = run;
   const statusOfWorker = new Map(src.reports.map((r) => [r.worker_id, r.status]));
-  // Every number the report may show, exactly as read: the division's metrics, then any worker's that differ, then the replies'.
-  const metrics = new Map<string, Metric>();
-  for (const m of [...src.read.metrics, ...src.reports.flatMap((r) => r.report.metrics), ...replyPlanMetrics(src.replies, src.read, deps)]) {
-    if (!metrics.has(`${m.id}=${m.value}`)) metrics.set(`${m.id}=${m.value}`, m);
-  }
   return {
     division, weekOf: run.weekOf, manager: MANAGERS[division].manager, head: MANAGERS[division].head, period: deps.period, status, writtenBy: final.writtenBy,
     summary: final.words.summary,
@@ -492,7 +591,7 @@ function assemble(run: Run, src: Source, status: ReportStatus, final: Final): un
     paths: division === 'finance' && final.writtenBy === 'model' ? final.paths : null,
     actions: division === 'finance' ? [] : final.words.actions,
     ceoLine: final.words.ceoLine,
-    metrics: [...metrics.values()].slice(0, 250),
+    metrics: reportMetrics(src),
     workerReportIds: src.reports.map((r) => r.id),
     dataSource: `${src.read.view}#${src.read.queryHash.slice(0, 12)}`,
   };
@@ -505,8 +604,15 @@ const STATUS_WORD: Record<ReportStatus, string> = { normal: 'NORMAL', watch: 'WA
 /** The email's subject (and the outbox row's body): who it is for, whose report, which week. */
 export const weeklySubject = (report: Pick<WeeklyReport, 'head' | 'manager' | 'weekOf'>) => `For ${report.head}: ${report.manager}'s weekly report, week of ${report.weekOf}`;
 
+/**
+ * Where the head finds the full report, as it is now: her view on the console, her printer only when she has one, and the
+ * email going to the owner's address until real data is connected (docs/wave2.md, "Reports").
+ */
+const whereFull = (printer: boolean) =>
+  `The full report is in your view on the console${printer ? ' and on your printer' : ''}. Its email goes to the owner until real data is connected.`;
+
 /** The text to the head: who wrote it, the status, the summary, the goal, the paths or actions (fewer words if it would not fit), then the tail. */
-export function weeklySms(row: WeeklyReportRow, tail: string): string {
+export function weeklySms(row: WeeklyReportRow, tail: string, where: { printer: boolean } = { printer: false }): string {
   const r = row.report;
   const { noun, items } = weeklyItems(r);
   const label = noun === 'path' ? 'Paths' : 'Actions';
@@ -515,7 +621,7 @@ export function weeklySms(row: WeeklyReportRow, tail: string): string {
     ...(words === 'full' ? [r.summary] : []),
     ...(r.goal ? [`Goal of the week: ${r.goal.title} (by ${r.goal.by})`] : []),
     ...(items.length > 0 ? [`${label}:`, ...items.map((i) => `${noun === 'path' ? 'Path' : 'Action'} ${i.rank}: ${i.title}`)] : []),
-    'The full report is in your email and on your printer.',
+    whereFull(where.printer),
   ].join('\n');
   const full = lines('full');
   return fitSms(full.length + 1 + tail.length <= 1600 ? full : lines('short'), tail);
@@ -565,13 +671,14 @@ async function textHead(run: Run, row: WeeklyReportRow, docId: string): Promise<
   const { deps, task, runId, assistant, head, label } = run;
   const number = await deps.store.assistantNumber(assistant);
   if (!isLiveNumber(number)) {
-    await receipt(deps, { runId, taskId: task.id, step: 'weekly.sms', assistant, started: deps.now(), outcome: 'refused', detail: `no text sent: the ${label} assistant has no live number; the report is stored, emailed and printed` });
+    await receipt(deps, { runId, taskId: task.id, step: 'weekly.sms', assistant, started: deps.now(), outcome: 'refused', detail: `no text sent: the ${label} assistant has no live number; the report is stored, and its email and printout are queued` });
     return 'text skipped (no live number)';
   }
   const smsDedupeKey = `weekly-sms:${row.id}`;
+  const where = { printer: Boolean(deps.printers[assistant]) };
   const { noun, items } = weeklyItems(row.report);
   if (items.length === 0) {
-    await text(deps, head, assistant, weeklySms(row, 'Nothing needs your approval this week.'), smsDedupeKey);
+    await text(deps, head, assistant, weeklySms(row, 'Nothing needs your approval this week.', where), smsDedupeKey);
     return `text queued (no ${noun}s)`;
   }
   const code = newCode();
@@ -579,7 +686,7 @@ async function textHead(run: Run, row: WeeklyReportRow, docId: string): Promise<
   const more = ranks.length > 1 ? ` (APPROVE ${ranks.slice(0, 2).join(' ')} ${code} for more)` : '';
   const issued = await deps.store.issueApproval({
     messageId: docId, personId: head.id, action: 'approve_action', code, from: assistant, now: deps.now(), ttlMinutes: APPROVAL_MINUTES, smsDedupeKey,
-    smsBody: weeklySms(row, `Reply APPROVE <1-3> ${code} to approve ${noun === 'action' ? 'an action' : 'a path'}${more}. The code expires in 24 hours.`),
+    smsBody: weeklySms(row, `Reply APPROVE <1-3> ${code} to approve ${noun === 'action' ? 'an action' : 'a path'}${more}. The code expires in 24 hours.`, where),
   });
   return issued.created ? 'text and code issued' : 'text already sent';
 }
@@ -616,7 +723,16 @@ export async function requestWeeklyReports(
   await receipt(deps, { runId, taskId: task.id, step: 'weekly.request', assistant: person.assistant_id, started, outcome: 'ok', detail: `asked for the ${divisions.join(', ')} weekly report of the week of ${mondayOf(date)}` });
   const who = divisions.map((d) => `${MANAGERS[d].manager} (${MANAGERS[d].title})`);
   await reply(owner
-    ? `Asking ${who.length > 1 ? `${who.slice(0, -1).join(', ')} and ${who.at(-1)}` : who[0]} for the weekly report now. Each head gets hers by text, email and printout, and you see it on the console.`
-    : `${MANAGERS[divisions[0]!].manager} is writing your ${MANAGERS[divisions[0]!].title} weekly report now. It will reach you by text, email and printout when it is ready.`);
+    ? `Asking ${andList(who)} for the weekly report now. ${who.length > 1 ? 'Each head sees hers in her view, and you see them all on the console; their emails come' : 'The head sees it in her view, and you see it on the console; its email comes'} to you until real data is connected.`
+    : `${MANAGERS[divisions[0]!].manager} is writing your ${MANAGERS[divisions[0]!].title} weekly report now. It will reach you ${andList(await headChannels(deps, divisions[0]!))} when it is ready.`);
   return done;
+}
+
+const andList = (items: readonly string[]) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0] ?? '');
+
+/** How a head gets her weekly report now: always her view; a text only with a live number; a printout only with a printer (the email goes to the owner). */
+async function headChannels(deps: WorkerDeps, division: ManagedDivision): Promise<string[]> {
+  const assistant = DIVISION_ASSISTANT[division];
+  const live = isLiveNumber(await deps.store.assistantNumber(assistant));
+  return ['in your view on the console', ...(live ? ['by text'] : []), ...(deps.printers[assistant] ? ['on your printer'] : [])];
 }
