@@ -1,5 +1,6 @@
 import { DEFAULT_PERIODS, PERIOD_KEYS, type Division, type Period } from '@fahq/contracts';
 import { CHANNEL_METRICS, CHANNEL_SOURCES, CHANNEL_SOURCE_NAMES, losingGroups, type ChannelSource } from './channels.ts';
+import { CUSTOMER_METRICS, CUSTOMER_SOURCES, CUSTOMER_SOURCE_NAMES, median, repeatGroups, withPrevious, type CustomerSource } from './customers.ts';
 import { OPS_METRICS, OPS_SOURCES, OPS_SOURCE_NAMES, type OpsSource } from './operations.ts';
 import { ONE, counted, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
 import {
@@ -41,13 +42,14 @@ export function martSql(): { create: string; addTable: string; drop: string } {
 export { quoted, type Row };
 
 export type DataVersion = 1 | 2;
-/** Version 1's four sources, the budget sheet, the day-to-day systems of operations.ts and the channels of channels.ts (version 2). */
-export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets' | OpsSource | ChannelSource;
+/** Version 1's four sources, the budget sheet, the day-to-day systems of operations.ts, the channels of channels.ts and the customers of customers.ts (version 2). */
+export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets' | OpsSource | ChannelSource | CustomerSource;
 
 /** Each source: its row view's name (in each version's container), its date column and its data-quality rule. */
 export const SOURCES: Record<Source, SourceSpec> = {
   ...OPS_SOURCES,
   ...CHANNEL_SOURCES,
+  ...CUSTOMER_SOURCES,
   orders: {
     table: 'online_orders',
     date: 'order_date',
@@ -91,8 +93,16 @@ const APPOINTMENTS_V2: SourceSpec = {
     && oneOf(BOOKING_CHANNELS, r.booked_via) && num(r, 'labor_cost_usd') >= 0,
 };
 
-/** A source as a version reads it: the same everywhere but version 2's appointments. */
-export const specOf = (source: Source, version: DataVersion): SourceSpec => (version === 2 && source === 'appointments' ? APPOINTMENTS_V2 : SOURCES[source]);
+/** Version 2's orders also name the customer who placed them (wave 2), and their rule checks it. Version 1's view never names it. */
+const ORDERS_V2: SourceSpec = {
+  ...SOURCES.orders,
+  validSql: `${SOURCES.orders.validSql} AND customer_id LIKE 'demo-cu-%'`,
+  valid: (r) => SOURCES.orders.valid(r) && typeof r.customer_id === 'string' && r.customer_id.startsWith('demo-cu-'),
+};
+
+/** A source as a version reads it: the same everywhere but version 2's appointments and orders. */
+export const specOf = (source: Source, version: DataVersion): SourceSpec =>
+  (version === 2 && source === 'appointments' ? APPOINTMENTS_V2 : version === 2 && source === 'orders' ? ORDERS_V2 : SOURCES[source]);
 
 type Agg =
   | { kind: 'sum'; field: Field }
@@ -101,13 +111,18 @@ type Agg =
   | { kind: 'ratio'; num: Field; den: Field }
   | { kind: 'rejected' }
   /** How many groups (by a column, e.g. products by sku) whose field adds up below zero over the period's rows. */
-  | { kind: 'losing'; by: string; field: Field };
+  | { kind: 'losing'; by: string; field: Field }
+  /** The middle value of a field (Spark's exact percentile at one half), to a tenth; rows where it is NULL are left out. */
+  | { kind: 'median'; field: Field }
+  /** How many groups (by a column, e.g. customers) have at least `atLeast` matching rows. */
+  | { kind: 'repeat'; by: string; atLeast: number };
 
 /** What every metric says about itself, whichever layer computes it. */
 export type MetricAbout = {
   id: string;
   label: string;
-  unit: 'usd' | 'count' | 'ratio';
+  /** minutes, days, seconds and score (wave 2) always carry planUse false: the plan checker cannot check them. */
+  unit: 'usd' | 'count' | 'ratio' | 'minutes' | 'days' | 'seconds' | 'score';
   /**
    * The legal split (salon or online); never changes, and the number validator keeps using it. 'combined' only
    * for a count that belongs to neither, like rows rejected from a source both businesses share; never money.
@@ -230,6 +245,8 @@ export const METRICS: MetricDef[] = [
   ...OPS_METRICS,
   // The channels (wave 2): the marketplaces, the email split and the order lines.
   ...CHANNEL_METRICS,
+  // The customers (wave 2): reviews, Emma's reply speed and the duplicated messages.
+  ...CUSTOMER_METRICS,
 ];
 
 export const METRIC_BY_ID = new Map(METRICS.map((m) => [m.id, m]));
@@ -242,7 +259,7 @@ export const VERSIONS: Record<DataVersion, { periods: readonly Period[]; contain
   },
   2: {
     periods: PERIOD_KEYS, container: CONTAINER_V2, view: PERIOD_VIEW_V2,
-    sources: ['orders', 'appointments', 'ads', 'email', 'budgets', ...OPS_SOURCE_NAMES, ...CHANNEL_SOURCE_NAMES], metrics: METRICS.filter((m) => m.layer === 'period'),
+    sources: ['orders', 'appointments', 'ads', 'email', 'budgets', ...OPS_SOURCE_NAMES, ...CHANNEL_SOURCE_NAMES, ...CUSTOMER_SOURCE_NAMES], metrics: METRICS.filter((m) => m.layer === 'period'),
   },
 };
 
@@ -282,7 +299,9 @@ export function aggSql(d: MetricDef, s: SourceSpec): string {
     case 'count': return `COUNT(CASE WHEN ${cond} THEN 1 END)`;
     case 'ratio': return `ROUND(SUM(${when(agg.num)}) / SUM(${when(agg.den)}), 4)`;
     case 'rejected': return `COUNT(CASE WHEN ${cond} AND NOT COALESCE(${validSql}, FALSE) THEN 1 END)`;
-    case 'losing': throw new Error(`${d.id}: a per-group count is computed by groupedSelect, never inline`);
+    case 'median': return `ROUND(percentile(${when(agg.field)}, 0.5), 1)`;
+    case 'losing':
+    case 'repeat': throw new Error(`${d.id}: a per-group count is computed by groupedSelect, never inline`);
   }
 }
 
@@ -290,7 +309,7 @@ export function aggSql(d: MetricDef, s: SourceSpec): string {
  * A source with a per-group count (a 'losing' metric), still read once: each metric is first added up per period and
  * group, then per period (a sum of the group sums, a count of groups below zero).
  */
-function groupedParts(d: MetricDef, s: SourceSpec, i: number): { inner: string[]; outer: string } {
+export function groupedParts(d: MetricDef, s: SourceSpec, i: number): { inner: string[]; outer: string } {
   const cond = condSql(d, s);
   const when = (f: Field) => `SUM(CASE WHEN ${cond} THEN ${fieldSql(f)} END)`;
   const agg = d.agg;
@@ -300,7 +319,9 @@ function groupedParts(d: MetricDef, s: SourceSpec, i: number): { inner: string[]
     case 'rejected': return { inner: [`COUNT(CASE WHEN ${cond} AND NOT COALESCE(${s.validSql}, FALSE) THEN 1 END) AS p${i}`], outer: `SUM(p${i})` };
     case 'ratio': return { inner: [`${when(agg.num)} AS p${i}`, `${when(agg.den)} AS q${i}`], outer: `ROUND(SUM(p${i}) / SUM(q${i}), 4)` };
     case 'losing': return { inner: [`${when(agg.field)} AS p${i}`], outer: `COUNT(CASE WHEN ROUND(p${i}, 2) < 0 THEN 1 END)` };
-    case 'avg': throw new Error(`${d.id}: an average is not computed per group`);
+    case 'repeat': return { inner: [`COUNT(CASE WHEN ${cond} THEN 1 END) AS p${i}`], outer: `COUNT(CASE WHEN p${i} >= ${agg.atLeast} THEN 1 END)` };
+    case 'avg':
+    case 'median': throw new Error(`${d.id}: an average or a median is not computed per group`);
   }
 }
 
@@ -311,7 +332,8 @@ function sourceSelect(source: Source, version: DataVersion): string {
   const defs = metrics.filter((d) => d.source === source);
   const period = periodCase(s.date, periods);
   const [first, last] = [PERIODS[periods[0]!].from, PERIODS[periods[periods.length - 1]!].to];
-  const rows = `FROM ${container}.${s.table} WHERE ${s.date} BETWEEN '${first}' AND '${last}'`;
+  const table = `${container}.${s.table}`;
+  const rows = `FROM ${version === 2 && s.from ? s.from(table) : table} WHERE ${s.date} BETWEEN '${first}' AND '${last}'`;
   const grouped = defs.find((d) => d.agg.kind === 'losing')?.agg;
   if (grouped?.kind === 'losing') {
     const parts = defs.map((d, i) => groupedParts(d, s, i));
@@ -363,10 +385,12 @@ export function sourceRows(b: SourceRows): Record<Source, readonly Row[]> {
   return {
     orders: b.online.orders, appointments: b.salon.appointments, ads: b.marketing.ads, email: b.marketing.email,
     budgets: y?.finance.budgets ?? [], order_costs: y?.online.orderCosts ?? [], refunds: y?.online.refunds ?? [],
-    checkouts: y?.online.checkouts ?? [], inventory: y?.online.inventory ?? [], messages: y?.support.messages ?? [],
+    checkouts: y?.online.checkouts ?? [], inventory: y?.online.inventory ?? [],
     repairs: y?.salon.repairs ?? [], invoices: y?.finance.invoices ?? [],
     marketplace_sales: y?.marketplace.sales ?? [], marketplace_ads: y?.marketplace.ads ?? [], marketplace_stock: y?.marketplace.stock ?? [],
     email_messages: y?.marketing.emailMessages ?? [], order_lines: y?.online.orderLines ?? [],
+    // The inbox as the period view reads it: each message with the customer's previous one (the view's window).
+    messages: withPrevious(y?.support.messages ?? []), reviews: y?.online.reviews ?? [],
   };
 }
 
@@ -384,7 +408,7 @@ export function aggregate(d: MetricDef, rows: readonly Row[], version: DataVersi
     .filter((r) => !d.test || d.test.js(r))
     .filter(inWindow);
   const a = d.agg;
-  if (matching.length === 0 && (a.kind === 'sum' || a.kind === 'avg' || a.kind === 'ratio')) return undefined;
+  if (matching.length === 0 && (a.kind === 'sum' || a.kind === 'avg' || a.kind === 'ratio' || a.kind === 'median')) return undefined;
   // A ratio over a zero denominator is NULL in Zetaris (no row), as here.
   if (a.kind === 'ratio' && sum(matching, a.den) === 0) return undefined;
   return a.kind === 'sum' ? round(sum(matching, a.field), 2)
@@ -392,6 +416,8 @@ export function aggregate(d: MetricDef, rows: readonly Row[], version: DataVersi
     : a.kind === 'count' ? matching.length
     : a.kind === 'ratio' ? round(sum(matching, a.num) / sum(matching, a.den), 4)
     : a.kind === 'losing' ? losingGroups(matching, a.by, a.field)
+    : a.kind === 'median' ? median(matching.map(fieldJs(a.field)))
+    : a.kind === 'repeat' ? repeatGroups(matching, a.by, a.atLeast)
     : matching.filter((r) => !s.valid(r)).length;
 }
 

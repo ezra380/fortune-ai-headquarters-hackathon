@@ -27,7 +27,7 @@ export const V2_TABLES = [
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'orders_v2', path: '/v2/online/orders', view: 'online_orders',
-    cols: ['order_id', 'order_date', 'product_line', 'channel', 'units', 'gross_usd', 'discount_usd', 'net_usd', 'cost_usd'],
+    cols: ['order_id', 'order_date', 'product_line', 'channel', 'units', 'gross_usd', 'discount_usd', 'net_usd', 'cost_usd', 'customer_id'],
   },
   {
     db: 'FORTUNE_DEMO_MARKETING', table: 'ads_v2', path: '/v2/marketing/ads', view: 'marketing_ads',
@@ -49,7 +49,7 @@ export const V2_TABLES = [
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'refunds', path: '/v2/online/refunds', view: 'online_refunds',
-    cols: ['refund_id', 'order_id', 'refund_date', 'amount_usd', 'reason'],
+    cols: ['refund_id', 'order_id', 'refund_date', 'amount_usd', 'reason', 'customer_id'],
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'checkouts', path: '/v2/online/checkouts', view: 'online_checkouts',
@@ -61,7 +61,7 @@ export const V2_TABLES = [
   },
   {
     db: 'FORTUNE_DEMO_SUPPORT', table: 'messages', path: '/v2/support/messages', view: 'support_messages',
-    cols: ['message_id', 'thread_id', 'channel', 'direction', 'received_date', 'received_at', 'first_reply_at', 'intent', 'converted_order_id'],
+    cols: ['message_id', 'thread_id', 'channel', 'direction', 'received_date', 'received_at', 'first_reply_at', 'intent', 'converted_order_id', 'customer_id', 'answered_by'],
   },
   {
     db: 'FORTUNE_DEMO_SALON', table: 'repair_tickets', path: '/v2/salon/repairs', view: 'salon_repairs',
@@ -91,6 +91,11 @@ export const V2_TABLES = [
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'order_lines', path: '/v2/online/order_lines', view: 'online_order_lines',
     cols: ['line_id', 'order_id', 'order_date', 'sku', 'product_line', 'units', 'price_usd', 'unit_cost_usd', 'refunded_usd'],
+  },
+  // The customers (wave 2): the store's reviews. Orders, refunds and messages above now name the customer.
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'reviews', path: '/v2/online/reviews', view: 'online_reviews',
+    cols: ['review_id', 'review_date', 'order_id', 'customer_id', 'sku', 'rating', 'topic'],
   },
 ] as const;
 

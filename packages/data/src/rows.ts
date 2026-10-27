@@ -1,9 +1,10 @@
 import { PERIOD_KEYS, type RowRead, type RowsData } from '@fahq/contracts';
 import { LINE_COST, LINE_PROFIT, LINE_REVENUE, LOW_COVER, STOCK_OUT } from './channels.ts';
+import { YEAR_TO_DATE } from './customers.ts';
 import { CONTAINER_V2, round, sourceRows, specOf, type Source, type SourceRows } from './finance-sql.ts';
 import { FINISHED, STILL_OPEN, UNPAID, clock, days, inDays, moment } from './operations.ts';
 import { both, isNull, num, type Cond, type Row } from './sql.ts';
-import { AS_OF, AS_OF_END, INVOICE_BUSINESSES, LAST_WEEK, MARKETPLACES, PERIODS } from './synthetic.ts';
+import { AS_OF, AS_OF_END, INVOICE_BUSINESSES, LAST_WEEK, MARKETPLACES, PERIODS, REFUND_REASONS } from './synthetic.ts';
 import { rowViewBody } from './zetaris-objects.ts';
 
 // The rows behind the standing numbers (version 2): which repairs are late, which invoices are overdue, which
@@ -174,12 +175,23 @@ function marketplaceStock(read: Extract<RowRead, { table: 'marketplace_stock' }>
 
 const LINES = `${CONTAINER_V2}.online_order_lines`;
 const STOCK = `${CONTAINER_V2}.online_inventory`;
+const REVIEWS = `${CONTAINER_V2}.online_reviews`;
+/** Spark's sorted, comma-joined distinct values of a column (a customer's topics), and its TypeScript twin. */
+const joinedSql = (col: string) => `concat_ws(',', sort_array(collect_set(${col})))`;
+const joined = (values: readonly unknown[]) => [...new Set(values.map(String))].sort().join(',');
+/** Each product's rating: the average of all its valid reviews to the data date, and how many there are. */
+const ratingsOf = (b: SourceRows) => {
+  const out = new Map<string, number[]>();
+  for (const v of sourceRows(b).reviews.filter((r) => specOf('reviews', 2).valid(r))) out.set(str(v, 'sku'), [...(out.get(str(v, 'sku')) ?? []), num(v, 'rating')]);
+  return out;
+};
 
 /**
  * Each store product's period from its order lines, by order date: units, revenue, cost, refunds on those orders
  * (to the data date), profit after them, margin and refund rate; and its views in the week before the period's last
- * day, from the inventory. One statement: the valid lines of the period, added up per product, joined to that day's
- * valid stock rows.
+ * day, from the inventory; and its rating (wave 2): the average of all its reviews to the data date, and how many. One
+ * statement: the valid lines of the period, added up per product, joined to that day's valid stock rows and the
+ * product's valid reviews.
  */
 function products(read: Extract<RowRead, { table: 'products' }>): RowQuery {
   const { from, to } = PERIODS[read.period];
@@ -189,15 +201,18 @@ function products(read: Extract<RowRead, { table: 'products' }>): RowQuery {
   const cols: Col[] = [
     text('sku', 'sku'), text('productLine', 'product_line'), column('units', 'units'), column('revenueUsd', 'revenue'), column('costUsd', 'cost'),
     column('refundsUsd', 'refunds'), column('profitUsd', 'profit'), { ...column('margin', 'margin'), nullable: true }, { ...column('refundRate', 'refund_rate'), nullable: true },
-    { ...column('views7d', 'views_7d'), nullable: true },
+    { ...column('views7d', 'views_7d'), nullable: true }, { ...column('avgRating', 'avg_rating'), nullable: true }, column('reviews', 'reviews'),
   ];
   const sql = `SELECT l.sku AS c0, l.product_line AS c1, SUM(l.units) AS c2, ROUND(SUM(${rev}), 2) AS c3, ROUND(SUM(${cost}), 2) AS c4, ROUND(SUM(refunded_usd), 2) AS c5, `
-    + `ROUND(SUM(${profit}), 2) AS c6, ROUND(SUM(${profit}) / NULLIF(SUM(${rev}), 0), 4) AS c7, ROUND(SUM(refunded_usd) / NULLIF(SUM(${rev}), 0), 4) AS c8, MAX(i.views_7d) AS c9 `
+    + `ROUND(SUM(${profit}), 2) AS c6, ROUND(SUM(${profit}) / NULLIF(SUM(${rev}), 0), 4) AS c7, ROUND(SUM(refunded_usd) / NULLIF(SUM(${rev}), 0), 4) AS c8, MAX(i.views_7d) AS c9, `
+    + `MAX(v.avg_rating) AS c10, COALESCE(MAX(v.reviews), 0) AS c11 `
     + `FROM (SELECT sku, product_line, units, price_usd, unit_cost_usd, refunded_usd FROM ${LINES} WHERE (${s.validSql}) AND order_date BETWEEN '${from}' AND '${to}') l `
     + `LEFT JOIN (SELECT sku AS stock_sku, views_7d FROM ${STOCK} WHERE (${stock.validSql}) AND snapshot_date = '${to}') i ON i.stock_sku = l.sku `
+    + `LEFT JOIN (SELECT sku AS rated_sku, ROUND(AVG(rating), 2) AS avg_rating, COUNT(*) AS reviews FROM ${REVIEWS} WHERE (${specOf('reviews', 2).validSql}) GROUP BY sku) v ON v.rated_sku = l.sku `
     + `GROUP BY l.sku, l.product_line ORDER BY c6${read.sort === 'best' ? ' DESC' : ''}, c0`;
   const rows = (b: SourceRows): Out[] => {
     const all = sourceRows(b);
+    const ratings = ratingsOf(b);
     const views = new Map(all.inventory.filter((r) => stock.valid(r) && r.snapshot_date === to).map((r) => [str(r, 'sku'), num(r, 'views_7d')]));
     const bySku = new Map<string, Row[]>();
     for (const r of all.order_lines.filter((x) => s.valid(x) && str(x, 'order_date') >= from && str(x, 'order_date') <= to)) bySku.set(str(r, 'sku'), [...(bySku.get(str(r, 'sku')) ?? []), r]);
@@ -208,15 +223,89 @@ function products(read: Extract<RowRead, { table: 'products' }>): RowQuery {
         sku, productLine: str(lines[0]!, 'product_line'), units: add((r) => num(r, 'units')), revenueUsd: round(revenue, 2), costUsd: round(add(LINE_COST.js), 2),
         refundsUsd: round(refunds, 2), profitUsd: round(made, 2), margin: revenue ? round(made / revenue, 4) : null, refundRate: revenue ? round(refunds / revenue, 4) : null,
         views7d: views.get(sku) ?? null,
+        avgRating: ratings.has(sku) ? round(ratings.get(sku)!.reduce((t, x) => t + x, 0) / ratings.get(sku)!.length, 2) : null, reviews: ratings.get(sku)?.length ?? 0,
       };
     });
   };
   return {
     source: 'order_lines', view: 'online_order_lines', cols, where: cond('TRUE', () => true), order: read.sort === 'best' ? ['-profitUsd', 'sku'] : ['profitUsd', 'sku'],
-    grouped: { sql, views: ['online_order_lines', 'online_inventory'], rows },
+    grouped: { sql, views: ['online_order_lines', 'online_inventory', 'online_reviews'], rows },
     totals: (rows) => ({
       count: rows.length, units: rows.reduce((t, r) => t + Number(r.units), 0), revenueUsd: sumOf(rows, 'revenueUsd'), costUsd: sumOf(rows, 'costUsd'),
       refundsUsd: sumOf(rows, 'refundsUsd'), profitUsd: sumOf(rows, 'profitUsd'), losing: rows.filter((r) => Number(r.profitUsd) < 0).length,
+    }),
+  };
+}
+
+// ---- The customers (wave 2) -------------------------------------------------------------------
+
+const REFUNDS = `${CONTAINER_V2}.online_refunds`;
+const ORDERS = `${CONTAINER_V2}.online_orders`;
+const MESSAGES = `${CONTAINER_V2}.support_messages`;
+
+/** A row's numbers per refund reason, every reason named (none: 0), so the totals never add a business's money across another's. */
+const perReason = (rows: readonly Out[], f: (mine: readonly Out[]) => number) => Object.fromEntries(REFUND_REASONS.map((x) => [x, f(rows.filter((r) => r.reason === x))]));
+
+/**
+ * Each refund issued in the period, oldest first: its order, the customer (a synthetic id), the order's products, the
+ * reason, amount and days after the sale; and the customer's refunds in the 365 days to the data date, reviews (how
+ * many, the lowest rating, their topics) and messages to the shop (how many, their topics). Never a name or a message's
+ * text. One statement: the valid refunds of the period joined to their orders, the orders' lines and, per customer,
+ * the year's refunds, the reviews and the inbound messages, each from its source's valid rows.
+ */
+function returnCases(read: Extract<RowRead, { table: 'return_cases' }>): RowQuery {
+  const { from, to } = PERIODS[read.period];
+  const valid = (source: Source) => `(${specOf(source, 2).validSql})`;
+  const cols: Col[] = [
+    text('refundId', 'refund_id'), text('orderId', 'order_id'), text('customerId', 'customer_id'), text('skus', 'skus'), text('reason', 'reason'),
+    column('amountUsd', 'amount_usd'), text('refundDate', 'refund_date'), column('daysAfterSale', 'days'), column('refunds365d', 'refunds_365d'),
+    column('reviews', 'reviews'), { ...column('lowestRating', 'lowest_rating'), nullable: true }, text('reviewTopics', 'review_topics'),
+    column('messages', 'messages'), text('messageTopics', 'message_topics'),
+  ];
+  const sql = 'SELECT f.refund_id AS c0, f.order_id AS c1, f.customer_id AS c2, l.skus AS c3, f.reason AS c4, f.amount_usd AS c5, f.refund_date AS c6, '
+    + 'DATEDIFF(f.refund_date, o.order_date) AS c7, COALESCE(y.refunds_365d, 0) AS c8, COALESCE(v.reviews, 0) AS c9, v.lowest_rating AS c10, v.review_topics AS c11, '
+    + 'COALESCE(m.messages, 0) AS c12, m.message_topics AS c13 '
+    + `FROM (SELECT refund_id, order_id, customer_id, reason, amount_usd, refund_date FROM ${REFUNDS} WHERE ${valid('refunds')} AND refund_date BETWEEN '${from}' AND '${to}') f `
+    + `JOIN (SELECT order_id AS placed_id, order_date FROM ${ORDERS} WHERE ${valid('orders')}) o ON o.placed_id = f.order_id `
+    + `LEFT JOIN (SELECT order_id AS lined_id, ${joinedSql('sku')} AS skus FROM ${LINES} WHERE ${valid('order_lines')} GROUP BY order_id) l ON l.lined_id = f.order_id `
+    + `LEFT JOIN (SELECT customer_id AS refunded_id, COUNT(*) AS refunds_365d FROM ${REFUNDS} WHERE ${valid('refunds')} AND refund_date BETWEEN '${YEAR_TO_DATE.from}' AND '${YEAR_TO_DATE.to}' GROUP BY customer_id) y ON y.refunded_id = f.customer_id `
+    + `LEFT JOIN (SELECT customer_id AS reviewer_id, COUNT(*) AS reviews, MIN(rating) AS lowest_rating, ${joinedSql('topic')} AS review_topics FROM ${REVIEWS} WHERE ${valid('reviews')} GROUP BY customer_id) v ON v.reviewer_id = f.customer_id `
+    + `LEFT JOIN (SELECT customer_id AS writer_id, COUNT(*) AS messages, ${joinedSql('intent')} AS message_topics FROM ${MESSAGES} WHERE ${valid('messages')} AND direction = 'inbound' GROUP BY customer_id) m ON m.writer_id = f.customer_id `
+    + 'ORDER BY c6, c0';
+  const rows = (b: SourceRows): Out[] => {
+    const all = sourceRows(b);
+    const ok = (source: Source) => (r: Row) => specOf(source, 2).valid(r);
+    const byCustomer = (rs: readonly Row[]) => {
+      const out = new Map<string, Row[]>();
+      for (const r of rs) out.set(str(r, 'customer_id'), [...(out.get(str(r, 'customer_id')) ?? []), r]);
+      return out;
+    };
+    const placed = new Map(all.orders.filter(ok('orders')).map((o) => [str(o, 'order_id'), str(o, 'order_date')]));
+    const lines = new Map<string, Row[]>();
+    for (const l of all.order_lines.filter(ok('order_lines'))) lines.set(str(l, 'order_id'), [...(lines.get(str(l, 'order_id')) ?? []), l]);
+    const year = byCustomer(all.refunds.filter((f) => ok('refunds')(f) && str(f, 'refund_date') >= YEAR_TO_DATE.from && str(f, 'refund_date') <= YEAR_TO_DATE.to));
+    const reviews = byCustomer(all.reviews.filter(ok('reviews')));
+    const messages = byCustomer(all.messages.filter((m) => ok('messages')(m) && m.direction === 'inbound'));
+    return all.refunds.filter((f) => ok('refunds')(f) && str(f, 'refund_date') >= from && str(f, 'refund_date') <= to && placed.has(str(f, 'order_id'))).map((f) => {
+      const [orderId, customerId] = [str(f, 'order_id'), str(f, 'customer_id')];
+      const [theirReviews, theirMessages] = [reviews.get(customerId) ?? [], messages.get(customerId) ?? []];
+      return {
+        refundId: str(f, 'refund_id'), orderId, customerId, skus: lines.has(orderId) ? joined(lines.get(orderId)!.map((l) => l.sku)) : null, reason: str(f, 'reason'),
+        amountUsd: num(f, 'amount_usd'), refundDate: str(f, 'refund_date'), daysAfterSale: days(placed.get(orderId)!, str(f, 'refund_date')),
+        refunds365d: year.get(customerId)?.length ?? 0, reviews: theirReviews.length,
+        lowestRating: theirReviews.length ? Math.min(...theirReviews.map((v) => num(v, 'rating'))) : null, reviewTopics: theirReviews.length ? joined(theirReviews.map((v) => v.topic)) : null,
+        messages: theirMessages.length, messageTopics: theirMessages.length ? joined(theirMessages.map((m) => m.intent)) : null,
+      };
+    });
+  };
+  return {
+    source: 'refunds', view: 'online_refunds', cols, where: cond('TRUE', () => true), order: ['refundDate', 'refundId'],
+    grouped: { sql, views: ['online_refunds', 'online_orders', 'online_order_lines', 'online_reviews', 'support_messages'], rows },
+    // Online money only; the port adds it up per reason so a script never does.
+    totals: (rows) => ({
+      count: rows.length, amountUsd: sumOf(rows, 'amountUsd'), customers: new Set(rows.map((r) => r.customerId)).size,
+      repeatCustomers: new Set(rows.filter((r) => Number(r.refunds365d) >= 2).map((r) => r.customerId)).size,
+      byReason: perReason(rows, (mine) => mine.length), amountByReason: perReason(rows, (mine) => sumOf(mine, 'amountUsd')),
     }),
   };
 }
@@ -250,6 +339,9 @@ export function checkRowRead(input: RowRead): RowRead {
       if (!PERIOD_KEYS.includes(input.period)) throw new Error(`${where}: period must be one of ${PERIOD_KEYS.join(', ')}`);
       if (!['best', 'worst'].includes(input.sort)) throw new Error(`${where}: sort must be best or worst`);
       return { table: 'products', period: input.period, sort: input.sort };
+    case 'return_cases':
+      if (!PERIOD_KEYS.includes(input.period)) throw new Error(`${where}: period must be one of ${PERIOD_KEYS.join(', ')}`);
+      return { table: 'return_cases', period: input.period };
     default:
       throw new Error(`${where}: there is no such row table`);
   }
@@ -263,6 +355,7 @@ export function rowQuery(read: RowRead): RowQuery {
     case 'low_stock': return lowStock();
     case 'marketplace_stock': return marketplaceStock(read);
     case 'products': return products(read);
+    case 'return_cases': return returnCases(read);
   }
 }
 

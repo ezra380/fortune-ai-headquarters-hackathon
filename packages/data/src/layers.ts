@@ -1,9 +1,10 @@
 import { PERIOD_KEYS, type Period } from '@fahq/contracts';
 import {
-  CHANNEL_LABEL, CONTAINER_V2, PERIOD_VIEW_V2, aggSql, aggregate, computeAll, quoted, round, sourceRows, specOf, unpivot,
+  CHANNEL_LABEL, CONTAINER_V2, PERIOD_VIEW_V2, aggSql, aggregate, computeAll, groupedParts, quoted, round, sourceRows, specOf, unpivot,
   type MetricAbout, type MetricDef, type Source, type SourceRows,
 } from './finance-sql.ts';
 import { CHANNEL_STANDING } from './channels.ts';
+import { CUSTOMER_STANDING } from './customers.ts';
 import { OPS_STANDING } from './operations.ts';
 import { AD_CHANNELS, AS_OF, LAST_WEEK } from './synthetic.ts';
 
@@ -106,6 +107,8 @@ export const STANDING_METRICS: MetricDef[] = [
   ...OPS_STANDING,
   // The channels (wave 2): each marketplace warehouse's stock on the data date.
   ...CHANNEL_STANDING,
+  // The customers (wave 2): the repeat returners over the year to the data date.
+  ...CUSTOMER_STANDING,
 ];
 
 // ---- SQL ----------------------------------------------------------------------------------
@@ -145,10 +148,19 @@ export function derivedViewBody(): string {
   return unpivot(DERIVED, lagged, 'derived');
 }
 
-/** One source's standing numbers: every row of the source, no period, one scan. */
+/**
+ * One source's standing numbers: every row of the source, no period, one scan. A per-group count (the repeat
+ * returners) adds each group up first, then counts the groups, still in the one read.
+ */
 function standingSelect(source: Source): string {
   const s = specOf(source, 2);
   const defs = STANDING_METRICS.filter((d) => d.source === source);
+  const grouped = defs.find((d) => d.agg.kind === 'repeat')?.agg;
+  if (grouped?.kind === 'repeat') {
+    const parts = defs.map((d, i) => groupedParts(d, s, i));
+    const inner = `SELECT ${parts.flatMap((p) => p.inner).join(', ')} FROM ${CONTAINER_V2}.${s.table} GROUP BY ${grouped.by}`;
+    return unpivot(defs, `SELECT '${STANDING_PERIOD}' AS period, ${parts.map((p, i) => `CAST(${p.outer} AS DOUBLE) AS m${i}`).join(', ')} FROM (${inner}) g_${source}`, source);
+  }
   const wide = `SELECT '${STANDING_PERIOD}' AS period, ${defs.map((d, i) => `CAST(${aggSql(d, s)} AS DOUBLE) AS m${i}`).join(', ')} FROM ${CONTAINER_V2}.${s.table}`;
   return unpivot(defs, wide, source);
 }

@@ -7,8 +7,13 @@ export type Row = Record<string, unknown>;
 export type Field = string | { sql: string; js: (r: Row) => number };
 /** A condition on a row beyond equality, with its TypeScript twin. */
 export type Cond = { sql: string; js: (r: Row) => boolean };
-/** A source's row view (in each version's container), the column that dates a row, and its data-quality rule. */
-export type SourceSpec = { table: string; date: string; validSql: string; valid: (r: Row) => boolean };
+/**
+ * A source's row view (in each version's container), the column that dates a row, and its data-quality rule.
+ * `from`: when a period metric needs a column computed across rows (a window, such as a customer's previous message),
+ * the rows as the period view reads them: a select over the row view that adds those columns. Its TypeScript twin
+ * adds the same columns in sourceRows.
+ */
+export type SourceSpec = { table: string; date: string; validSql: string; valid: (r: Row) => boolean; from?: (rowView: string) => string };
 
 export const quoted = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', ');
 export const num = (r: Row, k: string) => Number(r[k]);

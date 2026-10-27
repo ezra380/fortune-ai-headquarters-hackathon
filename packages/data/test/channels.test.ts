@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { PERIOD_KEYS, type Period } from '@fahq/contracts';
 import { describe, expect, it } from 'vitest';
 import { CHANNEL_METRICS, CHANNEL_SOURCE_NAMES, CHANNEL_STANDING, COVER_DAYS } from '../src/channels.ts';
+import { CUSTOMER_METRICS, CUSTOMER_STANDING } from '../src/customers.ts';
 import { CATALOG_V2, attentionFor } from '../src/divisions.ts';
 import { SOURCES, financeViewBody, sourceRows } from '../src/finance-sql.ts';
 import { computeLayers, standingViewBody } from '../src/layers.ts';
@@ -60,9 +61,10 @@ describe('the channels: data-quality rules', () => {
 
 describe('every number the base served keeps its value', () => {
   // All 1,224 values of hq/divisions-merge @ 16449bf (period and derived in every period, and standing), computed by
-  // running that commit's own code (git archive 16449bf packages/data/src): sha256 of the JSON, keys sorted.
-  it('the channels add numbers of their own and move none of the others', () => {
-    const added = new Set([...CHANNEL_METRICS, ...CHANNEL_STANDING].map((m) => m.id));
+  // running that commit's own code (git archive 16449bf packages/data/src): sha256 of the JSON, keys sorted. Slice 2's
+  // customers (new columns on orders, refunds and messages, the reviews) move none of them either.
+  it('the channels and the customers add numbers of their own and move none of the others', () => {
+    const added = new Set([...CHANNEL_METRICS, ...CHANNEL_STANDING, ...CUSTOMER_METRICS, ...CUSTOMER_STANDING].map((m) => m.id));
     const flat: Record<string, number> = {};
     for (const layer of ['period', 'derived'] as const) for (const [p, m] of layers[layer]) for (const [id, v] of m) if (!added.has(id)) flat[`${layer}|${p}|${id}`] = v;
     for (const [id, v] of layers.standing) if (!added.has(id)) flat[`standing|${id}`] = v;

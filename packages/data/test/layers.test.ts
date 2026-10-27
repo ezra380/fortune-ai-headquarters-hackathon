@@ -83,7 +83,9 @@ describe('standing view', () => {
       expect(body.split(`fortune_hq_v2.${SOURCES[source].table}`).length - 1).toBe(1);
     }
     expect(body.split("SELECT 'standing' AS period").length - 1).toBe(new Set(STANDING_METRICS.map((d) => d.source)).size);
-    expect(body).not.toContain('GROUP BY');
+    // Only the repeat returners add up per customer first (wave 2), still in the refunds' one read.
+    expect(body.split('GROUP BY').length - 1).toBe(1);
+    expect(body).toContain('FROM fortune_hq_v2.online_refunds GROUP BY customer_id) g_refunds');
     expect(body).not.toContain(';');
     for (const d of STANDING_METRICS) expect(body.split(`'${d.id}'`).length - 1).toBe(1);
   });

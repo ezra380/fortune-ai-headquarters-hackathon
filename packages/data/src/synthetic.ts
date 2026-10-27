@@ -72,6 +72,10 @@ export const EMAIL_STEPS: Record<string, readonly string[]> = {
   'Weekly edit (demo)': ['Weekly edit (demo)'],
 };
 export const EMAIL_NAMES = Object.keys(EMAIL_STEPS);
+/** What a review is about, from a fixed list; a review has a rating and a topic, never text. */
+export const REVIEW_TOPICS = ['fit', 'color', 'quality', 'shipping', 'service', 'other'] as const;
+/** Who sent the first answer to a customer's message: Emma (the online assistant), the salon, an automatic reply, someone else. */
+export const ANSWERERS = ['emma', 'salon', 'auto', 'other'] as const;
 
 /** Every enumerated column of every source, by column name, with its allowed values (the no-medical guard reads it). */
 export const SOURCE_ENUMS = {
@@ -79,7 +83,7 @@ export const SOURCE_ENUMS = {
   service: SALON_SERVICES, reason: REFUND_REASONS, recovered_via: RECOVERY_CHANNELS, direction: MESSAGE_DIRECTIONS, booked_via: BOOKING_CHANNELS,
   intent: MESSAGE_INTENTS, repair_type: REPAIR_TYPES, status: [...REPAIR_STATUSES, 'completed', 'no_show', 'approved', 'proposed'],
   location: SALON_LOCATIONS, business: INVOICE_BUSINESSES, supplier_id: SUPPLIERS, kind: ['flow', 'campaign'],
-  marketplace: MARKETPLACES, name: EMAIL_NAMES, step: Object.values(EMAIL_STEPS).flat(),
+  marketplace: MARKETPLACES, name: EMAIL_NAMES, step: Object.values(EMAIL_STEPS).flat(), topic: REVIEW_TOPICS, answered_by: ANSWERERS,
 } as const;
 
 /**
@@ -168,6 +172,16 @@ export type EmailMessage = {
 export type OrderLine = {
   line_id: string; order_id: string; order_date: string; sku: string; product_line: string; units: number; price_usd: number; unit_cost_usd: number; refunded_usd: number;
 };
+/** A store customer's synthetic id (demo-cu-…): never a name, an address or a phone number. */
+type CustomerId = { customer_id: string };
+/** Version 2's order: every version 1 column and value unchanged, plus the customer who placed it. */
+export type StoreOrder = OnlineOrder & CustomerId;
+/** Version 2's refund: issued to the customer who placed the order. */
+export type CustomerRefund = Refund & CustomerId;
+/** Version 2's support message: the customer it came from (or the shop's follow-up went to) and who first answered it (none when unanswered). */
+export type InboxMessage = SupportMessage & CustomerId & { answered_by: (typeof ANSWERERS)[number] | null };
+/** A customer's review of one product of an order: a rating from 1 to 5 and a topic from a fixed list. No text. */
+export type Review = { review_id: string; review_date: string; order_id: string; customer_id: string; sku: string; rating: number; topic: (typeof REVIEW_TOPICS)[number] };
 export type SyntheticBusiness = {
   generatedFor: string; seed: number;
   online: { orders: OnlineOrder[] };
@@ -185,11 +199,13 @@ export type Channels = {
   emailMessages: EmailMessage[];
   orderLines: OrderLine[];
 };
-/** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet, the operations and the channels. */
-export type SyntheticYear = Omit<SyntheticBusiness, 'salon'> & {
-  online: Pick<Operations, 'orderCosts' | 'refunds' | 'checkouts' | 'inventory'> & Pick<Channels, 'orderLines'>;
+/** The store's customers wave 2 adds (generateCustomers): who placed each order, got each refund and sent each message, and their reviews. */
+export type Customers = { orders: StoreOrder[]; refunds: CustomerRefund[]; messages: InboxMessage[]; reviews: Review[] };
+/** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet, the operations, the channels and the customers. */
+export type SyntheticYear = Omit<SyntheticBusiness, 'salon' | 'online'> & {
+  online: { orders: StoreOrder[]; refunds: CustomerRefund[]; reviews: Review[] } & Pick<Operations, 'orderCosts' | 'checkouts' | 'inventory'> & Pick<Channels, 'orderLines'>;
   salon: { appointments: SalonVisit[] } & Pick<Operations, 'repairs'>;
-  support: Pick<Operations, 'messages'>;
+  support: { messages: InboxMessage[] };
   finance: { budgets: BudgetRow[] } & Pick<Operations, 'invoices'>;
   marketing: Pick<Channels, 'emailMessages'>;
   marketplace: Channels['marketplace'];
@@ -850,22 +866,135 @@ export function generateChannels(orders: readonly OnlineOrder[], email: readonly
   };
 }
 
-/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions, generateOperations and generateChannels add. */
+// ---- The customers (wave 2, for Online) ------------------------------------------------------
+// Who placed each store order, got each refund and sent each message, and the reviews customers left. Each draws from
+// its own named stream and only reads the rows that already exist: no order, refund or message moves, and no number
+// counted before changes. A customer is a synthetic id (demo-cu-…), never a name, an address or a phone number.
+
+/** Six customers who send back again and again (invented), so the repeat returners have someone to count. */
+const RETURNERS = Array.from({ length: 6 }, (_, i) => seq('demo-cu-r', i + 1));
+const sorted = <T>(xs: readonly T[], key: (x: T) => string) => [...xs].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+
+/**
+ * Who placed each order (they come in date order): a quarter of the refunded orders go to the six returners; of the
+ * rest, about one in three comes from a customer who ordered before, the others from a new customer.
+ */
+function orderCustomers(seed: number, orders: readonly OnlineOrder[], refunded: readonly Refund[]): StoreOrder[] {
+  const { r } = drawer(streamSeed(seed, 'customers'));
+  const back = new Set(refunded.filter((f) => !isPlanted(f.refund_id)).map((f) => f.order_id));
+  const known: string[] = [];
+  return orders.map((o) => {
+    const [u, which, again] = [r(), r(), r()];
+    if (back.has(o.order_id) && u < 0.25) return { ...o, customer_id: RETURNERS[Math.floor(which * RETURNERS.length)]! };
+    if (again < 0.3 && known.length > 0) return { ...o, customer_id: known[Math.floor(which * known.length)]! };
+    known.push(seq('demo-cu-c', known.length + 1));
+    return { ...o, customer_id: known[known.length - 1]! };
+  });
+}
+
+/** Minutes between two inbox moments. */
+const minutesBetween = (from: string, to: string) => (Date.parse(`${to.replace(' ', 'T')}Z`) - Date.parse(`${from.replace(' ', 'T')}Z`)) / 60_000;
+
+/**
+ * Who each message came from and who first answered it. A message that led to an order is that order's customer; a
+ * question about a return comes from a customer refunded within two weeks of it; others from a customer who ordered
+ * before, or someone who has not ordered yet (demo-cu-p…). Planted duplicates: now and then a customer writes again on
+ * another channel about the same thing within a day, before the first message was answered. The shop's follow-ups go
+ * to the thread's customer. A chat answered within two minutes is the automatic reply; otherwise Emma answers most,
+ * the salon many repair and consignment questions.
+ */
+function inboxPeople(seed: number, messages: readonly SupportMessage[], orders: readonly StoreOrder[], refunds: readonly CustomerRefund[]): InboxMessage[] {
+  const { r } = drawer(streamSeed(seed, 'message_people'));
+  const ofOrder = new Map(orders.map((o) => [o.order_id, o.customer_id]));
+  const refunded = refunds.filter((f) => !isPlanted(f.refund_id));
+  const who = new Map<string, string>();
+  let prospects = 0;
+  const inbound = sorted(messages.filter((m) => m.direction === 'inbound'), (m) => `${m.received_at}|${m.message_id}`);
+  inbound.forEach((m, i) => {
+    const [u, which, dup] = [r(), r(), r()];
+    if (m.converted_order_id) return who.set(m.message_id, ofOrder.get(m.converted_order_id)!);
+    // An earlier message on the same topic, from another channel, in the day before, still unanswered when this one came.
+    const first = inbound.slice(Math.max(0, i - 40), i).reverse().find((e) => e.intent === m.intent && e.channel !== m.channel
+      && minutesBetween(e.received_at, m.received_at) <= 1440 && (e.first_reply_at === null || e.first_reply_at > m.received_at));
+    if (first && dup < 0.07) return who.set(m.message_id, who.get(first.message_id)!);
+    const near = m.intent === 'return' ? refunded.filter((f) => Math.abs(minutesBetween(`${f.refund_date} 00:00:00`, m.received_at)) <= 14 * 1440) : [];
+    if (near.length > 0) return who.set(m.message_id, near[Math.floor(which * near.length)]!.customer_id);
+    const before = orders.filter((o) => o.order_date < m.received_date);
+    if (u < 0.55 && before.length > 0) return who.set(m.message_id, before[Math.floor(which * before.length)]!.customer_id);
+    return who.set(m.message_id, seq('demo-cu-p', ++prospects));
+  });
+  const ofThread = new Map(inbound.map((m) => [m.thread_id, who.get(m.message_id)!]));
+  return messages.map((m) => {
+    const [u, au] = [r(), r()];
+    const customer_id = who.get(m.message_id) ?? ofThread.get(m.thread_id) ?? seq('demo-cu-p', ++prospects);
+    if (m.first_reply_at === null) return { ...m, customer_id, answered_by: null };
+    const instant = m.channel === 'chat' && minutesBetween(m.received_at, m.first_reply_at) <= 2;
+    const salonish = m.intent === 'repair' || m.intent === 'consignment';
+    const answered_by = instant && u < 0.8 ? 'auto' : pick(au, ['emma', 'salon', 'other'] as const, salonish ? [0.45, 0.45, 0.1] : [0.72, 0.16, 0.12]);
+    return { ...m, customer_id, answered_by };
+  });
+}
+
+/**
+ * About one sale in seven gets a review five to thirty days after the order (two in five of the refunded ones), of
+ * the order's first product: refunded orders are rated low and mostly about fit, color or quality. The bad row has a
+ * rating of zero.
+ */
+function reviews(seed: number, orders: readonly StoreOrder[], lines: readonly OrderLine[], refunds: readonly CustomerRefund[]): Review[] {
+  const { r, between } = drawer(streamSeed(seed, 'reviews'));
+  const back = new Set(refunds.filter((f) => !isPlanted(f.refund_id)).map((f) => f.order_id));
+  const firstSku = new Map<string, string>();
+  for (const l of lines) if (!isPlanted(l.line_id) && !firstSku.has(l.order_id)) firstSku.set(l.order_id, l.sku);
+  const out: Review[] = [];
+  for (const o of orders.filter(isSale)) {
+    const [u, lag, ru, tu] = [r(), Math.round(between(5, 30)), r(), r()];
+    const refunded = back.has(o.order_id);
+    const review_date = addDays(o.order_date, lag);
+    if (u >= (refunded ? 0.4 : 0.14) || review_date > AS_OF) continue;
+    out.push({
+      review_id: seq('demo-rv-v', out.length + 1), review_date, order_id: o.order_id, customer_id: o.customer_id, sku: firstSku.get(o.order_id)!,
+      rating: pick(ru, [1, 2, 3, 4, 5], refunded ? [0.35, 0.3, 0.2, 0.1, 0.05] : [0.02, 0.04, 0.12, 0.32, 0.5]),
+      topic: pick(tu, REVIEW_TOPICS, refunded ? [0.35, 0.25, 0.25, 0.05, 0.05, 0.05] : [0.2, 0.2, 0.25, 0.15, 0.15, 0.05]),
+    });
+  }
+  const feb = out.find((v) => v.review_date >= '2026-02-09')!;
+  out.push({ ...feb, review_id: 'demo-rv-bad-rating', rating: 0 });
+  return out;
+}
+
+/**
+ * The customers, each from its own stream. `orders`, `refunds`, `messages` and `lines` are only read: every row comes
+ * back with each of its columns and values unchanged, plus its customer (and, for a message, who answered it).
+ */
+export function generateCustomers(
+  orders: readonly OnlineOrder[], refunds: readonly Refund[], messages: readonly SupportMessage[], lines: readonly OrderLine[], seed = DIVISIONS_SEED,
+): Customers {
+  const placed = orderCustomers(seed, orders, refunds);
+  const ofOrder = new Map(placed.map((o) => [o.order_id, o.customer_id]));
+  const refunded = refunds.map((f): CustomerRefund => ({ ...f, customer_id: ofOrder.get(f.order_id)! }));
+  return { orders: placed, refunds: refunded, messages: inboxPeople(seed, messages, placed, refunded), reviews: reviews(seed, placed, lines, refunded) };
+}
+
+/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions, generateOperations, generateChannels and generateCustomers add. */
 export function generateYear(): SyntheticYear {
   const today = generateBusiness();
   const history = generateHistory();
   const added = generateDivisions();
-  const orders = [...history.online.orders, ...today.online.orders];
+  const plain = [...history.online.orders, ...today.online.orders];
   const email = [...history.marketing.email, ...today.marketing.email];
-  const ops = generateOperations(orders);
-  const channels = generateChannels(orders, email, ops.refunds);
+  const ops = generateOperations(plain);
+  const channels = generateChannels(plain, email, ops.refunds);
+  const people = generateCustomers(plain, ops.refunds, ops.messages, channels.orderLines);
   return {
     generatedFor: GENERATED_FOR,
     seed: today.seed,
-    online: { orders, orderCosts: ops.orderCosts, refunds: ops.refunds, checkouts: ops.checkouts, inventory: ops.inventory, orderLines: channels.orderLines },
+    online: {
+      orders: people.orders, orderCosts: ops.orderCosts, refunds: people.refunds, checkouts: ops.checkouts, inventory: ops.inventory, orderLines: channels.orderLines,
+      reviews: people.reviews,
+    },
     salon: { appointments: salonVisits(DIVISIONS_SEED, [...history.salon.appointments, ...today.salon.appointments]), repairs: ops.repairs },
     marketing: { ads: [...history.marketing.ads, ...today.marketing.ads, ...added.metaAds], email, emailMessages: channels.emailMessages },
-    support: { messages: ops.messages },
+    support: { messages: people.messages },
     finance: { budgets: added.budgets, invoices: ops.invoices },
     marketplace: channels.marketplace,
   };

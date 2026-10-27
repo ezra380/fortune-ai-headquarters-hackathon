@@ -155,9 +155,11 @@ describe('attention list', () => {
     const read = (d: Division, p: Period) => attentionFor([...divisionSlice(layers, d, p)].map(([id, value]) => ({ id, value }))).map((a) => a.metricId);
     // Late repairs (standing, so every period), and nothing else for the salon this month.
     expect(read('salon', '2026-10-mtd')).toEqual(['m:salon.repairs.open_over_14d.count']);
-    // The inbox, the stock and the planted order row for the online division.
+    // The inbox, the stock and the planted order row for the online division; wave 2's repeat returners, low ratings
+    // and duplicated messages.
     expect(read('online', '2026-10-mtd').sort()).toEqual([
       'm:online.dq.rejected_orders', 'm:online.inventory.wanted_low_stock.count', 'm:online.inventory.wanted_out_of_stock.count',
+      'm:online.returns.repeat_customers.count', 'm:online.reviews.low_rating.count', 'm:online.service.duplicate.count',
       'm:online.service.missed_sale_intent.count', 'm:online.service.waiting_over_24h.count',
     ]);
     // Overdue supplier invoices of both businesses for Finance; no inbox or stock rule there.
@@ -168,6 +170,7 @@ describe('attention list', () => {
     // Each planted row of a new source shows where its source is read, in its own month.
     expect(read('online', '2026-02')).toContain('m:online.dq.rejected_checkouts'); // demo-ck-bad-recovery
     expect(read('online', '2026-08')).toContain('m:online.dq.rejected_messages'); // demo-msg-bad-reply
+    expect(read('online', '2026-02')).toContain('m:online.dq.rejected_reviews'); // demo-rv-bad-rating
     expect(read('salon', '2026-07')).toContain('m:salon.dq.rejected_repairs'); // demo-rt-bad-dates
     expect(read('hq', '2026-01')).toContain('m:combined.dq.rejected_invoices'); // demo-inv-bad-due
   });

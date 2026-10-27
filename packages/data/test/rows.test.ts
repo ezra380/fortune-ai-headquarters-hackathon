@@ -24,6 +24,7 @@ const READS: RowRead[] = [
   { table: 'waiting', olderThanHours: 0 }, { table: 'low_stock' },
   { table: 'marketplace_stock', status: 'all' }, { table: 'marketplace_stock', status: 'low', marketplace: 'walmart' },
   { table: 'products', period: '2026-09', sort: 'best' }, { table: 'products', period: '2026-10-mtd', sort: 'worst' },
+  { table: 'return_cases', period: '2026-09' }, { table: 'return_cases', period: '2026-10-mtd' },
 ];
 
 /** Zetaris's answer to a read: the oracle's rows (before any after-read filter) as strings in column order, '' for NULL. */
@@ -94,8 +95,45 @@ describe('row reads: the rows behind the standing numbers', () => {
       for (const r of best.rows) {
         expect(Number(r.profitUsd)).toBeCloseTo(Number(r.revenueUsd) - Number(r.refundsUsd) - Number(r.costUsd), 2);
         expect(r.views7d).toEqual(expect.any(Number));
+        // Its rating: every valid review of the product to the data date (wave 2).
+        const mine = year.online.reviews.filter((v) => v.sku === r.sku && v.rating >= 1 && v.rating <= 5);
+        expect(r.reviews, String(r.sku)).toBe(mine.length);
+        expect(r.avgRating, String(r.sku)).toBe(mine.length ? Math.round((mine.reduce((t, v) => t + v.rating, 0) / mine.length) * 100) / 100 : null);
       }
+      expect(best.rows.some((r) => r.avgRating !== null)).toBe(true);
     }
+  });
+
+  it("list each refund of the period with its customer's year, reviews and messages, adding up to the refund numbers", () => {
+    let repeatSeen = 0;
+    for (const period of ['2026-09', '2026-10-mtd', '2026-03'] as const) {
+      const at = (id: string) => layers.period.get(period)!.get(id)!;
+      const { rows, totals } = oracleRows(year, { table: 'return_cases', period });
+      const t = totals as { count: number; amountUsd: number; repeatCustomers: number; byReason: Record<string, number>; amountByReason: Record<string, number> };
+      expect(t.count).toBe(at('m:online.refunds.count'));
+      expect(t.amountUsd).toBeCloseTo(at('m:online.refunds.total'), 2);
+      expect(Object.values(t.byReason).reduce((s, n) => s + n, 0)).toBe(t.count);
+      expect(Object.values(t.amountByReason).reduce((s, n) => s + n, 0)).toBeCloseTo(t.amountUsd, 2);
+      expect(t.repeatCustomers).toBeLessThanOrEqual(standing('m:online.returns.repeat_customers.count'));
+      repeatSeen += t.repeatCustomers;
+      for (const r of rows) {
+        // Counted again straight from the rows, for this customer.
+        const order = year.online.orders.find((o) => o.order_id === r.orderId)!;
+        expect(r.customerId).toBe(order.customer_id);
+        expect(r.daysAfterSale).toBe((Date.parse(String(r.refundDate)) - Date.parse(order.order_date)) / 86_400_000);
+        expect(r.skus).toBe([...new Set(year.online.orderLines.filter((l) => l.order_id === r.orderId).map((l) => l.sku))].sort().join(','));
+        const reviews = year.online.reviews.filter((v) => v.customer_id === r.customerId && v.rating >= 1 && v.rating <= 5);
+        expect(r.reviews).toBe(reviews.length);
+        expect(r.lowestRating).toBe(reviews.length ? Math.min(...reviews.map((v) => v.rating)) : null);
+        const messages = year.support.messages.filter((m) => m.customer_id === r.customerId && m.direction === 'inbound' && m.message_id !== 'demo-msg-bad-reply');
+        expect(r.messages).toBe(messages.length);
+        expect(r.messageTopics).toBe(messages.length ? [...new Set(messages.map((m) => m.intent))].sort().join(',') : null);
+        const year365 = year.online.refunds.filter((f) => f.customer_id === r.customerId && f.amount_usd > 0 && f.refund_date >= '2025-10-27' && f.refund_date <= '2026-10-26');
+        expect(r.refunds365d).toBe(year365.length);
+      }
+      expect(rows.map((r) => `${r.refundDate}|${r.refundId}`)).toEqual(rows.map((r) => `${r.refundDate}|${r.refundId}`).sort());
+    }
+    expect(repeatSeen).toBeGreaterThan(0);
   });
 
   it('keep money per business: an invoice read for one business has only its total, a read for both has two', () => {
@@ -105,12 +143,16 @@ describe('row reads: the rows behind the standing numbers', () => {
     expect(Object.keys(oracleRows(year, { table: 'invoices', status: 'open' }).totals)).toEqual(['salon', 'online']);
   });
 
-  it('never return a planted bad row, a customer, a message text or a name', () => {
+  it('never return a planted bad row, a customer (but as a synthetic id where a read asks for one), a message text or a name', () => {
     for (const read of READS) {
       const { rows } = oracleRows(year, read);
       for (const r of rows) {
-        expect(JSON.stringify(r)).not.toMatch(/-bad-|customer|demo-oc-|demo-sc-/);
-        for (const key of Object.keys(r)) expect(key).not.toMatch(/body|text|subject|name|customer|phone|email/i);
+        // The return cases name each refund's customer by a synthetic id only (docs/wave2.md, item 4).
+        const { customerId, ...rest } = r;
+        if (read.table === 'return_cases') expect(customerId).toMatch(/^demo-cu-[a-z]\d{5}$/);
+        else expect(customerId).toBeUndefined();
+        expect(JSON.stringify(rest)).not.toMatch(/-bad-|customer|demo-oc-|demo-sc-|demo-cu-/);
+        for (const key of Object.keys(rest)) expect(key).not.toMatch(/body|text|subject|name|customer|phone|email/i);
       }
     }
     expect(oracleRows(year, { table: 'waiting', olderThanHours: 0 }).rows[0]).toEqual(expect.objectContaining({ threadId: expect.stringMatching(/^demo-th-/) }));
@@ -135,6 +177,8 @@ describe('row reads: the rows behind the standing numbers', () => {
     expect(bad({ table: 'marketplace_stock', status: 'all', marketplace: 'ebay' })).toThrow('marketplace must be amazon or walmart');
     expect(bad({ table: 'products', period: "2026-09' OR '1'='1", sort: 'best' })).toThrow('period must be one of');
     expect(bad({ table: 'products', period: '2026-09', sort: 'top' })).toThrow('sort must be best or worst');
+    expect(bad({ table: 'return_cases', period: "2026-09' --" })).toThrow('period must be one of');
+    expect(rowSql(rowQuery({ table: 'return_cases', period: '2026-09' }))).toMatch(/refund_date BETWEEN '2026-09-01' AND '2026-09-30'.* refund_date BETWEEN '2025-10-27' AND '2026-10-26'.* ORDER BY c6, c0$/);
     // The products read takes its period from the fixed list, and its order is one of two.
     expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'worst' }))).toMatch(/order_date BETWEEN '2026-09-01' AND '2026-09-30'.* snapshot_date = '2026-09-30'.* ORDER BY c6, c0$/);
     expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'best' }))).toMatch(/ORDER BY c6 DESC, c0$/);
