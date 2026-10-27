@@ -276,3 +276,103 @@ it is one source and carries the only act rule.
     refused ("assistant_id: Invalid option"). Rerun under the lock at 14:38 ET: the same two fail, the rest pass. They
     pass on a database holding only the five base profiles, or once the legal lane's assistant id is merged. This lane
     did not touch the row (it is another lane's).
+
+## Review fixes, 2026-10-27 14:55 ET onward
+
+An independent review listed one blocker, two majors and five minors. What each became:
+
+### Blocker: version 2 division reads failed live (the derived pivot read the whole period view) — FIXED
+
+- `periodSubsetBody(ids)` (`finance-sql.ts`) builds the period totals of just the named metrics from just their
+  sources, with the period view's own SQL per metric; `derivedViewBody()` (`layers.ts`) now pivots
+  `periodSubsetBody(DERIVED_INPUTS)`: six sources (orders, appointments, ads, budgets, order costs, refunds), not 21.
+  The period view body (and its pin `8e8feb1f…`) is unchanged; only the derived view's body, so its part of a query
+  hash, changes.
+- Tests (`layers.test.ts`, seen failing first: two failures before the change): "reads only the sources its inputs
+  come from, each once, never the period view" (each version 2 source's table appears once if it feeds an input, else
+  never; no other metric is named) and "reads its inputs with the period view's own SQL, and refuses a metric the
+  period view does not serve" (the subset of every id IS the period view's body; the derived body contains the subset).
+- Live, 15:09 ET: only `fortune_hq_v2.derived_metrics` was recreated (a 15:02 run's `DROP VIEW` went through, but its
+  answer never came back within five minutes; the view was absent from 15:07 to 15:09 ET). Then **all 13 periods in
+  one statement: 38.6 s, 156 of 156 equal to the oracle** (before: over five minutes, dropped connection).
+- The marts read the view by name, so they needed no rebuild: **the online mart's derived table for `2026-10-mtd`,
+  4 rows in 10.5 s** (15:18 ET; before the fix it dropped the connection after five minutes). The same mart's standing
+  table 6 rows in 85.6 s and its **period table 82 rows in 182.8 s** (15:20–15:23 ET, load 3 to 6.4, asked one after
+  another): the period table is now the slowest statement of a division read.
+- `getDivisionMetrics` through the DataPort (all three statements together): **salon `2026-10-mtd`, 28 of 28 equal to
+  the oracle, in 287.9 s** (15:10–15:15 ET, load 4.5 to 6.7, while other lanes' suites ran): it answers, but within
+  seconds of the five-minute limit. LIVE4_RESULT
+- **Still open (not a structural blocker now, but a real risk under load):** every division's period table reads
+  the whole period view (a `metric_id IN (...)` filter cannot prune the union's branches, as docs/data.md says), so a
+  division read pays for all 21 sources. The next fix, same pattern: build each division's period filter view from
+  `periodSubsetBody(divisionIds(division, 'period'))` (the salon would read four sources, not 21), prove it live, and
+  re-time. Not done in this round.
+- **Not proved (time):** the tier-0 baseline (16449bf's period body on this instance now); `getDivisionMetrics` for
+  2026-09 and for the divisions not listed above; the full `zetaris-setup.ts --v2` comparison over all 13 periods.
+  Run `npx tsx scripts/zetaris-setup.ts --v2 --verify-only` before W1/W2 rely on version 2, on a quiet machine.
+- One live hazard learned: the live scripts' in-process source server (port 18121) dies with the script; stopping a
+  live run mid-way leaves Zetaris unable to reach the sources ("Connection refused") until another read starts it.
+
+### Major: items 7 and 8 (salon clients, product sales, personalization) not built — NOT DONE (time)
+
+- Not built in this round either; the build plan in slice 3 stands, with W1's tool name (below). The merge keeps
+  `m:salon.products.`, `m:salon.clients.` and `m:salon.personalization.` in W1's `PENDING_DATA_PREFIXES`.
+- The vacuous ask-wall test is split (`channels.test.ts`): "Online never reads a salon number" (now asserts it has
+  salon metrics to check), and "Finance never reads the salon's client segments…: NOT BUILT, items 7 and 8", which is
+  `it.fails` with an assertion that at least one `m:salon.clients.*` metric exists. It is green today because the
+  metrics are missing and fails loud the day they land, so whoever builds item 7 must turn it into `it`.
+- The segment-partition test the review asks for (every active client in exactly one segment, counts and revenue
+  adding up) belongs with item 7's build.
+
+### Major: READ_SCOPE on the moved base (1544c38) has no scope for this lane's four tools — MERGE STEP
+
+The base this branch was cut from (`16449bf`) has no `READ_SCOPE`, so this branch cannot add the entries without
+taking `1544c38`'s file. At the merge, in `packages/profiles/src/rows.ts`:
+`get_marketplace_stock: 'online'`, `get_product_performance: 'online'`, `get_return_cases: 'online'`,
+`get_store_journey: 'online'`; add `get_product_performance` and `get_return_cases` (revenue, cost, profit and refund
+amounts) to `MONEY_READS`; extend `changes.test.ts` "declares a scope for every read tool" and the wall test to the
+four; typecheck and the full suite on the merged tree.
+
+### Minors
+
+- **Bare nouns on the channel counts — FIXED** (`sql.ts` `qualified()`, `channels.ts`): the Amazon and Walmart order
+  counts, Walmart's ad conversions, the flow and campaign sends, the money-losing products and the four marketplace
+  stock counts now name themselves with qualified phrases only ("amazon marketplace orders", "flow emails", "amazon
+  low-cover listings", "losing products"). The bare nouns stay with the metrics that own them (`m:online.orders.count`,
+  `m:online.email.sends`). Test (`channels.test.ts`, seen failing first): "names the channels' counts with qualified
+  phrases only", "keeps the bare nouns on the store orders and the emails sent". **Not done here:** the review's
+  checker test ("a Finance plan saying '2 products' with no stock metric cited passes") needs the merged checker
+  (`523656f`, uncited small counts), which this branch does not have: add it at the merge. The version 1 ad conversion
+  counts (Google, Meta, Amazon) still carry bare "orders": they are the base's, unchanged here; the merge may want them
+  qualified too.
+- **doors-db's stored-profile comparison — PARTLY FIXED** (`packages/codemode/test/doors-db.test.ts`): `storedDoorTools`
+  now fails with "… reseed profiles" if the stored profile serves a read this branch's files do not name. A stored
+  profile that lags the files (today: no reseed, it lacks the four new tools) still passes, because reseeding the
+  shared database would break the other lanes' doors-db tests. At the merge: reseed
+  (`npx tsx scripts/seed-profiles.ts --force --db <local>`) and compare with the file profile again.
+- **departments.test.ts unproven — NOT DONE**: still skipped here (no `.local/meterless` engines in this worktree).
+  Run `flock ~/.fahq-db-test.lock npx vitest run apps/worker/test/departments.test.ts` at the merge and record the count.
+- **W1's tool name for personalization — AGREED IN THE PLAN**: the item 8 build plan above said
+  `get_personalization_tickets`; W1's registry (`hq/w2-workers`, `apps/worker/src/workers.ts`) calls
+  `get_personalization` with `{ status: 'late' }`. Build it as **`get_personalization`** with a `status` of `open`,
+  `late` or `done`, as `get_repair_tickets` does, so W1's `PENDING_ROW_TOOLS` check matches.
+- **Shared Zetaris holds this branch's version 2 objects — MERGE ORDER**: unchanged by this round except the derived
+  view (new body, same ids). Merge D2 before W1/W2's live checks, or have W1/W2 prove themselves on the oracle or on
+  version 1 until then. This lane does not know which lanes ran live version 2 checks against the rebuilt objects;
+  the orchestrator should ask W1 and W2.
+
+### Proof of this round
+
+- Commits: `030f4bd` (derived view), `6ffb81b` (count phrases, ask wall, stored-profile drift), then these notes.
+- `npm run typecheck` clean. `npx vitest run packages/data packages/contracts`: 21 files, 278 passed, 1 expected fail
+  (the `it.fails` client-segment wall), 0 failed.
+- Seen failing first: the two derived-view tests (2 failed before `layers.ts` changed); the count-phrase test (failed on
+  `m:online.amazon.orders.count: "order"` before `channels.ts` changed). The stored-profile drift check was not seen
+  failing (it would need a stored profile with a read the files lack).
+- Full `flock ~/.fahq-db-test.lock npm test` (15:15–15:20 ET): 58 files passed, 9 skipped (Meterless), 1 failed;
+  1,084 tests passed, 1 expected fail, 173 skipped, 2 failed. The 2 are the same as slice 3's and not this branch's
+  code: `apps/worker/test/profiles.test.ts`, the two "real store, real table" cases, refused because the shared
+  database holds the legal lane's sixth profile row (`assistant_id: Invalid option`). Rerun under the lock with
+  `packages/codemode/test/doors-db.test.ts` (15:24 ET): doors-db all passed (with the new drift check), the same two
+  profile cases failed for the same reason.
+- Live: see the blocker section above.

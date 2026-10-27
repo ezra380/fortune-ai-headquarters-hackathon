@@ -605,6 +605,16 @@ line each).
   periods (with the season index's windows) and so reads every source's every row; the one-period reads stay well
   inside the limit. Until it is fixed, a version 2 division read (`getDivisionMetrics`, which asks all three together)
   and the unsliced `getFinanceMetrics` can fail on Zetaris's five-minute connection.
+- **Fixed (review round, commit `030f4bd`):** the derived view no longer reads the period view. `periodSubsetBody`
+  builds the period totals of just its inputs (`DERIVED_INPUTS`) from just their six sources (orders, appointments,
+  ads, budgets, order costs, refunds), with the period view's own SQL per metric (`layers.test.ts` pins both: the
+  subset of every id is the period view's body; the derived body names no other metric and reads no other source).
+  Live, 15:09 ET: `derived_metrics` recreated alone (the period, standing and row views and the marts untouched),
+  then **all 13 periods in one statement in 38.6 s, 156 of 156 equal to the oracle** (load 4.5 to 5.9). The marts read
+  the view by name: the online mart's derived table for `2026-10-mtd` in 10.5 s; its standing table 85.6 s and its
+  period table 182.8 s (load 3 to 6.4). `getDivisionMetrics salon 2026-10-mtd`: 28 of 28 in 287.9 s. The period
+  table is now the slow part: each division's period filter view still reads the whole period view; the same fix
+  (a filter view over `periodSubsetBody` of the division's own ids) is the next step.
 
 ## Future work, by owner decision
 
