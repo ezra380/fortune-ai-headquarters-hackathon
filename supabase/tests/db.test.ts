@@ -407,13 +407,10 @@ describe('the HQ Manager tables', () => {
     try {
       await client.query('begin');
       await client.query('set local role anon');
-      // On a database with Supabase's default grants the public role gets zero rows; on one without grants it is refused. Either way it sees nothing.
-      const seen = await client.query('select count(*)::int as n from public.division_briefs').then((r) => r.rows[0].n as number, (e: Error) => e.message);
-      expect(seen === 0 || /permission denied/.test(String(seen)), String(seen)).toBe(true);
-      await client.query('rollback');
-      await client.query('begin');
-      await client.query('set local role anon');
-      await expect(client.query(`select * from public.peek_approval_code('+15550111001', '123456', 'approve_action')`)).rejects.toThrow(/permission denied/);
+      // The migrations take every table privilege from the public role (20261027100000_profiles.sql), so it is refused
+      // outright, on the shared stack and on a database built from the files (migrations.test.ts).
+      await denied(client, 'select count(*)::int as n from public.division_briefs');
+      await denied(client, `select * from public.peek_approval_code('+15550111001', '123456', 'approve_action')`);
     } finally {
       await client.query('rollback');
       client.release();
