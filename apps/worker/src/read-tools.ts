@@ -53,6 +53,21 @@ function scrub(value: unknown): unknown {
   return value;
 }
 
+/**
+ * One read of the data port. A provider's own text (an HTTP body, SQL, a host name) never reaches the script, and
+ * so never an answer: it gets a fixed sentence with a code, the log gets the detail with any phone number or email
+ * masked (Law 7; read-tools.test.ts "keeps the provider's text away from the script").
+ */
+async function portRead<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    const detail = String(scrub(error instanceof Error ? `${error.name}: ${error.message}` : 'unknown')).replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]');
+    console.error(`worker.zetaris_read_failed ${detail.slice(0, 300)}`);
+    throw new Error('Business data could not be read (ZETARIS_READ).');
+  }
+}
+
 function tool<S extends z.ZodType>(def: {
   name: string;
   description: string;
@@ -103,7 +118,8 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   };
   const asOf = () => ctx.now().toISOString();
   const financeMetrics = async (period: Period, only?: 'online' | 'salon') => {
-    const { metrics, queryHash, view } = await connected().getFinanceMetrics({ asOf: asOf(), period });
+    const data = connected();
+    const { metrics, queryHash, view } = await portRead(() => data.getFinanceMetrics({ asOf: asOf(), period }));
     return {
       view,
       queryHash,
@@ -113,8 +129,9 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   /** One division's own read (data version 2), refused plainly by a port without divisions. */
   const division = async (d: Division, period: Period): Promise<DivisionData> => {
     const data = connected();
-    if (!data.getDivisionMetrics) throw new Error(`This data source has no ${d} division read (it needs data version 2).`);
-    return data.getDivisionMetrics({ division: d, period, asOf: asOf() });
+    const read = data.getDivisionMetrics?.bind(data);
+    if (!read) throw new Error(`This data source has no ${d} division read (it needs data version 2).`);
+    return portRead(() => read({ division: d, period, asOf: asOf() }));
   };
   /** A division tool reads its division's mart when the port has divisions; otherwise its business, as before. */
   const divisionMetrics = async (name: keyof typeof TOOL_DIVISION, period: Period) => {
@@ -139,8 +156,9 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   /** The rows of one fixed read, the first `limit` of them shown; the totals always cover every matching row. */
   const rows = async (read: RowRead, limit: number | undefined) => {
     const data = connected();
-    if (!data.readRows) throw new Error('This data source has no row reads (they need data version 2).');
-    const r = await data.readRows({ ...read, asOf: asOf() });
+    const readRows = data.readRows?.bind(data);
+    if (!readRows) throw new Error('This data source has no row reads (they need data version 2).');
+    const r = await portRead(() => readRows({ ...read, asOf: asOf() }));
     return { dataDate: r.dataDate, view: r.view, queryHash: r.queryHash, totals: r.totals, rows: r.rows.slice(0, clampRows(limit, 20)) };
   };
   /** The value of a metric a division read returned, or null when the read has none (a ratio over nothing). */
@@ -202,11 +220,12 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
       schema: z.object({ metricId: MetricId }).strict(),
       run: async ({ metricId }) => {
         const data = connected();
-        if (!data.getMetricSeries) throw new Error('This data source has no series (it needs data version 2).');
+        const series = data.getMetricSeries?.bind(data);
+        if (!series) throw new Error('This data source has no series (it needs data version 2).');
         const info = data.catalog?.find((m) => m.id === metricId);
         const from = SERIES_DIVISIONS[caller].find((d) => info?.divisions?.includes(d));
         if (!from) throw new Error(`${metricId} is not one of the metrics your division reads.`);
-        return data.getMetricSeries({ division: from, metricId, asOf: asOf() });
+        return portRead(() => series({ division: from, metricId, asOf: asOf() }));
       },
     }),
     tool({
@@ -222,16 +241,17 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     }),
     tool({
       name: 'get_data_quality',
-      description: 'Rows each source system sent that failed the data checks and were left out of the numbers, for a period (some sources are as of the data date), read from Zetaris, with the total and how many sources had any.',
-      signature: `${periodArgs} => Promise<{ period: string; view: string; queryHash: string; rejected: { [id: string]: { label: string; value: number; business: ${Business} } }; totalRows: number; sourcesWithRejects: number }>`,
+      // One count per source, each under its own business; never added up here (a sum would cross businesses
+      // and trace to no metric). The MCP door returns the same shape.
+      description: 'Rows each source system sent that failed the data checks and were left out of the numbers, for a period, read from Zetaris: one count per source, each under its business.',
+      signature: `${periodArgs} => Promise<{ period: string; view: string; queryHash: string; rejected: { [id: string]: { label: string; value: number; business: ${Business}; period: string } } }>`,
       schema: z.object({ period: PeriodArg }).strict(),
       run: async ({ period }) => {
         const r = await division('hq', period);
         const dq = r.metrics.filter((m) => /\.dq\.rejected_/.test(m.id));
         return {
           period, view: r.view, queryHash: r.queryHash,
-          rejected: Object.fromEntries(dq.map((m) => [m.id, { label: m.label, value: m.value, business: m.business }])),
-          totalRows: dq.reduce((t, m) => t + m.value, 0), sourcesWithRejects: dq.filter((m) => m.value > 0).length,
+          rejected: Object.fromEntries(dq.map((m) => [m.id, { label: m.label, value: m.value, business: m.business, period: m.period }])),
         };
       },
     }),

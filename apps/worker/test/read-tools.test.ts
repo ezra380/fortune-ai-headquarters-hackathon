@@ -1,5 +1,5 @@
 import { transformSync } from 'esbuild';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PERIOD_KEYS, type AssistantId, type Attention, type DataPort, type Division, type Metric, type MetricInfo } from '@fahq/contracts';
 import { createReadTools, pick, type ReadToolContext } from '../src/read-tools.ts';
 import type { Explained } from '../src/explain.ts';
@@ -358,7 +358,41 @@ describe('division read tools (data version 2)', () => {
     await expect(createReadTools(setup().ctx, 'finance').get_budget_room!.run({ period: '2026-09' })).rejects.toThrow('This data source has no finance division read (it needs data version 2).');
   });
 
-  it('shows the company side by side, never added, says whether everything runs normally, and counts the rejected rows', async () => {
+  // Review 2026-10-27: the tool added salon, online and combined rejected rows into one total with no metric behind it.
+  it('lists the rejected rows per source under each own business, and adds nothing up', async () => {
+    const { data } = v2Data();
+    const dq = await createReadTools(setup({ data }).ctx, 'manager').get_data_quality!.run({ period: '2026-10-mtd' });
+    const row = (id: string, value: number, business: string) => [id, { label: `label of ${id}`, value, business, period: '2026-10-mtd' }];
+    expect(dq).toEqual({
+      period: '2026-10-mtd', view: 'fortune_demo_v2_hq_mart', queryHash: 'd'.repeat(64),
+      rejected: Object.fromEntries([
+        row('m:combined.dq.rejected_invoices', 1, 'combined'), row('m:online.dq.rejected_orders', 0, 'online'), row('m:salon.dq.rejected_repairs', 1, 'salon'),
+      ]),
+    });
+  });
+
+  // Review 2026-10-27 (twin of the door's fix): a provider's error text reached the script, and from there an answer.
+  it("keeps the provider's text away from the script: a fixed sentence with a code, the detail in the log", async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const body = 'HTTP 500: AnalysisException near SELECT * FROM fortune_hq_v2.salon_metrics on zetaris-node-7.internal:18121';
+    const failing: DataPort = {
+      ...v2Data().data,
+      getFinanceMetrics: async () => { throw new Error(body); },
+      getDivisionMetrics: async () => { throw new Error(body); },
+      readRows: async () => { throw new Error(body); },
+      getMetricSeries: async () => { throw new Error(body); },
+    };
+    const tools = createReadTools(setup({ data: failing }).ctx, 'owner');
+    const calls: [string, unknown][] = [
+      ['get_company_overview', { period: '2026-09' }], ['get_finance_metrics', { period: '2026-09' }], ['get_repair_tickets', { status: 'open' }],
+      ['get_metric_series', { metricId: 'm:online.revenue.total' }],
+    ];
+    for (const [name, args] of calls) await expect(tools[name]!.run(args), name).rejects.toThrow(/^Business data could not be read \(ZETARIS_READ\)\.$/);
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual(Array(4).fill(expect.stringMatching(/^worker\.zetaris_read_failed Error: HTTP 500/)));
+    log.mockRestore();
+  });
+
+  it('shows the company side by side, never added, and says whether everything runs normally', async () => {
     const { data } = v2Data();
     const tools = createReadTools(setup({ data }).ctx, 'owner');
     const out = (await tools.get_company_overview!.run({ period: '2026-10-mtd' })) as Record<string, any>;
@@ -368,9 +402,6 @@ describe('division read tools (data version 2)', () => {
     expect(out.normal).toBe(false);
     expect(out.attention).toEqual(ATTENTION.hq);
     expect(JSON.stringify(out)).not.toContain('24000'); // salon + online revenue is never made
-    const dq = (await createReadTools(setup({ data }).ctx, 'manager').get_data_quality!.run({ period: '2026-10-mtd' })) as Record<string, any>;
-    expect(Object.keys(dq.rejected)).toEqual(['m:combined.dq.rejected_invoices', 'm:online.dq.rejected_orders', 'm:salon.dq.rejected_repairs']);
-    expect(dq).toMatchObject({ totalRows: 2, sourcesWithRejects: 2 });
   });
 
   it('reads the rows behind the standing numbers as fixed reads: the totals of every row, at most 50 rows shown', async () => {
