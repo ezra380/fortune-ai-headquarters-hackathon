@@ -1,8 +1,13 @@
 import type {
-  DepartmentInfo, DepartmentView, ManagerBlock, PlaceholderView, RawDepartment, RawManager, RawRecommendation, RawReview,
+  DepartmentInfo, DepartmentView, ManagerBlock, RawDepartment, RawManager, RawRecommendation, RawReview,
   RawUsageRow, RawWorkReport, RecommendationView, ReportView, ReviewView, UsageCounts,
 } from './departments.ts';
-import { SALON_MESSAGE, USAGE_WINDOW_HOURS } from './departments.ts';
+import { USAGE_WINDOW_HOURS } from './departments.ts';
+import type {
+  ActionState, ActionView, BriefStatusView, BriefView, DigestView, DivisionBlock, DivisionsView, RawBriefRow, RawDigest, RawDivisionState,
+  RawDivisions, RawReply, RawRequest, RequestView,
+} from './divisions.ts';
+import { BRIEF_DIVISIONS, isBriefDivision } from './divisions.ts';
 import { cleanText, clip, maskNumber } from './scrub.ts';
 
 // Turns what a data source returned into what the owner may see. Only known fields are copied (an
@@ -51,10 +56,6 @@ export function planTitles(body: unknown): string[] {
   return titles;
 }
 
-export function placeholderView(info: DepartmentInfo): PlaceholderView {
-  return { id: info.id, name: info.name, placeholder: true, message: SALON_MESSAGE };
-}
-
 const LIMITS = {
   tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, memory: 10, timeline: 30, notes: 8,
   reports: 15, managerReports: 30, suggestions: 5, findings: 6, recommendations: 3, lessons: 20, usageRows: 5000,
@@ -68,6 +69,11 @@ const NOTES = {
   review: 'The latest review could not be read in full (unexpected shape). What could not be read is left out.',
   findings: 'Some findings in the latest review could not be read and are left out.',
   status: 'Some recommendations have a status this console does not know. They are shown as unknown.',
+  brief: 'A brief could not be read in full (unexpected shape). What could not be read is left out.',
+  briefStatus: 'A brief has a status this console does not know. It is shown as unknown.',
+  requests: 'Some data requests could not be read and are left out.',
+  answers: 'Some answers to data requests could not be read. Those requests are shown as unreadable.',
+  digest: 'The latest digest could not be read in full (unexpected shape). What could not be read is left out.',
 } as const;
 type NoteKey = keyof typeof NOTES;
 type Flag = (key: NoteKey) => void;
@@ -129,7 +135,7 @@ function shapeReport(r: RawWorkReport, flag: Flag): ReportView {
 }
 
 const zeroCounts = (): UsageCounts => ({ tasks: 0, done: 0, failed: 0, retrying: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0 });
-const LIVE_ASSISTANTS = ['owner', 'finance', 'online', 'manager'];
+const LIVE_ASSISTANTS = ['owner', 'finance', 'online', 'manager', 'salon'];
 
 /** The last day of finished work, added up per assistant. Every live assistant has a row, even at zero. */
 function shapeUsage(source: readonly RawUsageRow[]): NonNullable<ManagerBlock['usage']> {
@@ -232,7 +238,6 @@ export function shapeDepartment(raw: RawDepartment, info: DepartmentInfo, now: D
   return {
     id: info.id,
     name: info.name,
-    placeholder: false,
     generatedAt: now.toISOString(),
     assistant: raw.assistant
       ? { displayName: maybeText(raw.assistant.display_name, 60), number: maskNumber(raw.assistant.sms_from) }
@@ -308,5 +313,200 @@ export function shapeDepartment(raw: RawDepartment, info: DepartmentInfo, now: D
     notes: [...rows(raw.notes, LIMITS.notes).map((n) => text(n, 300)), ...[...flagged].map((k) => NOTES[k])]
       .filter((n) => n !== '')
       .slice(0, LIMITS.notes),
+  };
+}
+
+// ---- The Divisions view ---------------------------------------------------------------------------------
+// The same rules as above: known fields only, every text cleaned and cut, jsonb checked (a bad shape becomes a note, never a
+// crash), and a part that could not be read says so instead of showing as empty. Who approved an action is never read.
+
+const BRIEF_STATUSES = ['normal', 'watch', 'act'] as const;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const DIGEST_STATES = ['in', 'missing', 'unreadable'] as const;
+const SHOWN = { findings: 4, actions: 3, cites: 8, requestsEach: 10, digestText: 600 };
+/** A cleaned, cut and trimmed text: a question of only spaces is no question. */
+const said = (v: unknown, max: number): string => text(v, max).trim();
+const listed = (v: unknown, max: number): unknown[] => (Array.isArray(v) ? v.slice(0, max) : []);
+
+const briefStatus = (v: unknown, flag: Flag): BriefStatusView => {
+  if ((BRIEF_STATUSES as readonly unknown[]).includes(v)) return v as BriefStatusView;
+  flag('briefStatus');
+  return 'unknown';
+};
+
+/** Metric ids a finding or action rests on. */
+const citedIds = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, SHOWN.cites).map((x) => said(x, 80)).filter((x) => x !== '') : [];
+
+/**
+ * Where each action of a brief stands. An action the head approved is approved, whatever became of the code. The rest
+ * follow the newest code: waiting, ended (a waiting code whose time has passed is shown as expired, because the database only
+ * marks it when someone tries it), locked, or already used for other actions of the same brief.
+ */
+function actionApproval(rank: number, d: RawDivisionState, approvedAt: ReadonlyMap<number, string | null>, now: Date): ActionView['approval'] {
+  const approved = approvedAt.get(rank);
+  if (approved !== undefined) return { state: 'approved', at: approved };
+  if (listed(d.unread, 5).includes('actions')) return { state: 'unknown', at: null };
+  const code = d.approval;
+  if (!code) return { state: 'no_code', at: null };
+  const ends = iso(code.expires_at);
+  const state = (s: ActionState, at: string | null): ActionView['approval'] => ({ state: s, at });
+  switch (code.status) {
+    case 'pending': return ends !== null && new Date(ends).getTime() <= now.getTime() ? state('code_expired', ends) : state('awaiting', ends);
+    case 'expired': return state('code_expired', ends);
+    case 'locked': return state('code_locked', null);
+    case 'signed':
+    case 'declined': return state('not_approved', iso(code.decided_at));
+    default: return state('unknown', null);
+  }
+}
+
+function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | null {
+  const r: RawBriefRow | null = d.brief;
+  if (!r) return null;
+  const body = parsed(r.brief);
+  const rec = isRecord(body) ? body : null;
+  if (!rec) flag('brief');
+
+  const headline = said(rec?.headline, 160);
+  if (rec && headline === '') flag('brief');
+
+  const findings: BriefView['findings'] = [];
+  if (rec) {
+    if (!Array.isArray(rec.findings)) flag('brief');
+    else {
+      for (const f of rec.findings) {
+        const t = isRecord(f) ? said(f.text, 300) : '';
+        if (!isRecord(f) || t === '') flag('brief');
+        else if (findings.length < SHOWN.findings) findings.push({ text: t, cites: citedIds(f.cites) });
+      }
+    }
+  }
+
+  // The actions the head approved, from the notes the HQ Manager was sent (rank and verdict only).
+  const approvedAt = new Map<number, string | null>();
+  for (const x of rows(d.decisions, SHOWN.actions * 4)) {
+    const b = parsed(x.body);
+    if (isRecord(b) && b.verdict === 'approved' && whole(b.rank) >= 1) approvedAt.set(whole(b.rank), iso(x.created_at));
+  }
+
+  const actions: ActionView[] = [];
+  if (rec) {
+    if (!Array.isArray(rec.actions)) flag('brief');
+    else {
+      for (const a of rec.actions) {
+        const rank = isRecord(a) ? whole(a.rank) : 0;
+        const title = isRecord(a) ? said(a.title, 80) : '';
+        if (!isRecord(a) || rank < 1 || rank > 3 || title === '') flag('brief');
+        else if (actions.length < SHOWN.actions) {
+          actions.push({ rank, title, why: said(a.why, 300), steps: said(a.steps, 300), cites: citedIds(a.cites), approval: actionApproval(rank, d, approvedAt, now) });
+        }
+      }
+    }
+  }
+  actions.sort((a, b) => a.rank - b.rank);
+
+  return {
+    date: DAY.test(r.brief_date) ? r.brief_date : null,
+    createdAt: iso(r.created_at),
+    status: briefStatus(r.status, flag),
+    writtenBy: r.written_by === 'model' || r.written_by === 'rule' ? r.written_by : 'unknown',
+    headline,
+    findings,
+    actions,
+    ceoLine: said(r.ceo_line, 140),
+  };
+}
+
+/** Every data request between two divisions with its answer (matched by the request it replies to), newest first. */
+function shapeRequests(raw: RawDivisions, flag: Flag): RequestView[] {
+  const answers = new Map<string, RawReply>();
+  for (const a of rows(raw.replies, 200)) if (typeof a.reply_to === 'string') answers.set(a.reply_to, a);
+  const answersUnread = listed(raw.unread, 5).includes('replies');
+
+  const out: RequestView[] = [];
+  for (const q of rows<RawRequest>(raw.requests, 100)) {
+    const body = parsed(q.body);
+    const question = isRecord(body) && body.type === 'data_request' ? said(body.question, 300) : '';
+    if (!isBriefDivision(q.from_assistant) || !isBriefDivision(q.to_assistant) || question === '') {
+      flag('requests');
+      continue;
+    }
+    const answer = answers.get(q.id);
+    let state: RequestView['state'] = 'unanswered';
+    let reason: string | null = null;
+    if (answersUnread) state = 'unreadable';
+    else if (answer) {
+      if (answer.ok === true || answer.ok === 'true') state = 'answered';
+      else if (answer.ok === false || answer.ok === 'false') {
+        state = 'unavailable';
+        reason = said(answer.reason, 200) || null;
+      } else {
+        state = 'unreadable';
+        flag('answers');
+      }
+    }
+    out.push({
+      from: q.from_assistant,
+      to: q.to_assistant,
+      question,
+      askedAt: iso(q.created_at),
+      answeredAt: answer && state !== 'unreadable' ? iso(answer.created_at) : null,
+      state,
+      reason,
+    });
+  }
+  return out.sort((a, b) => (b.askedAt ?? '').localeCompare(a.askedAt ?? ''));
+}
+
+function shapeDigest(d: RawDigest | null, flag: Flag): DigestView | null {
+  if (!d) return null;
+  const body = parsed(d.body);
+  const words = isRecord(body) && body.type === 'ceo_digest' ? said(body.text, SHOWN.digestText) : '';
+  if (!isRecord(body) || words === '') {
+    flag('digest');
+    return null;
+  }
+  const reports: DigestView['reports'] = [];
+  if (!Array.isArray(body.reports)) flag('digest');
+  else {
+    for (const x of body.reports) {
+      if (!isRecord(x) || !isBriefDivision(x.division) || !(DIGEST_STATES as readonly unknown[]).includes(x.state)) flag('digest');
+      else if (reports.length < BRIEF_DIVISIONS.length) {
+        reports.push({ division: x.division, state: x.state as DigestView['reports'][number]['state'], status: x.state === 'in' ? briefStatus(x.status, flag) : null });
+      }
+    }
+  }
+  return { date: typeof body.date === 'string' && DAY.test(body.date) ? body.date : null, createdAt: iso(d.created_at), text: words, reports };
+}
+
+export function shapeDivisions(raw: RawDivisions, now: Date): DivisionsView {
+  const flagged = new Set<NoteKey>();
+  const flag: Flag = (key) => {
+    flagged.add(key);
+  };
+  const requests = shapeRequests(raw, flag);
+  const byDivision = new Map(rows(raw.divisions, 10).filter((d) => isRecord(d)).map((d) => [d.division, d]));
+
+  const divisions: DivisionBlock[] = BRIEF_DIVISIONS.map((info) => {
+    // A division the source did not report on is shown as unread, never as "no brief yet".
+    const d: RawDivisionState = byDivision.get(info.id) ?? { division: info.id, brief: null, approval: null, decisions: [], unread: ['brief'] };
+    return {
+      id: info.id,
+      name: info.name,
+      head: info.head,
+      brief: shapeBrief(d, now, flag),
+      asked: requests.filter((r) => r.from === info.id).slice(0, SHOWN.requestsEach),
+      received: requests.filter((r) => r.to === info.id).slice(0, SHOWN.requestsEach),
+      unread: rows(d.unread, 2),
+    };
+  });
+
+  return {
+    generatedAt: now.toISOString(),
+    divisions,
+    digest: shapeDigest(raw.digest, flag),
+    unread: rows(raw.unread, 3),
+    notes: [...rows(raw.notes, LIMITS.notes).map((n) => text(n, 300)), ...[...flagged].map((k) => NOTES[k])].filter((n) => n !== '').slice(0, LIMITS.notes),
   };
 }

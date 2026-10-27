@@ -179,8 +179,9 @@ production it mirrors Cindy's own backend (her memory, her salon actions, her pe
 hand-offs) at the same admin level, with the head stylist's knowledge. Her family and personal data stay in
 her app; only salon work crosses into the business brain. For the event the worker runs a **Salon stand-in**:
 it proposes in rounds and answers the owner from the salon metrics only (`get_salon_metrics`), on synthetic
-data. The console's Salon sub-tab is still the labeled placeholder (known gap: `apps/console/src/server.ts`
-returns the placeholder view for `salon`).
+data. The console's Salon sub-tab reads that stand-in like any other department. A **Divisions** tab (first) shows the CEO
+digest and, per division, its latest brief, where each action stands and the data requests the divisions sent each other
+([divisions.md](divisions.md)).
 
 ## 9. Production path (planned, not built here)
 

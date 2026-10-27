@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { AssistantId, ManagerReview, Receipt, Recommendation, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
+import type { AssistantId, BriefStatus, DivisionBrief, ManagerReview, Receipt, Recommendation, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
 // happen once goes through a unique key (dedupe_key, idempotency_key) or a conditional update.
@@ -78,7 +78,22 @@ export type AdoptedRow = { recommendation_id: string; rank: number; assistant_id
 export type AdoptedLesson = { id: string; review_id: string; assistant_id: AssistantId; change: string; decided_at: string };
 export type OpenItems = { assistant: AssistantId; openTasks: number; pendingApprovals: number };
 export type LatestProposal = { id: string; createdAt: string; titles: string[]; citedMetricIds: string[]; decided: boolean };
-export type ApprovalAction = 'forward_plan' | 'decide_plan' | 'adopt_change';
+export type ApprovalAction = 'forward_plan' | 'decide_plan' | 'adopt_change' | 'approve_action';
+/** One division's brief of one day. `status` is set by the program; `written_by` is 'rule' when the model's words did not pass their check. */
+export type DivisionBriefRow = {
+  id: string;
+  division: 'salon' | 'finance' | 'online';
+  brief_key: string;
+  brief_date: string;
+  period: string;
+  status: BriefStatus;
+  written_by: 'model' | 'rule';
+  brief: DivisionBrief;
+  ceo_line: string;
+  data_source: string | null;
+  task_id: string | null;
+  created_at: string;
+};
 /** One approval on a proposal, without its code: what it was for, where it stands, and (for a decision) the plan. */
 export type ApprovalSummary = { action: ApprovalAction; status: 'pending' | 'signed' | 'declined' | 'expired'; planRank: number | null; expiresAt: string; decidedAt: string | null };
 
@@ -196,6 +211,16 @@ export function createStore(url: string, serviceKey: string) {
         { approval_id: string | null; message_id: string | null; action: ApprovalAction | null; outcome: string; replay: boolean; approver_person_id: string | null }[];
       return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused', replay: false, approver_person_id: null };
     },
+    /**
+     * Looks at a pending code without spending it: which message it hangs from and who it was issued to, or null when
+     * no pending code of that person matches. Nothing is changed and no failed attempt is counted, so a command can be
+     * checked against what the code is for before the code is used up.
+     */
+    async peekApprovalCode(a: { phone: string; code: string; action: ApprovalAction; now: Date }): Promise<{ message_id: string; approver_person_id: string } | null> {
+      const rows = must(await db.rpc('peek_approval_code', { p_phone: a.phone, p_code: a.code, p_action: a.action, p_now: a.now.toISOString() }), 'peek approval code') as
+        { message_id: string; approver_person_id: string }[];
+      return rows[0] ?? null;
+    },
     async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
       must(await db.from('outbox').upsert(
         { channel: o.channel, to_person_id: o.toPersonId, from_assistant: o.from, body: o.body.slice(0, 1600), attachment_ref: o.attachmentRef, dedupe_key: o.dedupeKey },
@@ -293,6 +318,43 @@ export function createStore(url: string, serviceKey: string) {
       let query = db.from('recommendations').select('id, review_id, assistant_id, change, decided_at').eq('status', 'adopted');
       if (assistant) query = query.eq('assistant_id', assistant);
       return must(await query.order('decided_at', { ascending: false }).limit(Math.min(Math.max(limit, 1), 200)), 'adopted lessons') as AdoptedLesson[];
+    },
+    // ---- Division briefs -------------------------------------------------------------------------
+
+    /** Inserts the day's brief once per key (a retried task finds its own brief again) and reads it back. */
+    async saveDivisionBrief(b: {
+      key: string; division: DivisionBriefRow['division']; date: string; period: string; status: BriefStatus;
+      writtenBy: DivisionBriefRow['written_by']; brief: DivisionBrief; dataSource: string | null; taskId: string | null;
+    }): Promise<DivisionBriefRow> {
+      must(await db.from('division_briefs').upsert({
+        brief_key: b.key, division: b.division, brief_date: b.date, period: b.period, status: b.status, written_by: b.writtenBy,
+        brief: b.brief, ceo_line: b.brief.ceoLine, data_source: b.dataSource, task_id: b.taskId,
+      }, { onConflict: 'brief_key', ignoreDuplicates: true }), 'save brief');
+      return must(await db.from('division_briefs').select('*').eq('brief_key', b.key).single(), 'read brief') as DivisionBriefRow;
+    },
+    /** The brief a task already wrote, if any: a retried task reuses it instead of asking the models again. */
+    async divisionBriefByKey(key: string): Promise<DivisionBriefRow | null> {
+      return must(await db.from('division_briefs').select('*').eq('brief_key', key).maybeSingle(), 'read brief') as DivisionBriefRow | null;
+    },
+    async divisionBrief(id: string): Promise<DivisionBriefRow> {
+      return must(await db.from('division_briefs').select('*').eq('id', id).single(), 'read brief') as DivisionBriefRow;
+    },
+    /**
+     * The status lines the divisions sent the CEO division for one day (mailbox reports to `owner`), newest first.
+     * A division that was briefed more than once that day (a BRIEF text) has several; the newest is its latest.
+     */
+    async divisionStatusMessages(date: string): Promise<MessageRow[]> {
+      return must(await db.from('assistant_messages').select('*').eq('to_assistant', 'owner').eq('kind', 'report')
+        .eq('body->>type', 'division_status').eq('body->>date', date).order('created_at', { ascending: false }).limit(200), 'division statuses') as MessageRow[];
+    },
+    /**
+     * The tasks with these keys that are still queued, running or waiting (a task that is done, failed or cancelled is not open):
+     * how many, and when the earliest of them was queued (its run_after, which the clock that queued it set).
+     */
+    async openTasksByKey(keys: readonly string[]): Promise<{ open: number; since: Date | null }> {
+      const rows = must(await db.from('tasks').select('run_after').in('idempotency_key', [...keys]).in('status', ['queued', 'running', 'waiting']), 'open tasks') as { run_after: string }[];
+      const times = rows.map((r) => Date.parse(r.run_after)).filter((t) => Number.isFinite(t));
+      return { open: rows.length, since: times.length > 0 ? new Date(Math.min(...times)) : null };
     },
     /** Open work per assistant. Counts only: never a code, a hash or a message body. */
     async openItems(now: Date): Promise<OpenItems[]> {

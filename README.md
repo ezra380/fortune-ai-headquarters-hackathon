@@ -48,7 +48,7 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what:
 | HQ Manager: work reports, `REVIEW`, `ADOPT`, lessons | **Working** with models **mocked** | Review numbers traced to the digest; adopted lessons reach the plan writers |
 | Safety screen (Nemotron 3.5 content safety) | **Built**, fails closed | Every free text screened before any model acts; long texts screened in windows |
 | Business numbers through Zetaris | **Working** on local Zetaris | Three source databases federated into one governed view with data-quality rules; `npm run zetaris:setup` proves the live answer equals an independent computation (33 of 33 metrics, both periods) |
-| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Owner HQ, Finance, Online Customer Service, the HQ Manager and a Salon (Cindy) placeholder; loopback only, numbers masked, codes redacted |
+| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Divisions (digest, briefs, data requests), Owner HQ, Finance, Online Customer Service, the HQ Manager and the Salon stand-in; loopback only, numbers masked, codes redacted |
 | Proposal PDF, printing, SMS sender | **Built** | 9 tests; printing is skipped unless a PrintNode printer is configured |
 
 ## What runs where

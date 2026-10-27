@@ -7,7 +7,8 @@ import type { TaskRow } from '../src/store.ts';
 // FAKES: an in-memory store and brain, to pin down what the runner reports for each way a task ends.
 
 const TASK_ID = '12345678-1234-4234-8234-123456789abc';
-const person = { id: 'demo-p-owner', name: 'Demo Owner', role: 'owner', phone: '+15550111001', assistant_id: 'owner' as const };
+// Not the owner: the owner's STATUS is the company digest, a division head's is the count of her assistant's open items (what these tests hold).
+const person = { id: 'demo-p-owner', name: 'Demo Owner', role: 'finance_owner', phone: '+15550111001', assistant_id: 'owner' as const };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

@@ -366,15 +366,24 @@ describe('the HQ Manager tables', () => {
     expect(people.rows[0].n).toBe(0);
   });
 
+  // A division brief for a day in the year 9500 or 9501 (no other test uses them), one row a test; removed after each test, by its key only.
+  const briefRow = `insert into public.division_briefs (division, brief_key, brief_date, period, status, written_by, brief, ceo_line)
+    values ('salon', $1::text, to_date(substring($1::text from '[0-9]{4}-[0-9]{2}-[0-9]{2}'), 'YYYY-MM-DD'), 'p', 'normal', 'model', '{}'::jsonb, 'x') on conflict (brief_key) do nothing`;
+  const briefKeyOf = (n: number) => `brief:salon:${9500 + n}-01-01`;
+  afterEach(async () => {
+    await pool.query('delete from public.division_briefs where brief_key = any($1)', [[briefKeyOf(0), briefKeyOf(1)]]);
+  });
+
   it('shows the public (anon) role nothing in the new tables', async ({ skip }) => {
     if (!reachable) skip();
     await insertReport(await newTask(), 'A finished task');
     const reviewId = await reviewWithRecommendations();
+    await pool.query(briefRow, [briefKeyOf(0)]); // a brief the public role must not see
     const client = await pool.connect();
     try {
       await client.query('begin');
       await client.query('set local role anon');
-      for (const table of ['work_reports', 'manager_reviews', 'recommendations']) {
+      for (const table of ['work_reports', 'manager_reviews', 'recommendations', 'division_briefs']) {
         const visible = await client.query(`select count(*)::int as n from public.${table}`);
         expect(visible.rows[0].n, table).toBe(0);
       }
@@ -383,6 +392,70 @@ describe('the HQ Manager tables', () => {
       await client.query('rollback');
       client.release();
     }
+  });
+
+  it('shows the public (anon) role no division brief and no way to look at a code: no rows or no access at all, never a brief', async ({ skip }) => {
+    if (!reachable) skip();
+    await pool.query(briefRow, [briefKeyOf(1)]);
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local role anon');
+      // On a database with Supabase's default grants the public role gets zero rows; on one without grants it is refused. Either way it sees nothing.
+      const seen = await client.query('select count(*)::int as n from public.division_briefs').then((r) => r.rows[0].n as number, (e: Error) => e.message);
+      expect(seen === 0 || /permission denied/.test(String(seen)), String(seen)).toBe(true);
+      await client.query('rollback');
+      await client.query('begin');
+      await client.query('set local role anon');
+      await expect(client.query(`select * from public.peek_approval_code('+15550111001', '123456', 'approve_action')`)).rejects.toThrow(/permission denied/);
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
+  });
+
+  describe('peek_approval_code', () => {
+    async function briefCode(code: string, ttlMinutes = 720) {
+      const msg = await pool.query(
+        `insert into public.assistant_messages (from_assistant, to_assistant, kind, body, dedupe_key) values ('finance', 'finance', 'report', '{}'::jsonb, $1) returning id`,
+        ['test:' + randomUUID()],
+      );
+      await pool.query(
+        'select * from public.issue_approval($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [msg.rows[0].id, 'demo-p-owner', 'approve_action', code, 'owner', `Reply APPROVE 1 ${code}`, 'test-sms:' + randomUUID(), ttlMinutes, T0],
+      );
+      return msg.rows[0].id as string;
+    }
+    const peek = (code: string, over: { phone?: string; action?: string; at?: string } = {}) =>
+      pool.query('select * from public.peek_approval_code($1, $2, $3, $4)', [over.phone ?? OWNER, code, over.action ?? 'approve_action', over.at ?? '2026-10-26T12:05:00Z']).then((r) => r.rows);
+    const use = (code: string, action = 'approve_action') =>
+      pool.query('select * from public.use_approval_code($1, $2, $3, $4, $5, $6, $7)', [OWNER, code, 'signed', action, null, '{}', '2026-10-26T12:06:00Z']).then((r) => r.rows[0]);
+    const freshCode = () => String(100000 + Math.floor(Math.random() * 899999));
+
+    it('finds a pending code for its person and action without changing anything', async ({ skip }) => {
+      if (!reachable) skip();
+      const code = freshCode();
+      const messageId = await briefCode(code);
+      expect(await peek(code)).toEqual([{ message_id: messageId, approver_person_id: 'demo-p-owner' }]);
+      expect(await peek(code)).toHaveLength(1); // looking again changes nothing
+      expect(await use(code)).toMatchObject({ outcome: 'signed', message_id: messageId }); // and the code is still there to spend
+      expect(await peek(code)).toEqual([]); // spent
+    });
+
+    it('finds nothing for a wrong code, another person, another kind of code, a bad code or an expired one, and counts nothing', async ({ skip }) => {
+      if (!reachable) skip();
+      const code = freshCode();
+      const messageId = await briefCode(code, 10);
+      const other = code === '100000' ? '100001' : String(Number(code) - 1);
+      expect(await peek(other)).toEqual([]);
+      expect(await peek(code, { phone: FINANCE })).toEqual([]);
+      expect(await peek(code, { action: 'adopt_change' })).toEqual([]);
+      expect(await peek('12345a')).toEqual([]);
+      expect(await peek(code, { at: '2026-10-26T12:11:00Z' })).toEqual([]); // 10 minutes after it was issued
+      const { rows } = await pool.query('select status, failed_attempts from public.approvals where message_id = $1', [messageId]);
+      expect(rows).toEqual([{ status: 'pending', failed_attempts: 0 }]);
+      await use(code); // leave nothing pending
+    });
   });
 
   it('keeps one work report per task: the latest attempt wins', async ({ skip }) => {

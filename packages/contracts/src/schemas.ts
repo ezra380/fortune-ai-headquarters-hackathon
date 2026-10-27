@@ -256,3 +256,42 @@ export const ManagerReview = z.object({
   recommendations: z.array(Recommendation).max(3),
 });
 export type ManagerReview = z.infer<typeof ManagerReview>;
+
+// ---- Division briefs -------------------------------------------------------------------------
+
+/**
+ * How a division is doing today. The program sets it from the attention rules (act if any rule says act,
+ * else watch if any says watch, else normal); a model never does, and its words must agree with it.
+ */
+export const BriefStatus = z.enum(['normal', 'watch', 'act']);
+export type BriefStatus = z.infer<typeof BriefStatus>;
+
+/** What a division's assistant needs from ANOTHER division before it can write its brief. */
+export const DataRequest = z.object({
+  division: Division,
+  question: z.string().min(1).max(300),
+});
+export type DataRequest = z.infer<typeof DataRequest>;
+
+/**
+ * A division's daily brief to its head (model output, validated before anyone sees it). The status is not
+ * part of it: the program sets that. `cites` are metric ids, each of which must exist in the data the writer
+ * was given. The head decides each action by a one-time code and carries it out; the assistant never does.
+ */
+export const DivisionBrief = z.object({
+  headline: z.string().min(1).max(160),
+  findings: z.array(z.object({
+    text: z.string().min(1).max(300),
+    cites: z.array(MetricId).max(8),
+  })).max(4),
+  actions: z.array(z.object({
+    rank: z.number().int().min(1).max(3),
+    title: z.string().min(1).max(80),
+    why: z.string().min(1).max(300),
+    steps: z.string().min(1).max(300),
+    cites: z.array(MetricId).max(8),
+  })).max(3),
+  /** One plain sentence for the CEO division: no detail. */
+  ceoLine: z.string().min(1).max(140),
+});
+export type DivisionBrief = z.infer<typeof DivisionBrief>;

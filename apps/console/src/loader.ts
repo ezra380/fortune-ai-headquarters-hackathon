@@ -4,10 +4,14 @@ import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { openBrain } from '@fahq/brain';
 import type {
-  LiveDepartmentId, ManagerPart, RawApproval, RawDepartment, RawManager, RawMessage, RawOutbox, RawReceipt, RawRecommendation, RawReview,
+  DepartmentId, ManagerPart, RawApproval, RawDepartment, RawManager, RawMessage, RawOutbox, RawReceipt, RawRecommendation, RawReview,
   RawTask, RawUsageRow, RawWorkReport,
 } from './departments.ts';
 import { BRAIN_NOTE, USAGE_WINDOW_HOURS } from './departments.ts';
+import type {
+  BriefPart, DivisionsPart, RawBriefApproval, RawBriefRow, RawDigest, RawDivisionState, RawDivisions, RawReply, RawRequest,
+} from './divisions.ts';
+import { BRIEF_DIVISIONS } from './divisions.ts';
 
 // Reads one department's data. READ ONLY, server side, with the service key (the key lives in the
 // client object the caller passes in; it never appears here). Every query names its columns, and the
@@ -46,6 +50,21 @@ function mustCount(answer: Answer<unknown>): number {
   return answer.count ?? 0;
 }
 
+/**
+ * One read that may fail without taking the rest down: a failure becomes a plain note (the part and the error code, never the
+ * database's own words) and the part's fallback, so the page can say "could not be read" instead of showing it empty.
+ */
+function reading(notes: string[]) {
+  return async <T>(label: string, fallback: T, run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (error) {
+      notes.push(`${label} could not be read right now${error instanceof ReadError ? ` (${error.code})` : ''}.`);
+      return fallback;
+    }
+  };
+}
+
 // ---- The brain (shared record + this assistant's memory) -------------------------------------
 
 export type BrainView = {
@@ -69,7 +88,7 @@ export type BrainOptions = {
  * a temporary folder, reads the copy, and deletes it. The worker's files are never opened for writing.
  * Missing or unreadable files give an empty, "not available yet" view instead of an error.
  */
-export async function readBrain(assistant: LiveDepartmentId, options: BrainOptions): Promise<BrainView> {
+export async function readBrain(assistant: DepartmentId, options: BrainOptions): Promise<BrainView> {
   const unavailable: BrainView = { available: false, decisions: [], timeline: [] };
   if (!fs.existsSync(options.dataDir)) return unavailable;
   let snapshot: string | null = null;
@@ -99,22 +118,14 @@ export type LoaderOptions = {
   brain: BrainOptions;
 };
 
-export function createCloudLoader(options: LoaderOptions): (department: LiveDepartmentId) => Promise<RawDepartment> {
+export function createCloudLoader(options: LoaderOptions): (department: DepartmentId) => Promise<RawDepartment> {
   const { db, now } = options;
 
   return async (id) => {
-    if (id !== 'owner' && id !== 'finance' && id !== 'online' && id !== 'manager') throw new Error('unknown department');
+    if (id !== 'owner' && id !== 'finance' && id !== 'online' && id !== 'manager' && id !== 'salon') throw new Error('unknown department');
     const notes: string[] = [];
-    const mine = `from_assistant.eq.${id},to_assistant.eq.${id}`; // id is one of four fixed words, never user text
-
-    const part = async <T>(label: string, fallback: T, run: () => Promise<T>): Promise<T> => {
-      try {
-        return await run();
-      } catch (error) {
-        notes.push(`${label} could not be read right now${error instanceof ReadError ? ` (${error.code})` : ''}.`);
-        return fallback;
-      }
-    };
+    const mine = `from_assistant.eq.${id},to_assistant.eq.${id}`; // id is one of five fixed words, never user text
+    const part = reading(notes);
 
     // What only the HQ Manager tab shows: the last day's usage, the latest review with its recommendations,
     // and the standing lessons (adopted recommendations). A part that cannot be read is named in `unread`.
@@ -298,6 +309,156 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
       ...(manager ? { manager } : {}),
       decisions: brain.decisions,
       timeline: brain.timeline,
+      notes,
+    };
+  };
+}
+
+// ---- The Divisions view -------------------------------------------------------------------------------
+
+const DIVISION_LIMITS = { requests: 30, replies: 100, approvals: 30, decisions: 30 };
+// Named columns only. The brief row is read without its task and data-source columns; an approval without its code hash.
+const BRIEF_COLUMNS = 'division,brief_key,brief_date,status,written_by,brief,ceo_line,created_at';
+
+/**
+ * Reads the Divisions view: each division's newest brief with the standing of its actions, the data requests the divisions sent
+ * each other with their answers, and the newest CEO digest. READ ONLY, server side. The mailbox is read by the kind of note it
+ * holds (the key it was stored under), never in bulk; an answer is read as its outcome and reason only, never the facts it carried.
+ */
+export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDivisions> {
+  const { db } = options;
+
+  return async () => {
+    const notes: string[] = [];
+    const part = reading(notes);
+
+    async function readDivisions(): Promise<RawDivisionState[]> {
+      // The newest brief of each division (a BRIEF text can add a second one on the same day: the later one wins).
+      const found = await Promise.all(
+        BRIEF_DIVISIONS.map((d) =>
+          part(`The ${d.name} brief`, undefined as RawBriefRow | null | undefined, async () => {
+            const list = must<RawBriefRow[]>(
+              await db
+                .from('division_briefs')
+                .select(BRIEF_COLUMNS)
+                .eq('division', d.id)
+                .order('brief_date', { ascending: false })
+                .order('created_at', { ascending: false })
+                .limit(1),
+            );
+            return Array.isArray(list) ? (list[0] ?? null) : null;
+          }),
+        ),
+      );
+      const briefs = found.flatMap((row) => (row ? [row] : []));
+
+      // The brief's mailbox note is what its approval code hangs from; the note's key names the brief.
+      const docs = briefs.length === 0
+        ? []
+        : await part('The briefs\' mailbox notes', null as { id: string; dedupe_key: string }[] | null, async () =>
+            must<{ id: string; dedupe_key: string }[]>(
+              await db.from('assistant_messages').select('id,dedupe_key').in('dedupe_key', briefs.map((b) => `briefdoc:${b.brief_key}`)).limit(10),
+            ),
+          );
+      const docIds = (docs ?? []).map((d) => d.id);
+      const [approvals, decisions] = docIds.length === 0
+        ? [[] as (RawBriefApproval & { message_id: string })[], [] as { reply_to: string; created_at: string; body: unknown }[]]
+        : await Promise.all([
+            part('The brief approvals', null as (RawBriefApproval & { message_id: string })[] | null, async () =>
+              must<(RawBriefApproval & { message_id: string })[]>(
+                await db
+                  .from('approvals')
+                  .select('message_id,status,expires_at,decided_at')
+                  .in('message_id', docIds)
+                  .eq('action', 'approve_action')
+                  .order('created_at', { ascending: false })
+                  .limit(DIVISION_LIMITS.approvals),
+              ),
+            ),
+            part('The approved actions', null as { reply_to: string; created_at: string; body: unknown }[] | null, async () =>
+              must<{ reply_to: string; created_at: string; body: unknown }[]>(
+                await db
+                  .from('assistant_messages')
+                  .select('reply_to,created_at,body')
+                  .eq('kind', 'decision')
+                  .like('dedupe_key', 'action-decision:%')
+                  .in('reply_to', docIds)
+                  .limit(DIVISION_LIMITS.decisions),
+              ),
+            ),
+          ]);
+
+      return BRIEF_DIVISIONS.map((d, i): RawDivisionState => {
+        const brief = found[i];
+        if (brief === undefined) return { division: d.id, brief: null, approval: null, decisions: [], unread: ['brief'] };
+        if (brief === null) return { division: d.id, brief: null, approval: null, decisions: [], unread: [] };
+        const docId = docs?.find((x) => x.dedupe_key === `briefdoc:${brief.brief_key}`)?.id;
+        // Reading the approvals needs the note's id: when the note or either read failed, the actions' standing is unknown.
+        const unread: BriefPart[] = docs === null || approvals === null || decisions === null ? ['actions'] : [];
+        return {
+          division: d.id,
+          brief,
+          // Newest code first: the first one on this brief's note is the one that counts.
+          approval: docId ? ((approvals ?? []).find((a) => a.message_id === docId) ?? null) : null,
+          decisions: docId ? (decisions ?? []).filter((x) => x.reply_to === docId) : [],
+          unread,
+        };
+      });
+    }
+
+    async function readRequests(): Promise<{ requests: RawRequest[]; replies: RawReply[]; unread: DivisionsPart[] }> {
+      const requests = await part('The data requests', null as RawRequest[] | null, async () =>
+        must<RawRequest[]>(
+          await db
+            .from('assistant_messages')
+            .select('id,from_assistant,to_assistant,created_at,body')
+            .eq('kind', 'request')
+            .like('dedupe_key', 'datareq:%')
+            .order('created_at', { ascending: false })
+            .limit(DIVISION_LIMITS.requests),
+        ),
+      );
+      if (requests === null) return { requests: [], replies: [], unread: ['requests'] };
+      if (requests.length === 0) return { requests, replies: [], unread: [] };
+      const replies = await part('The answers to the data requests', null as RawReply[] | null, async () =>
+        must<RawReply[]>(
+          await db
+            .from('assistant_messages')
+            // The outcome and the reason only: what the answer carried (its facts) is not read here.
+            .select('reply_to,created_at,ok:body->>ok,reason:body->>reason')
+            .eq('kind', 'report')
+            .like('dedupe_key', 'datareply:%')
+            .in('reply_to', requests.map((r) => r.id))
+            .limit(DIVISION_LIMITS.replies),
+        ),
+      );
+      return { requests, replies: replies ?? [], unread: replies === null ? ['replies'] : [] };
+    }
+
+    async function readDigest(): Promise<{ digest: RawDigest | null; unread: DivisionsPart[] }> {
+      const found = await part('The latest CEO digest', null as RawDigest[] | null, async () =>
+        must<RawDigest[]>(
+          await db
+            .from('assistant_messages')
+            .select('created_at,body')
+            .eq('kind', 'report')
+            .eq('from_assistant', 'owner')
+            .eq('to_assistant', 'owner')
+            .like('dedupe_key', 'digestdoc:%')
+            .order('created_at', { ascending: false })
+            .limit(1),
+        ),
+      );
+      return { digest: found?.[0] ?? null, unread: found === null ? ['digest'] : [] };
+    }
+
+    const [divisions, asked, digest] = await Promise.all([readDivisions(), readRequests(), readDigest()]);
+    return {
+      divisions,
+      requests: asked.requests,
+      replies: asked.replies,
+      digest: digest.digest,
+      unread: [...asked.unread, ...digest.unread],
       notes,
     };
   };

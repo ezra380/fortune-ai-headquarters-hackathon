@@ -11,6 +11,7 @@ import { loadProfiles } from '@fahq/profiles';
 import { financePeriod } from './finance.ts';
 import type { WorkerDeps } from './flows.ts';
 import { runConcurrently } from './runner.ts';
+import { scheduleEnabled, startScheduler } from './scheduler.ts';
 import { createStore } from './store.ts';
 
 const root = path.resolve(import.meta.dirname, '../../..');
@@ -85,6 +86,10 @@ if (process.argv.includes('--once')) {
 } else {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { stopping = true; });
   console.error(`worker: running as ${deps.worker} with ${concurrency} claim loops`);
+  // The daily clock (briefs at 08:00 ET, the CEO digest at 08:30); FAHQ_SCHEDULE=off turns it off.
+  const clock = scheduleEnabled(env) ? startScheduler(deps) : null;
+  console.error(`worker: daily schedule ${clock ? 'on' : 'off'}`);
   await runConcurrently(deps, concurrency, () => stopping, { untilIdle: false });
+  clock?.stop();
   console.error('worker: stopped');
 }

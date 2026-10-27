@@ -5,10 +5,11 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BRAIN_NOTE, DEPARTMENTS, SALON_MESSAGE } from '../src/departments.ts';
+import { BRAIN_NOTE, DEPARTMENTS } from '../src/departments.ts';
 import type { RawDepartment, RawManager, RawWorkReport } from '../src/departments.ts';
 import { createCloudLoader, readBrain } from '../src/loader.ts';
-import { PAGE_HTML } from '../src/page.ts';
+import { drawTab } from './draw.ts';
+import { recorder, type Call } from './recorder.ts';
 import { cleanText, clip, maskNumber, maskPhones, redactCodes } from '../src/scrub.ts';
 import { startConsoleServer } from '../src/server.ts';
 import { shapeDepartment } from '../src/shape.ts';
@@ -148,7 +149,13 @@ function dirty(): RawDepartment {
 
 const running: RunningConsole[] = [];
 async function start(overrides: Partial<ConsoleDeps> = {}) {
-  const deps: ConsoleDeps = { load: vi.fn(async () => dirty()), now: () => NOW, log: () => {}, ...overrides };
+  const deps: ConsoleDeps = {
+    load: vi.fn(async () => dirty()),
+    loadDivisions: vi.fn(async () => ({ divisions: [], requests: [], replies: [], digest: null, unread: [], notes: [] })),
+    now: () => NOW,
+    log: () => {},
+    ...overrides,
+  };
   const r = await startConsoleServer(deps, 0);
   running.push(r);
   return { ...r, deps };
@@ -176,13 +183,14 @@ describe('read-only and local only', () => {
   it('answers every method except GET and HEAD with 405', async () => {
     const c = await start();
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE']) {
-      for (const p of ['/', '/health', '/api/departments', '/api/department/finance', '/api/department/salon', '/nowhere']) {
+      for (const p of ['/', '/health', '/api/departments', '/api/divisions', '/api/department/finance', '/api/department/salon', '/nowhere']) {
         const r = await request(c.port, { method, path: p });
         expect(r.status, `${method} ${p}`).toBe(405);
         expect(r.headers.allow).toBe('GET, HEAD');
       }
     }
     expect(c.deps.load).not.toHaveBeenCalled();
+    expect(c.deps.loadDivisions).not.toHaveBeenCalled();
   });
 
   it('listens on 127.0.0.1 only', async () => {
@@ -196,7 +204,9 @@ describe('read-only and local only', () => {
     const c = await start();
     const r = await request(c.port, { path: '/api/department/finance', headers: { Host: 'evil.example.com' } });
     expect(r.status).toBe(421);
+    expect((await request(c.port, { path: '/api/divisions', headers: { Host: 'evil.example.com' } })).status).toBe(421);
     expect(c.deps.load).not.toHaveBeenCalled();
+    expect(c.deps.loadDivisions).not.toHaveBeenCalled();
     expect((await request(c.port, { path: '/health', headers: { Host: `localhost:${c.port}` } })).status).toBe(200);
   });
 
@@ -217,6 +227,7 @@ describe('read-only and local only', () => {
     expect(JSON.parse(health.text)).toEqual({ ok: true, time: NOW.toISOString() });
     const list = JSON.parse((await request(c.port, { path: '/api/departments' })).text) as { departments: { id: string; name: string }[] };
     expect(list.departments.map((d) => d.id)).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);
+    expect(list.departments.every((d) => Object.keys(d).sort().join() === 'id,name')).toBe(true); // no department is a placeholder any more
     expect(list.departments.map((d) => d.name)).toEqual([
       'Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)',
     ]);
@@ -244,10 +255,10 @@ describe('what a department may show', () => {
     const c = await start();
     const d = JSON.parse((await request(c.port, { path: '/api/department/finance' })).text);
     expect(Object.keys(d).sort()).toEqual(
-      ['approvals', 'assistant', 'counts', 'generatedAt', 'id', 'mailbox', 'memory', 'name', 'notes', 'outbox', 'placeholder', 'receipts', 'reports', 'tasks', 'timeline'],
+      ['approvals', 'assistant', 'counts', 'generatedAt', 'id', 'mailbox', 'memory', 'name', 'notes', 'outbox', 'receipts', 'reports', 'tasks', 'timeline'],
     );
     expect(d.manager).toBeUndefined(); // only the HQ Manager tab has a manager block
-    expect(d).toMatchObject({ id: 'finance', name: 'Finance Department', placeholder: false, generatedAt: NOW.toISOString() });
+    expect(d).toMatchObject({ id: 'finance', name: 'Finance Department', generatedAt: NOW.toISOString() });
     expect(d.assistant).toEqual({ displayName: 'Finance assistant', number: '…4514' });
     expect(d.counts).toEqual({ openTasks: 2, proposals: 1, pendingApprovals: 1 });
 
@@ -294,25 +305,27 @@ describe('what a department may show', () => {
     expect(d.mailbox).toEqual([]);
   });
 
-  it('serves owner and online the same way', async () => {
+  it('serves owner, online and the salon the same way', async () => {
     const c = await start();
-    for (const id of ['owner', 'online']) {
+    for (const id of ['owner', 'online', 'salon']) {
       const r = await request(c.port, { path: `/api/department/${id}` });
       expect(r.status).toBe(200);
       expect(JSON.parse(r.text).id).toBe(id);
     }
-    expect(vi.mocked(c.deps.load).mock.calls.map((x) => x[0])).toEqual(['owner', 'online']);
+    expect(vi.mocked(c.deps.load).mock.calls.map((x) => x[0])).toEqual(['owner', 'online', 'salon']);
   });
 
-  it('returns the salon placeholder and never calls the data source for it', async () => {
-    const c = await start();
-    const r = await request(c.port, { path: '/api/department/salon' });
-    expect(r.status).toBe(200);
-    const d = JSON.parse(r.text);
-    expect(d).toEqual({ id: 'salon', name: 'Salon Department (stand-in for Cindy)', placeholder: true, message: SALON_MESSAGE });
-    expect(d.message).toContain('Cindy runs in her own app.');
-    expect(d.message).toContain('her family and personal data stay in her app');
-    expect(c.deps.load).not.toHaveBeenCalled();
+  it('reads the salon like any other department: a live tab with its own data, not a placeholder', async () => {
+    const data = dirty();
+    data.assistant = { display_name: 'Salon stand-in', sms_from: '+15551230001' };
+    const c = await start({ load: async () => data });
+    const d = JSON.parse((await request(c.port, { path: '/api/department/salon' })).text);
+    expect(d).toMatchObject({ id: 'salon', name: 'Salon Department (stand-in for Cindy)', counts: { openTasks: 2, proposals: 1, pendingApprovals: 1 } });
+    expect(d.assistant).toEqual({ displayName: 'Salon stand-in', number: '…0001' });
+    expect(d.tasks).toHaveLength(2);
+    expect(d.reports).toHaveLength(2);
+    expect(d).not.toHaveProperty('placeholder');
+    expect(d).not.toHaveProperty('message');
   });
 
   it('answers 404 for an unknown department without calling the data source', async () => {
@@ -343,10 +356,11 @@ describe('the page', () => {
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toBe('text/html; charset=utf-8');
     for (const d of DEPARTMENTS) expect(r.text).toContain(d.name);
-    for (const name of ['Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)']) expect(r.text).toContain(name);
-    // The tab order is the department order: Owner, Finance, Online, HQ Manager, Salon.
+    for (const name of ['Divisions', 'Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)']) expect(r.text).toContain(name);
+    // The tab order: the Divisions view first, then the department order: Owner, Finance, Online, HQ Manager, Salon.
     const tabs = [...r.text.matchAll(/data-id="([a-z]+)"/g)].map((m) => m[1]);
-    expect(tabs).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);
+    expect(tabs).toEqual(['divisions', 'owner', 'finance', 'online', 'manager', 'salon']);
+    expect(r.text).not.toContain('placeholder'); // the salon is a live tab
     expect(r.text).toContain('Work reports: what each task did, how many model calls and tokens it used, and what it suggests.');
     for (const title of ['Usage, last 24 hours', 'Latest review', 'Standing lessons']) expect(r.text).toContain(title);
     expect(r.text).toContain('Fortune AI Headquarters · Admin');
@@ -358,6 +372,7 @@ describe('the page', () => {
     expect(r.text).not.toMatch(/\d{6}/);
     expect(r.text).toContain('10000'); // refreshes every 10 seconds
     expect(c.deps.load).not.toHaveBeenCalled();
+    expect(c.deps.loadDivisions).not.toHaveBeenCalled();
   });
 
   it('draws data only with textContent: no innerHTML, outerHTML, document.write, eval or inline handlers', async () => {
@@ -414,40 +429,6 @@ describe('scrubbing', () => {
 
 // ---- The cloud loader, against a recording fake of the Supabase client ---------------------------
 
-type Call = { table: string; select: string; options: unknown; ops: string[] };
-
-function recorder(answer: (call: Call) => { data: unknown; error?: { message: string; code?: string } | null; count?: number | null }) {
-  const calls: Call[] = [];
-  const db = {
-    from(table: string) {
-      const call: Call = { table, select: '', options: undefined, ops: [] };
-      calls.push(call);
-      const chain: unknown = new Proxy(
-        {},
-        {
-          get(_t, prop: string) {
-            if (prop === 'then') {
-              return (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => {
-                const a = answer(call);
-                return Promise.resolve({ data: a.data, error: a.error ?? null, count: a.count ?? null }).then(resolve, reject);
-              };
-            }
-            return (...args: unknown[]) => {
-              if (prop === 'select') {
-                call.select = String(args[0]);
-                call.options = args[1];
-              } else call.ops.push(`${prop}(${args.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(',')})`);
-              return chain;
-            };
-          },
-        },
-      );
-      return chain;
-    },
-  };
-  return { db: db as never, calls };
-}
-
 const tmpDirs: string[] = [];
 const tmp = () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-console-test-'));
@@ -469,7 +450,7 @@ describe('the cloud loader', () => {
       return { data: [], count: 4 };
     });
     const load = createCloudLoader({ db: r.db, now: () => NOW, brain: noBrain() });
-    for (const id of ['owner', 'finance', 'online'] as const) {
+    for (const id of ['owner', 'finance', 'online', 'salon'] as const) {
       const raw = await load(id);
       expect(raw.counts).toEqual({ openTasks: 4, proposals: 7, pendingApprovals: 1 });
       expect(raw.approvals).toHaveLength(1);
@@ -506,7 +487,7 @@ describe('the cloud loader', () => {
 
   it('never queries for a department that is not an assistant it serves', async () => {
     const r = recorder(() => ({ data: [] }));
-    await expect(createCloudLoader({ db: r.db, now: () => NOW, brain: noBrain() })('salon' as never)).rejects.toThrow('unknown department');
+    await expect(createCloudLoader({ db: r.db, now: () => NOW, brain: noBrain() })('hr' as never)).rejects.toThrow('unknown department');
     expect(r.calls).toHaveLength(0);
   });
 });
@@ -750,7 +731,7 @@ describe('the HQ Manager tab', () => {
     const { load, r, d } = await getManager();
     expect(r.status).toBe(200);
     expect(load.mock.calls).toEqual([['manager']]);
-    expect(d).toMatchObject({ id: 'manager', name: 'HQ Manager', placeholder: false });
+    expect(d).toMatchObject({ id: 'manager', name: 'HQ Manager' });
     expect(d.assistant).toEqual({ displayName: 'HQ Manager', number: null });
     expect(Object.keys(d.manager).sort()).toEqual(['lessons', 'review', 'unread', 'usage']);
     expect(d.reports).toHaveLength(3);
@@ -761,20 +742,21 @@ describe('the HQ Manager tab', () => {
     const { d } = await getManager();
     const usage = d.manager.usage;
     expect(usage.windowHours).toBe(24);
-    expect(usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager']);
+    expect(usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);
     const by = Object.fromEntries(usage.rows.map((x: { assistant: string }) => [x.assistant, x]));
     expect(by.finance).toEqual({ assistant: 'finance', tasks: 3, done: 2, failed: 1, retrying: 0, modelCalls: 6, inputTokens: 5500, outputTokens: 1000 });
     expect(by.owner).toEqual({ assistant: 'owner', tasks: 2, done: 1, failed: 0, retrying: 1, modelCalls: 2, inputTokens: 500, outputTokens: 20 });
     expect(by.online).toEqual({ assistant: 'online', tasks: 0, done: 0, failed: 0, retrying: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0 });
     expect(by.manager).toMatchObject({ tasks: 1, done: 1, failed: 0, modelCalls: 1, inputTokens: 2500, outputTokens: 400 });
+    expect(by.salon).toEqual({ assistant: 'salon', tasks: 0, done: 0, failed: 0, retrying: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0 });
     expect(usage.total).toEqual({ tasks: 6, done: 4, failed: 1, retrying: 1, modelCalls: 9, inputTokens: 8500, outputTokens: 1420 });
   });
 
-  it('counts an unfamiliar assistant id in the total, after the four live rows', async () => {
+  it('counts an unfamiliar assistant id in the total, after the five live rows', async () => {
     const data = dirtyManagerData();
     data.usageRows = [...(data.usageRows ?? []), { assistant_id: 'zeta', outcome: 'done', model_calls: 1, input_tokens: 10, output_tokens: 5 }];
     const { d } = await getManager(managerRaw(data));
-    expect(d.manager.usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'zeta']);
+    expect(d.manager.usage.rows.map((x: { assistant: string }) => x.assistant)).toEqual(['owner', 'finance', 'online', 'manager', 'salon', 'zeta']);
     expect(d.manager.usage.total.tasks).toBe(7);
   });
 
@@ -1072,72 +1054,6 @@ describe('the cloud loader for work reports and the HQ Manager', () => {
 });
 
 // ---- The page, drawn for real against a tiny fake of the browser ---------------------------------------
-
-class FakeEl {
-  children: FakeEl[] = [];
-  className = '';
-  tabIndex = 0;
-  own = '';
-  private readonly attrs = new Map<string, string>();
-  constructor(readonly tag: string) {}
-  set textContent(v: string) {
-    this.own = String(v);
-    this.children = [];
-  }
-  get textContent(): string {
-    return [this.own, ...this.children.map((c) => c.textContent)].filter((x) => x !== '').join('\n');
-  }
-  appendChild(c: FakeEl): FakeEl {
-    this.children.push(c);
-    return c;
-  }
-  replaceChildren(...items: FakeEl[]): void {
-    this.own = '';
-    this.children = items.flatMap((i) => (i.tag === '#fragment' ? i.children : [i]));
-  }
-  setAttribute(k: string, v: string): void {
-    this.attrs.set(k, v);
-  }
-  getAttribute(k: string): string | null {
-    return this.attrs.get(k) ?? null;
-  }
-  addEventListener(): void {}
-  focus(): void {}
-}
-
-/** Runs the page's own script with a fake document, the way the browser would, and returns the text it drew. */
-async function drawTab(id: string, payload: unknown): Promise<string> {
-  const script = /<script>([\s\S]*?)<\/script>/.exec(PAGE_HTML)?.[1] ?? '';
-  const tabs = DEPARTMENTS.map((d) => {
-    const el = new FakeEl('button');
-    el.setAttribute('data-id', d.id);
-    return el;
-  });
-  const panel = new FakeEl('main');
-  const byId: Record<string, FakeEl> = { panel, updated: new FakeEl('span'), foot: new FakeEl('footer') };
-  const sandbox = {
-    document: {
-      querySelectorAll: () => tabs,
-      getElementById: (k: string) => byId[k],
-      createElement: (t: string) => new FakeEl(t),
-      createTextNode: (t: string) => {
-        const e = new FakeEl('#text');
-        e.textContent = t;
-        return e;
-      },
-      createDocumentFragment: () => new FakeEl('#fragment'),
-      addEventListener: () => {},
-      hidden: false,
-    },
-    location: { hash: `#${id}` },
-    history: { replaceState: () => {} },
-    fetch: async () => ({ ok: true, json: async () => payload }),
-    setInterval: () => 0,
-  };
-  vm.runInNewContext(script, sandbox);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  return panel.textContent;
-}
 
 describe('the page draws the new sections', () => {
   const read = async (id: string, load: ConsoleDeps['load']) => {

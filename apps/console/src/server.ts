@@ -1,4 +1,4 @@
-// The Admin console: the owner's read-only view of every assistant department.
+// The Admin console: the owner's read-only view of every assistant department and of the company's divisions.
 // Usage: npm run console   (http://127.0.0.1:5180, or CONSOLE_PORT)
 //
 // Read-only on purpose: GET and HEAD only, no form, no write call to any database. Local only: it
@@ -12,14 +12,17 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import { DEPARTMENTS } from './departments.ts';
-import type { LiveDepartmentId, RawDepartment } from './departments.ts';
-import { createCloudLoader } from './loader.ts';
+import type { DepartmentId, RawDepartment } from './departments.ts';
+import type { RawDivisions } from './divisions.ts';
+import { createCloudLoader, createDivisionsLoader } from './loader.ts';
 import { PAGE_CSP, PAGE_HTML } from './page.ts';
-import { placeholderView, shapeDepartment } from './shape.ts';
+import { shapeDepartment, shapeDivisions } from './shape.ts';
 
 export type ConsoleDeps = {
-  /** Reads one department's data. Called only for owner, finance, online and manager; never for salon. */
-  load: (department: LiveDepartmentId) => Promise<RawDepartment>;
+  /** Reads one department's data. */
+  load: (department: DepartmentId) => Promise<RawDepartment>;
+  /** Reads the Divisions view: the latest briefs, the data requests and the CEO digest. */
+  loadDivisions: () => Promise<RawDivisions>;
   now: () => Date;
   /** Where plain one-line problems go. Defaults to stderr. Never receives data or secrets. */
   log?: (line: string) => void;
@@ -84,15 +87,22 @@ export function createConsoleServer(deps: ConsoleDeps): http.Server {
       return json(req, res, 200, { ok: true, time: deps.now().toISOString() });
     }
     if (pathname === '/api/departments') {
-      return json(req, res, 200, { departments: DEPARTMENTS.map((d) => ({ id: d.id, name: d.name, placeholder: d.placeholder })) });
+      return json(req, res, 200, { departments: DEPARTMENTS.map((d) => ({ id: d.id, name: d.name })) });
+    }
+    if (pathname === '/api/divisions') {
+      let raw: RawDivisions;
+      try {
+        raw = await withTimeout(deps.loadDivisions(), LOAD_TIMEOUT_MS);
+      } catch (error) {
+        log(`console.load_failed department=divisions reason=${error instanceof Error && error.message === 'timed out' ? 'timeout' : 'error'}`);
+        return json(req, res, 502, { error: 'The divisions could not be read right now. Try again in a moment.' });
+      }
+      return json(req, res, 200, shapeDivisions(raw, deps.now()));
     }
 
     const match = /^\/api\/department\/([a-z]{1,20})$/.exec(pathname);
     const info = match ? DEPARTMENTS.find((d) => d.id === match[1]) : undefined;
     if (!info) return json(req, res, 404, { error: 'Not found.' });
-
-    // The salon tab is a placeholder: Cindy runs in her own app, so nothing is read for it.
-    if (info.placeholder || info.id === 'salon') return json(req, res, 200, placeholderView(info));
 
     let raw: RawDepartment;
     try {
@@ -168,7 +178,9 @@ async function main(): Promise<void> {
     },
   });
 
-  const running = await startConsoleServer({ load, now }, port);
+  const loadDivisions = createDivisionsLoader({ db });
+
+  const running = await startConsoleServer({ load, loadDivisions, now }, port);
   console.error(`console: read-only Admin console at ${running.url}`);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
