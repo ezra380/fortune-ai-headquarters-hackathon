@@ -286,10 +286,17 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     }),
     tool({
       name: 'get_product_performance',
-      description: 'Each store product\'s period from its order lines, through Zetaris, by profit ("best" first by default, or "worst"): units, revenue, cost, refunds on those orders to the data date, profit after them, margin, refund rate and product views in the period\'s last week. Totals: products, units, revenue, cost, refunds, profit and how many lost money.',
-      signature: `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')}; sort?: "best" | "worst"; limit?: number }) => Promise<${RowsOf('{ sku: string; productLine: string; units: number; revenueUsd: number; costUsd: number; refundsUsd: number; profitUsd: number; margin: number | null; refundRate: number | null; views7d: number | null }', '{ count: number; units: number; revenueUsd: number; costUsd: number; refundsUsd: number; profitUsd: number; losing: number }')}>`,
+      description: 'Each store product\'s period from its order lines, through Zetaris, by profit ("best" first by default, or "worst"): units, revenue, cost, refunds on those orders to the data date, profit after them, margin, refund rate, product views in the period\'s last week, and its reviews to the data date (how many, average rating out of 5). Totals: products, units, revenue, cost, refunds, profit and how many lost money.',
+      signature: `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')}; sort?: "best" | "worst"; limit?: number }) => Promise<${RowsOf('{ sku: string; productLine: string; units: number; revenueUsd: number; costUsd: number; refundsUsd: number; profitUsd: number; margin: number | null; refundRate: number | null; views7d: number | null; avgRating: number | null; reviews: number }', '{ count: number; units: number; revenueUsd: number; costUsd: number; refundsUsd: number; profitUsd: number; losing: number }')}>`,
       schema: z.object({ period: PeriodArg, sort: z.enum(['best', 'worst']).optional(), limit: Limit }).strict(),
       run: ({ period, sort, limit }) => rows({ table: 'products', period, sort: sort ?? 'best' }, limit),
+    }),
+    tool({
+      name: 'get_return_cases',
+      description: 'Each refund issued in one period, through Zetaris, oldest first: order, customer (a synthetic id, never a name), the order\'s products, reason, amount, days after the sale; the customer\'s refunds in the last 365 days, reviews (count, lowest rating, topics) and messages to the shop (count, topics; never the text). Totals: refunds, amount, customers, repeat customers (two or more refunds in the year), and count and amount by reason.',
+      signature: `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')}; limit?: number }) => Promise<${RowsOf('{ refundId: string; orderId: string; customerId: string; skus: string | null; reason: "return" | "damage" | "other"; amountUsd: number; refundDate: string; daysAfterSale: number; refunds365d: number; reviews: number; lowestRating: number | null; reviewTopics: string | null; messages: number; messageTopics: string | null }', '{ count: number; amountUsd: number; customers: number; repeatCustomers: number; byReason: { return: number; damage: number; other: number }; amountByReason: { return: number; damage: number; other: number } }')}>`,
+      schema: z.object({ period: PeriodArg, limit: Limit }).strict(),
+      run: ({ period, limit }) => rows({ table: 'return_cases', period }, limit),
     }),
     tool({
       name: 'recall_my_decisions',

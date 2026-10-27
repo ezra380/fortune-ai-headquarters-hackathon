@@ -99,7 +99,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       const messageSid = await textIn(ownerPhone, 'How is the online store doing?');
       expect(lastTo(ownerPhone)).toBe('[Online] Online Mazali revenue is 12400 dollars.');
       expect(codeMode.calls[0]).toMatchObject({ purpose: 'online.lookup', model: 'MOCK/online/code', skill: 'SKILL(online)', question: 'How is the online store doing?' });
-      expect(toolNames()).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'get_product_performance', 'recall_my_decisions', 'my_lessons']);
+      expect(toolNames()).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'get_product_performance', 'get_return_cases', 'recall_my_decisions', 'my_lessons']);
       expect(model.of('online.answer')[0]).toMatchObject({ model: 'MOCK/online/answer', system: expect.stringContaining('SKILL(online)') });
       // The answer comes from the number the owner texted, not from a number the owner never wrote to.
       expect((await pool.query(`select from_assistant from public.outbox where dedupe_key = $1`, [`reply:${(await taskOfText(messageSid)).id}`])).rows[0].from_assistant).toBe('owner');

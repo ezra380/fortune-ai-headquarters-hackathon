@@ -165,7 +165,8 @@ function compare(label: string, got: Map<string, number>, want: Map<string, numb
   for (const [id, w] of want) {
     const g = got.get(id);
     const unit = (CATALOG_V2_BY_ID.get(id) ?? METRIC_BY_ID.get(id))?.unit;
-    const tolerance = unit === 'ratio' ? 0.00011 : unit === 'usd' ? 0.011 : 0;
+    // Counts are exact; an average rating or a median of minutes is rounded like money.
+    const tolerance = unit === 'ratio' ? 0.00011 : unit === 'usd' || unit === 'score' || unit === 'minutes' ? 0.011 : 0;
     if (g === undefined) problems.push(`${id}: missing from Zetaris (expected ${w})`);
     else if (Math.abs(g - w) > tolerance) problems.push(`${id}: Zetaris ${g}, expected ${w}`);
   }
@@ -221,12 +222,16 @@ const ROW_READS: RowRead[] = [
   // Wave 2, the channels.
   { table: 'marketplace_stock', status: 'all' }, { table: 'marketplace_stock', status: 'low', marketplace: 'amazon' },
   { table: 'products', period: '2026-10-mtd', sort: 'worst' }, { table: 'products', period: '2026-09', sort: 'best' },
+  // Wave 2, the customers.
+  { table: 'return_cases', period: '2026-10-mtd' }, { table: 'return_cases', period: '2026-09' },
 ];
 const SERIES: { division: Division; id: string }[] = [
   { division: 'finance', id: 'm:online.revenue.total' }, { division: 'finance', id: 'm:online.budget.google.room' },
   { division: 'salon', id: 'm:salon.no_show_rate' }, { division: 'online', id: 'm:online.service.replied_24h.share' },
   { division: 'hq', id: 'm:salon.season.month_index' },
   { division: 'finance', id: 'm:online.amazon.revenue' }, { division: 'online', id: 'm:online.products.negative_margin.count' },
+  { division: 'online', id: 'm:online.service.duplicate.count' }, { division: 'online', id: 'm:online.service.emma.first_reply_minutes' },
+  { division: 'hq', id: 'm:online.reviews.avg_rating' },
 ];
 
 /** Equal as data: the same keys, strings exactly, numbers within a cent (or a hundredth of an hour). */
