@@ -1,5 +1,6 @@
 import { checkPlans, type Metric, type ProfitPlans } from '@fahq/contracts';
 import { done, errorText, fail, fitSms, newCode, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
+import { readData } from './data-read.ts';
 import { DEPARTMENT_LABEL, isDepartment, originsOf, type Department, type Origin } from './departments.ts';
 import { PlanError, planLine, writePlans, type PlanResult } from './finance.ts';
 import type { MessageRow, PersonRow, TaskRow } from './store.ts';
@@ -46,7 +47,8 @@ export async function planRound(task: TaskRow, deps: WorkerDeps, runId: string):
   const started = deps.now();
   let source: Source;
   try {
-    const read = await deps.data.getFinanceMetrics({ asOf: started.toISOString(), period: deps.period });
+    const data = deps.data;
+    const read = await readData(() => data.getFinanceMetrics({ asOf: started.toISOString(), period: deps.period }));
     source = { metrics: read.metrics, queryHash: read.queryHash, view: read.view };
   } catch (error) {
     const detail = errorText(error, 'the business data could not be read');

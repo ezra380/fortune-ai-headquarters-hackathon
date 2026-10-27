@@ -569,12 +569,17 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
   });
 
   it('says which ranks were not adopted, and (with the rule on) which the manager had already applied', async () => {
+    // Merge wave 1, item d: a rank the review lacks is refused whole BEFORE the code is spent (as APPROVE does with
+    // peek_approval_code), so one wrong digit never costs the owner his code.
     const { code } = await askForReview();
-    await textIn(ownerPhone, `ADOPT 2,3 ${code}`);
-    expect(lastTo(ownerPhone)).toBe("Adopted: 2 (online). Not adopted: 3 (not an open recommendation in this review). They're now in place.");
+    const adoptSid = await textIn(ownerPhone, `ADOPT 2,3 ${code}`);
+    expect(lastTo(ownerPhone)).toBe('This review has no recommendation 3. Nothing was adopted, and your code still works.');
+    expect((await stepsOf((await taskOfText(adoptSid)).id)).map((s) => [s.step, s.outcome, s.detail])).toEqual([['approval.adopt', 'refused', 'the review has no recommendation 3; the code was not spent']]);
+    await textIn(ownerPhone, `ADOPT 2 ${code}`); // the same code still works
+    expect(lastTo(ownerPhone)).toBe("Adopted: 2 (online). They're now in place.");
     const again = await askForReview();
     await textIn(ownerPhone, `ADOPT 3 ${again.code}`);
-    expect(lastTo(ownerPhone)).toBe('Nothing was adopted. Not adopted: 3 (not an open recommendation in this review).');
+    expect(lastTo(ownerPhone)).toBe('This review has no recommendation 3. Nothing was adopted, and your code still works.');
     // With the rule on, rank 1 is a lesson the manager applied without a code: the owner's code does not need to, and does not, redo it.
     use.rule = true;
     const third = await askForReview();

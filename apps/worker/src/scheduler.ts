@@ -3,9 +3,10 @@ import { allReported, briefKey, enqueueBrief } from './brief.ts';
 import { errorText, receipt, type WorkerDeps } from './common.ts';
 import { ROUND_DEPARTMENTS } from './departments.ts';
 import { easternClock, enqueueDigest, enqueuePartialDigest } from './digest.ts';
+import { queueDailyReview } from './manager-daily.ts';
 
 // The daily clock. Once a day, in New York time, the worker queues the day's work for the assistants:
-//   08:00  the three division briefs        08:30  the CEO digest
+//   08:00  the three division briefs        08:30  the CEO digest        09:00  the HQ Manager's daily review
 // Queuing is idempotent by key (the same job for the same day is never a second task), so a worker that restarts,
 // two workers, or a missed minute cannot double anything. A job that was due while the worker was down is still queued
 // when it comes back, but only within a few hours of its time: a worker started in the evening does not send the
@@ -47,6 +48,9 @@ export async function enqueueDayDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, 
 export const SCHEDULE: ScheduledJob[] = [
   { name: 'division-briefs', at: '08:00', enqueue: async (deps, date) => { for (const division of ROUND_DEPARTMENTS) await enqueueBrief(deps, division, date); } },
   { name: 'ceo-digest', at: '08:30', enqueue: (deps, date) => enqueueDayDigest(deps, date) },
+  // The review's key is the New York day of `now` (the same day as `date`), so a second ask queues nothing; quiet on a
+  // day with nothing to review (docs/manager.md, "The daily review").
+  { name: 'manager-review', at: '09:00', enqueue: async (deps) => { await queueDailyReview(deps); } },
 ];
 
 /** How long after its time a job is still queued by a worker that was not running at that time. */

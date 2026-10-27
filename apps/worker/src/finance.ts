@@ -1,6 +1,7 @@
-import { DEFAULT_PERIODS, Period, checkPlans, type DataPort, type Metric, type ModelPort, type Plan, type ProfitPlans } from '@fahq/contracts';
+import { DEFAULT_PERIODS, PERIOD_KEYS, Period, checkPlans, type DataPort, type Metric, type ModelPort, type Plan, type ProfitPlans } from '@fahq/contracts';
 import type { AssistantMemory } from '@fahq/brain';
 import { parseJsonObject, positiveInt } from '@fahq/models';
+import { readData } from './data-read.ts';
 import { DEPARTMENT_LABEL, countNouns, departmentLine, sliceFor, type Department, type Origin } from './departments.ts';
 
 // The finance assistant's thinking step. Numbers come only from Zetaris; past decisions come only
@@ -130,12 +131,13 @@ export async function writePlans(deps: {
 }
 
 /**
- * The period the worker plans for (FINANCE_PERIOD): one the data serves, else 2026-09 (served by every data
- * version) with a note to log. Under data version 1 only the last two periods are served, so "2026-08" would
- * pass startup and then make every finance read fail.
+ * The period the worker plans for (FINANCE_PERIOD): one the data serves, else the default with a note to log. Under
+ * data version 1 only the last two periods are served, so "2026-08" would pass startup and then make every finance
+ * read fail. The default is this month, 2026-10-mtd, when the data serves it (design 4g: budget room and the
+ * last-year index then mean "this month"), else the latest period the data serves.
  */
 export function financePeriod(value: string | undefined, served: readonly Period[] = DEFAULT_PERIODS): { period: Period; note: string | null } {
-  const fallback: Period = '2026-09';
+  const fallback: Period = [...PERIOD_KEYS].reverse().find((p) => served.includes(p)) ?? '2026-10-mtd';
   if (!value) return { period: fallback, note: null };
   const parsed = Period.safeParse(value);
   if (parsed.success && served.includes(parsed.data)) return { period: parsed.data, note: null };
@@ -144,8 +146,9 @@ export function financePeriod(value: string | undefined, served: readonly Period
 }
 
 async function readMetrics(deps: { data?: DataPort; now: Date; period: Period }) {
-  if (!deps.data) throw new Error('business data is not connected');
-  return deps.data.getFinanceMetrics({ asOf: deps.now.toISOString(), period: deps.period });
+  const data = deps.data;
+  if (!data) throw new Error('business data is not connected');
+  return readData(() => data.getFinanceMetrics({ asOf: deps.now.toISOString(), period: deps.period }));
 }
 
 /**

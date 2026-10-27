@@ -412,8 +412,11 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[]; smal
 const ROW_ID = /(?:^|[^\p{L}\p{N}_-])(?:demo(?:-[a-z]+)+-[a-z]*|sup-)\d+$/iu;
 const ID_END = /^(?:$|[\s,;:)!?]|\.(?:\s|$))/;
 
-/** Do the digits ending at `end` close a row id, with nothing glued after them? */
-function isRowId(text: string, end: number): boolean {
+/**
+ * Do the digits ending at `end` close a row id, with nothing glued after them? The one definition: the plan checker,
+ * the worker's number trace (reports.ts) and the Code Mode answer trace (answer.ts) all skip exactly these digits.
+ */
+export function isRowId(text: string, end: number): boolean {
   return ROW_ID.test(text.slice(0, end)) && ID_END.test(text.slice(end));
 }
 

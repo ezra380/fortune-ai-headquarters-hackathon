@@ -139,9 +139,11 @@ describe('the company\'s clock (New York time)', () => {
 describe('the daily schedule', () => {
   const at = (iso: string) => new Date(iso);
   const names = (iso: string, jobs?: readonly ScheduledJob[]) => dueJobs(at(iso), jobs).map((d) => d.job.name);
+  // The briefs' two jobs; the manager's review has its own tests below.
+  const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review');
 
   it('holds the three briefs at 08:00 and the digest at 08:30, New York time', () => {
-    expect(SCHEDULE.map((j) => [j.name, j.at])).toEqual([['division-briefs', '08:00'], ['ceo-digest', '08:30']]);
+    expect(BRIEF_JOBS.map((j) => [j.name, j.at])).toEqual([['division-briefs', '08:00'], ['ceo-digest', '08:30']]);
   });
 
   it('queues nothing before 08:00, the briefs from 08:00, the digest from 08:30', () => {
@@ -154,10 +156,10 @@ describe('the daily schedule', () => {
 
   it('still queues a job a worker missed, but only within a few hours of its time', () => {
     expect(GRACE_MINUTES).toBe(240);
-    expect(names('2026-10-27T15:59:00Z')).toEqual(['division-briefs', 'ceo-digest']); // 11:59: the briefs' four hours end at 12:00
-    expect(names('2026-10-27T16:00:00Z')).toEqual(['ceo-digest']); // 12:00
-    expect(names('2026-10-27T16:29:00Z')).toEqual(['ceo-digest']); // 12:29
-    expect(names('2026-10-27T16:30:00Z')).toEqual([]); // 12:30
+    expect(names('2026-10-27T15:59:00Z', BRIEF_JOBS)).toEqual(['division-briefs', 'ceo-digest']); // 11:59: the briefs' four hours end at 12:00
+    expect(names('2026-10-27T16:00:00Z', BRIEF_JOBS)).toEqual(['ceo-digest']); // 12:00
+    expect(names('2026-10-27T16:29:00Z', BRIEF_JOBS)).toEqual(['ceo-digest']); // 12:29
+    expect(names('2026-10-27T16:30:00Z', BRIEF_JOBS)).toEqual([]); // 12:30
     expect(names('2026-10-28T02:00:00Z')).toEqual([]); // 22:00: a worker started in the evening sends nothing
   });
 
@@ -166,9 +168,16 @@ describe('the daily schedule', () => {
   });
 
   it('tells a lane\'s own job apart: a job added to the table is due at its time', () => {
-    const review: ScheduledJob = { name: 'manager-review', at: '09:00', enqueue: async () => {} };
-    expect(names('2026-10-27T13:00:00Z', [...SCHEDULE, review])).toEqual(['division-briefs', 'ceo-digest', 'manager-review']);
+    const review: ScheduledJob = { name: 'lane-job', at: '09:00', enqueue: async () => {} };
+    expect(names('2026-10-27T13:00:00Z', [...BRIEF_JOBS, review])).toEqual(['division-briefs', 'ceo-digest', 'lane-job']);
     expect(() => dueJobs(at('2026-10-27T13:00:00Z'), [{ ...review, at: '9am' }])).toThrow('scheduled time "9am" is not HH:MM');
+  });
+
+  // Merge wave 1, item a: the HQ Manager's daily review (queueDailyReview, docs/manager.md) runs on the brief lane's clock.
+  it("holds the HQ Manager's daily review at 09:00, after the briefs and the digest", () => {
+    expect(SCHEDULE.map((j) => [j.name, j.at])).toEqual([['division-briefs', '08:00'], ['ceo-digest', '08:30'], ['manager-review', '09:00']]);
+    expect(names('2026-10-27T12:59:00Z', SCHEDULE.filter((j) => j.name === 'manager-review'))).toEqual([]); // 08:59 EDT
+    expect(names('2026-10-27T13:00:00Z', SCHEDULE.filter((j) => j.name === 'manager-review'))).toEqual(['manager-review']);
   });
 
   it('FAHQ_SCHEDULE=off turns the clock off, and nothing else does', () => {
@@ -261,6 +270,33 @@ describe('queuing what is due', () => {
     expect(error).toHaveBeenCalledWith('scheduler.tick_failed: the clock broke');
     expect(calls).toEqual(['a@2026-10-27']);
     vi.restoreAllMocks();
+  });
+});
+
+describe("the HQ Manager's daily review on the clock", () => {
+  type Queued = { assistant: string; kind: string; key: string; payload: Record<string, unknown> };
+  const deps = (at: string, tasks: Map<string, Queued>) => ({
+    now: () => new Date(at), live: false,
+    store: {
+      receipt: async () => {},
+      taskStatusByKey: async (key: string) => (tasks.has(key) ? 'queued' : null),
+      enqueueTask: async (t: Queued) => { if (!tasks.has(t.key)) tasks.set(t.key, t); },
+    },
+  }) as unknown as WorkerDeps;
+  const review = SCHEDULE.filter((j) => j.name === 'manager-review');
+
+  it('queues one quiet review task keyed by the New York day, however often the clock asks, from one worker or a restarted one', async () => {
+    expect(review).toHaveLength(1);
+    const tasks = new Map<string, Queued>();
+    const queued = new Set<string>();
+    expect(await runDueJobs(deps('2026-10-27T13:00:00Z', tasks), queued, review)).toEqual(['manager-review']);
+    expect(await runDueJobs(deps('2026-10-27T13:05:00Z', tasks), queued, review)).toEqual([]); // asked again: nothing
+    expect(await runDueJobs(deps('2026-10-27T14:00:00Z', tasks), new Set(), review)).toEqual(['manager-review']); // a restarted worker
+    expect([...tasks.values()]).toEqual([
+      { assistant: 'manager', kind: 'scheduled', key: 'review:daily:2026-10-27', payload: { job: 'manager_review', hours: 24, quiet: true }, now: new Date('2026-10-27T13:00:00Z') },
+    ]);
+    expect(await runDueJobs(deps('2026-10-28T13:00:00Z', tasks), queued, review)).toEqual(['manager-review']); // the next day
+    expect([...tasks.keys()]).toEqual(['review:daily:2026-10-27', 'review:daily:2026-10-28']);
   });
 });
 

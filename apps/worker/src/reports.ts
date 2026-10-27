@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WorkReport, type AssistantId, type Receipt, type Suggestion, type WorkStep } from '@fahq/contracts';
+import { WorkReport, isRowId, type AssistantId, type Receipt, type Suggestion, type WorkStep } from '@fahq/contracts';
 
 // End-of-work reports and the checks the HQ Manager relies on. Everything here is plain code:
 //  - buildWorkReport turns a finished task's receipts into a WorkReport. Its suggestions come from
@@ -212,8 +212,10 @@ export function summarizeUsage(rows: readonly UsageRow[], since: Date): { since:
 //    above change the value (1.5k is 1500).
 //  - Larger number words (four ... billion, dozen) are refused: write digits, and only if the number is in the data.
 //  - What does not count: dates, periods and metric ids (removed first), and digits that belong to a name:
-//    right after letters (gpt4, v2), after a hyphen that follows a letter (nemotron-3-ultra), after a dot
-//    that follows a letter or digit (v1.2), after an underscore.
+//    right after letters (gpt4, v2), after a dot that follows a letter or digit (v1.2), after an underscore;
+//    after a word and a hyphen only when they sit inside a name (nemotron-3-ultra, lightning-30b) or close a
+//    row id (SUP-2201, demo-rt-01234; isRowId in @fahq/contracts, the plan checker's rule). "high-35%",
+//    "ROAS-9.5x" and "the top-100 buyers" are read.
 //  - What matches: a given number rounded to 0, 1 or 2 decimals equals the written one (112.4 may be written
 //    112); a percentage may also match the given number times 100 (0.0512 as 5.12%). A number written with
 //    a minus sign must match a negative number in the data. One written without may describe a drop
@@ -223,7 +225,16 @@ export function summarizeUsage(rows: readonly UsageRow[], since: Date): { since:
 const BIG_WORDS = /\b(?:four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen)\b/gi;
 const SMALL_WORDS = /\b(?:zero|one|two|three)\b/gi;
 const SMALL_VALUE = { zero: 0, one: 1, two: 2, three: 3 } as const;
-const NUMBER = /(?<![\p{L}\p{N}_]|[\p{L}\p{N}_]\.|\p{L}-)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(%|[kK](?![\p{L}\d])|M(?![\p{L}\d])|(?:ms|s|x|×)(?![\p{L}\d]))?(?!\d)/gu;
+const NUMBER = /(?<![\p{L}\p{N}_]|[\p{L}\p{N}_]\.)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(%|[kK](?![\p{L}\d])|M(?![\p{L}\d])|(?:ms|s|x|×)(?![\p{L}\d]))?(?!\d)/gu;
+// After a word and a hyphen, a number with no suffix is a name when a letter or another hyphen follows it.
+const AFTER_WORD_HYPHEN = /\p{L}-$/u;
+const NAME_GOES_ON = /^-?[\p{L}\p{N}]/u;
+
+/** Digits that belong to a name: inside one (nemotron-3-ultra, lightning-30b) or closing a row id (SUP-2201). */
+function inName(text: string, at: number, end: number, suffix: string | undefined): boolean {
+  if (suffix || !AFTER_WORD_HYPHEN.test(text.slice(0, at))) return false;
+  return NAME_GOES_ON.test(text.slice(end)) || isRowId(text, end);
+}
 // A minus sign (or typographic minus or en dash) right in front of a number, not joined to the end of a word or number
 // (so "10-20" and "10–20" are ranges), with an optional currency sign between ("-$1500").
 const SIGN_BEFORE = /(?<![\p{L}\p{N}_])[-−–][$£€]?$/u;
@@ -244,6 +255,8 @@ function digitsIn(text: string): TracedNumber[] {
   for (const m of text.matchAll(NUMBER)) {
     const [raw, whole, fraction, suffix] = m;
     if (whole === undefined) continue;
+    const at = m.index ?? 0;
+    if (inName(text, at, at + raw.length, suffix)) continue;
     let value = Number(whole.replaceAll(',', '') + (fraction ? `.${fraction}` : ''));
     if (suffix === 'k' || suffix === 'K') value *= 1e3;
     if (suffix === 'M') value *= 1e6;

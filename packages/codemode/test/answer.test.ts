@@ -183,6 +183,20 @@ describe('traceNumbers: other ways of writing a number', () => {
   });
 });
 
+// Merge wave 1, item b: the twin of the data lane's fix 4e. A row id names a row; its digits are not an amount.
+describe('traceNumbers: row ids are names, not amounts', () => {
+  const rowFacts = { rows: [{ invoice: 'SUP-2199', amountUsd: 400 }, { repair: 'demo-rt-01234', feeUsd: 85 }] };
+
+  it('skips only the digits that close a row id (SUP-2201, demo-rt-01234), never a figure after a word and a hyphen', () => {
+    expect(traceNumbers('Invoice SUP-2201 is overdue by $400.', rowFacts)).toEqual([]);
+    expect(traceNumbers('Repair demo-rt-01234 (and demo-s-3) costs $85.', rowFacts)).toEqual([]);
+    expect(traceNumbers('A high-35% margin and ROAS-9.5x.', rowFacts)).toEqual(['"35%" is not in the facts', '"9.5x" is not in the facts']);
+    expect(traceNumbers('A sub-$5,000 test for the top-100 buyers.', rowFacts)).toEqual(['"$5,000" is not in the facts', '"100" is not in the facts']);
+    expect(traceNumbers("SUP-2201's balance is $400.", rowFacts)).toEqual(['"2201" is not in the facts']); // glued: not an id
+    expect(mentions('Invoice SUP-2201 is open.', 2201)).toBe(false);
+  });
+});
+
 describe('traceNumbers: list numbers after any punctuation', () => {
   const listFacts = { google: { spend: 4100, revenue: 14760 }, amazon: { spend: 2000, revenue: 5000 } };
 

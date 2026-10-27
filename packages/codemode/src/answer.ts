@@ -1,4 +1,4 @@
-import type { ModelPort } from '@fahq/contracts';
+import { isRowId, type ModelPort } from '@fahq/contracts';
 
 // The reply step after a Code Mode script: a model turns the script's small facts into a few plain
 // sentences, and a program then checks that every number in the reply came from those facts.
@@ -80,6 +80,7 @@ function figuresIn(text: string): Figure[] {
     const unit = (unitRaw ?? '').toLowerCase().replace(/\s/g, '');
     const afterPoint = fraction ?? leading; // "3.6" and ".9" both have digits after the point
     if (/[\p{L}\p{N}_]/u.test(text[end] ?? '')) continue; // "2nd", "4pm", "30min": not a claim
+    if (!dollar && !unit && !afterPoint && isRowId(text, end)) continue; // "SUP-2201", "demo-rt-01234": a row's name, not an amount
     const lineStart = text.lastIndexOf('\n', at - 1) + 1;
     if (!dollar && !unit && !afterPoint && /^[\s\-*•]*$/.test(text.slice(lineStart, at)) && /^[.)](?:\s|$)/.test(text.slice(end, end + 2))) continue; // a list number: "1. "
     const percent = unit === '%' || unit.startsWith('per');
@@ -162,7 +163,8 @@ function isDateYear(before: string, year: number, named: ReadonlySet<number>): b
  * must be written "min" or "minutes".
  *
  * Not claims: list numbers ("1." at the start of a line, after any punctuation), digits inside words
- * ("2nd", "4pm", "30min"), calendar dates (2026-09, 2026-09-15), and a four-digit year in a real date
+ * ("2nd", "4pm", "30min"), the digits that close a row id ("SUP-2201", "demo-rt-01234"; isRowId in
+ * @fahq/contracts, so "high-35%" and "ROAS-9.5x" are still read), calendar dates (2026-09, 2026-09-15), and a four-digit year in a real date
  * context: right after a month or a quarter ("September 2026", "Q3 2026"), or after "since", "during"
  * or a sentence-opening "In" when the facts (or `context`, such as the question) name that year.
  * Every other number from 1900 to 2100 is an amount like any other ("spend of 1950", "brought in 1999").

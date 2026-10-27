@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AssistantMemory } from '@fahq/brain';
 import { PERIOD_KEYS, WorkReport, type Receipt } from '@fahq/contracts';
 import { parseCommand } from '../src/commands.ts';
@@ -63,6 +63,17 @@ const memoryMock = { recallDecisions: () => [], declinedSimilarTo: () => [] } as
 const base = { planModel: 'nvidia/ultra', data: dataMock, memory: memoryMock, now: new Date('2026-10-26T12:00:00Z'), request: 'Three plans to double profit', period: '2026-09' as const };
 
 describe('writePlans', () => {
+  // Merge wave 1, item c: the finance mailbox (flows.ts) keeps writePlans' error as the failure detail, so the data
+  // read inside it must never carry a provider's text (an HTTP body, SQL, a host name, an email).
+  it("keeps the data source's own text out of its failure: a fixed sentence with a code, the detail in the log", async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const data = { ...dataMock, getFinanceMetrics: async () => { throw new Error('HTTP 500: AnalysisException near SELECT * FROM fortune_hq_v2.period_metrics on zetaris-node-7.internal:18121 for demo@example.com'); } };
+    await expect(writePlans({ ...base, data, model: modelMock() })).rejects.toThrow(/^Business data could not be read \(ZETARIS_READ\)\.$/);
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringMatching(/^worker\.zetaris_read_failed Error: HTTP 500: AnalysisException/)]);
+    expect(log.mock.calls.join('\n')).not.toContain('demo@example.com');
+    log.mockRestore();
+  });
+
   it('accepts valid plans on the first try', async () => {
     const result = await writePlans({ ...base, model: modelMock() });
     expect(result.attempts).toBe(1);
@@ -180,14 +191,23 @@ const report = (receipts: Receipt[], over: { outcome?: 'done' | 'failed' | 'retr
 
 // Review 2026-10-27: FINANCE_PERIOD=2026-08 passed startup under data version 1, then every finance read failed.
 describe('financePeriod (FINANCE_PERIOD at startup)', () => {
-  it('uses a period the data serves, and otherwise plans for 2026-09 with a reason to log', () => {
-    expect(financePeriod(undefined)).toEqual({ period: '2026-09', note: null });
+  it('uses a period the data serves, and otherwise plans for the default period with a reason to log', () => {
+    expect(financePeriod('2026-09')).toEqual({ period: '2026-09', note: null });
     expect(financePeriod('2026-10-mtd')).toEqual({ period: '2026-10-mtd', note: null });
     expect(financePeriod('2026-08')).toEqual({
-      period: '2026-09', note: 'FINANCE_PERIOD "2026-08" is not used (this data serves only 2026-09, 2026-10-mtd); planning for 2026-09',
+      period: '2026-10-mtd', note: 'FINANCE_PERIOD "2026-08" is not used (this data serves only 2026-09, 2026-10-mtd); planning for 2026-10-mtd',
     });
     expect(financePeriod('2026-08', PERIOD_KEYS)).toEqual({ period: '2026-08', note: null });
-    expect(financePeriod('2026-13')).toEqual({ period: '2026-09', note: 'FINANCE_PERIOD "2026-13" is not used (it is not a period); planning for 2026-09' });
+    expect(financePeriod('2026-13')).toEqual({ period: '2026-10-mtd', note: 'FINANCE_PERIOD "2026-13" is not used (it is not a period); planning for 2026-10-mtd' });
+  });
+
+  // Merge wave 1, item e (design 4g): with no FINANCE_PERIOD, plans are for this month (2026-10-mtd) when the data serves
+  // it, so budget room and the last-year index mean "this month"; otherwise for the latest period the data serves.
+  it('defaults to 2026-10-mtd when the data serves it, else to the latest period it serves; a typo falls back the same way', () => {
+    expect(financePeriod(undefined)).toEqual({ period: '2026-10-mtd', note: null });
+    expect(financePeriod(undefined, PERIOD_KEYS)).toEqual({ period: '2026-10-mtd', note: null });
+    expect(financePeriod(undefined, ['2026-07', '2026-09', '2026-08'])).toEqual({ period: '2026-09', note: null });
+    expect(financePeriod('2026-13', ['2026-08', '2026-09'])).toEqual({ period: '2026-09', note: 'FINANCE_PERIOD "2026-13" is not used (it is not a period); planning for 2026-09' });
   });
 });
 
@@ -339,6 +359,21 @@ describe('numberTrace', () => {
   it('finds numbers inside the data\'s own strings and nested values', () => {
     expect(numberTrace([['t', 'The plan took 75 s.']], { deep: { list: ['finance.plans took 75 s'] } })).toEqual([]);
     expect(numberTrace([['t', 'It was 75.']], { deep: { list: [74] } })).toEqual(['t: "75" is not a number in the data']);
+  });
+
+  // Merge wave 1, item b: the twin of the data lane's fix 4e (packages/contracts validate.ts isRowId). A hyphen after a
+  // word no longer hides a figure; only the digits that close a row id, or sit inside a name, are names.
+  it('reads a figure written after a word and a hyphen, and skips only a row id or a name such as nemotron-3-ultra', () => {
+    const data = { margin: 0.2, roas: 4.1, spend: 3000 };
+    const t = (text: string) => numberTrace([['t', text]], data);
+    expect(t('A high-35% margin.')).toEqual(['t: "35%" is not a number in the data']);
+    expect(t('ROAS-9.5x this month.')).toEqual(['t: "9.5x" is not a number in the data']);
+    expect(t('The top-100 buyers.')).toEqual(['t: "100" is not a number in the data']);
+    expect(t('A sub-$5,000 test.')).toEqual(['t: "5,000" is not a number in the data']);
+    expect(t('A mid-20% margin and ROAS-4.1x on a sub-$3,000 spend.')).toEqual([]); // in the data, so they pass
+    expect(t('Invoice SUP-2201 and repair demo-rt-01234 are open; so is demo-s-3.')).toEqual([]);
+    expect(t('It ran on nvidia/nemotron-3.5-lightning-30b-a3b and nemotron-3-ultra.')).toEqual([]);
+    expect(t("SUP-2201's total is 7.")).toEqual(['t: "2201" is not a number in the data', 't: "7" is not a number in the data']); // glued: not an id
   });
 });
 

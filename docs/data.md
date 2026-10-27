@@ -298,7 +298,7 @@ A failed read (Zetaris down, an HTTP error, SQL text in the body) reaches a scri
 "Business data could not be read (ZETARIS_READ)."; the detail goes to the log (`worker.zetaris_read_failed`,
 `fortune-brain.zetaris_read_failed`) with email addresses and phone numbers masked. The door's own plain
 refusals ("it needs data version 2", "not one of the metrics your division reads") still read as before.
-The worker refuses a `FINANCE_PERIOD` the data does not serve: it plans for `2026-09` and logs why.
+The worker refuses a `FINANCE_PERIOD` the data does not serve and logs why. Without one, or after a refusal, it plans for `2026-10-mtd` when the data serves it (design 4g), else for the latest period the data serves (merge wave 1).
 
 ## The plan checker (`packages/contracts/src/validate.ts`)
 

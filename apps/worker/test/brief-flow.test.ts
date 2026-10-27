@@ -573,12 +573,13 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
 
   it('fails plainly, with a receipt, when the numbers cannot be read, and stores no brief', async () => {
     const data = deps.data;
-    deps.data = { ...dataMock, getDivisionMetrics: async () => { throw new Error('Zetaris is down'); } };
+    // Merge wave 1, item c: the provider's own text stays in the log.
+    deps.data = { ...dataMock, getDivisionMetrics: async () => { throw new Error('HTTP 500: AnalysisException on zetaris-node-7.internal'); } };
     try {
       const { task, outcome, row } = await run('finance');
-      expect(outcome).toEqual({ status: 'failed', error: 'the finance numbers could not be read: Zetaris is down' });
+      expect(outcome).toEqual({ status: 'failed', error: 'the finance numbers could not be read: Business data could not be read (ZETARIS_READ).' });
       expect(row).toBeUndefined();
-      expect((await stepsOf(task.id))).toMatchObject([{ step: 'brief.data', outcome: 'failed', detail: 'Zetaris is down' }]);
+      expect((await stepsOf(task.id))).toMatchObject([{ step: 'brief.data', outcome: 'failed', detail: 'Business data could not be read (ZETARIS_READ).' }]);
       expect(model.calls).toHaveLength(0);
     } finally {
       deps.data = data;
@@ -649,6 +650,8 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect((await text(HEAD.finance, 'yes')).reply).toBe(APPROVAL_HINT);
     expect((await text(HEAD.finance, `SEND 1 ${code}`)).reply).toBe('That code is for approving a brief action: reply APPROVE <1-3> <code>. Nothing was sent.');
     expect((await text(HEAD.finance, `CONFIRM ${code}`)).reply).toBe('That code is for approving a brief action: reply APPROVE <1-3> <code>. Nothing was recorded.');
+    // Merge wave 1, item d: ADOPT named the wrong command ("a decision: reply CONFIRM ...") for a brief's code.
+    expect((await text(HEAD.finance, `ADOPT 1 ${code}`)).reply).toBe('That code is for approving a brief action: reply APPROVE <1-3> <code>. Nothing was adopted.');
     expect(await approvalsOf(key)).toMatchObject([{ status: 'pending' }]);
     expect((await text(HEAD.finance, `APPROVE 1 ${code}`)).reply).toContain('Recorded: you approved action 1');
   });

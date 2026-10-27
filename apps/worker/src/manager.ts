@@ -2,6 +2,7 @@ import { MANAGER_APPLIES, TypedManagerReview, type AssistantId, type CodeModeRes
 import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import { KIND_LABEL, changeOf, dataNeverStored, describeChange } from '@fahq/profiles';
+import { BRIEF_CODE_FOR } from './brief.ts';
 import type { Command } from './commands.ts';
 import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
 import { applyRecommendation, objectionToChange, profilesOverview, type Applied } from './profile-changes.ts';
@@ -435,16 +436,47 @@ async function markOutsideReports(
 
 // ---- ADOPT ---------------------------------------------------------------------------------------
 
+/** The review a code hangs from, or null when its message names none. */
+async function reviewBehind(deps: WorkerDeps, messageId: string): Promise<string | null> {
+  const message = await deps.store.message(messageId);
+  return typeof message.body.reviewId === 'string' && message.body.reviewId ? message.body.reviewId : null;
+}
+
+/** What a code of another kind is for, in the words the ADOPT reply uses. */
+const WANTED: Record<string, string> = {
+  forward_plan: 'sending a plan: reply SEND <1-3> <code>',
+  decide_plan: 'a decision: reply CONFIRM <code> or DECLINE <code>',
+  approve_action: BRIEF_CODE_FOR,
+};
+
+/**
+ * The owner replies ADOPT <ranks> <code>. Everything that can be checked is checked BEFORE the code is spent (as APPROVE
+ * does, brief.ts): a rank the review does not have is refused whole with the code still usable, so one wrong digit never
+ * costs the owner his code. A wrong code still falls through to the spend and is counted.
+ */
 export async function adoptChanges(
   command: Extract<Command, { kind: 'adopt' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
   runId: string, started: Date, reply: (b: string) => Promise<void>,
 ): Promise<Outcome> {
+  const pending = await deps.store.peekApprovalCode({ phone: sender.phone, code: command.code, action: 'adopt_change', now: started });
+  if (pending) {
+    const reviewId = await reviewBehind(deps, pending.message_id);
+    if (!reviewId) return fail('the approval does not point at a review');
+    const present = await deps.store.recommendationsOf(reviewId, command.ranks);
+    const lacking = command.ranks.filter((rank) => !present.some((r) => r.rank === rank));
+    if (lacking.length > 0) {
+      const { answer } = await approverOf(pending.approver_person_id, sender, task, deps);
+      await receipt(deps, { runId, taskId: task.id, step: 'approval.adopt', assistant: 'manager', started, outcome: 'refused', detail: `the review has no recommendation ${lacking.join(', ')}; the code was not spent` });
+      await answer(`This review has no recommendation ${lacking.join(' or ')}. Nothing was adopted, and your code still works.`);
+      return done;
+    }
+  }
   const used = await deps.store.useApprovalCode({
     phone: sender.phone, code: command.code, verdict: 'signed', action: 'adopt_change', taskId: task.id,
     detail: { ranks: command.ranks }, now: started,
   });
   if (used.outcome === 'wrong_action') {
-    const wanted = used.action === 'forward_plan' ? 'sending a plan: reply SEND <1-3> <code>' : 'a decision: reply CONFIRM <code> or DECLINE <code>';
+    const wanted = WANTED[used.action ?? ''] ?? 'another command';
     await receipt(deps, { runId, taskId: task.id, step: 'approval.adopt', assistant: sender.assistant_id, started, outcome: 'refused', detail: `code is for ${used.action ?? 'another action'}` });
     await reply(`That code is for ${wanted}. Nothing was adopted.`);
     return done;
@@ -455,8 +487,7 @@ export async function adoptChanges(
     return done;
   }
   const { person, answer } = await approverOf(used.approver_person_id, sender, task, deps);
-  const message = await deps.store.message(used.message_id);
-  const reviewId = typeof message.body.reviewId === 'string' ? message.body.reviewId : '';
+  const reviewId = await reviewBehind(deps, used.message_id);
   if (!reviewId) return fail('the approval does not point at a review');
 
   // The code is the owner's yes to these ranks. Each open one is put into force in the assistant's stored profile (a

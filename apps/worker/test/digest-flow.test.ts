@@ -10,6 +10,10 @@ import { briefKey, enqueueBrief, type BriefDivision } from '../src/brief.ts';
 import { easternClock } from '../src/digest.ts';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { SCHEDULE, runDueJobs } from '../src/scheduler.ts';
+
+// The brief lane's two jobs. The HQ Manager's 09:00 review has its own tests (digest.test.ts); left in, it would queue
+// review tasks into the shared database at every clock time from 09:00.
+const BRIEF_JOBS = SCHEDULE.filter((j) => j.name !== 'manager-review');
 import { createStore, type TaskRow } from '../src/store.ts';
 import { dataMock, fakeCodeMode, mockMetrics, scriptedModel } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
@@ -325,10 +329,10 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     clock.at = etInstant(d, '08:30');
     await runBrief('salon', d); // the salon's brief is in; the others are not
     const marks = new Set<string>();
-    const names = await runDueJobs(deps, marks);
+    const names = await runDueJobs(deps, marks, BRIEF_JOBS);
     expect(names).toEqual(['division-briefs']); // the digest is due too, and waits
-    expect(SCHEDULE.map((j) => j.name)).toEqual(['division-briefs', 'ceo-digest']);
-    expect(await runDueJobs(deps, new Set())).toEqual(['division-briefs']); // another worker's clock: the same keys, so nothing doubles
+    expect(BRIEF_JOBS.map((j) => j.name)).toEqual(['division-briefs', 'ceo-digest']);
+    expect(await runDueJobs(deps, new Set(), BRIEF_JOBS)).toEqual(['division-briefs']); // another worker's clock: the same keys, so nothing doubles
     expect(await tasksLike(`brief:%:${d}`)).toMatchObject([
       { idempotency_key: `brief:finance:${d}`, assistant_id: 'finance' }, { idempotency_key: `brief:online:${d}`, assistant_id: 'online' }, { idempotency_key: `brief:salon:${d}`, assistant_id: 'salon' },
     ]);
@@ -340,7 +344,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     expect(await tasksLike(`digest:${d}%`)).toEqual([]);
     await runBrief('online', d);
     expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}`, assistant_id: 'owner', payload: { job: 'ceo_digest', date: d } }]);
-    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']); // the clock's next beat finds it there
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['ceo-digest']); // the clock's next beat finds it there
     expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
     expect((await rows(`select detail from public.receipts where step = 'scheduler.enqueue' and detail like $1`, [`%${d}%`])).map((r) => r.detail)).toContain(`ceo-digest for ${d} queued`);
 
@@ -358,13 +362,13 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     const d = freshDay();
     clock.at = etInstant(d, '09:00');
     const marks = new Set<string>(); // one worker process's memory
-    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['division-briefs']);
     expect(await tasksLike(`brief:%:${d}`)).toHaveLength(3);
     expect(await tasksLike(`digest:${d}%`)).toEqual([]); // not queued, so not sent ahead of the briefs
 
     // The next beats change nothing, and the wait is reported once.
     clock.at = etInstant(d, '09:01');
-    expect(await runDueJobs(deps, marks)).toEqual([]);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual([]);
     expect(await tasksLike(`digest:${d}%`)).toEqual([]);
     expect(await waitingReceipts(d)).toEqual([{ outcome: 'ok', detail: `ceo-digest for ${d} is waiting: 3 of the day's briefs are still being worked on` }]);
 
@@ -372,7 +376,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     await runBrief('salon', d);
     await runBrief('finance', d);
     clock.at = etInstant(d, '09:20');
-    expect(await runDueJobs(deps, marks)).toEqual([]);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual([]);
     expect(await tasksLike(`digest:${d}%`)).toEqual([]);
     expect(await waitingReceipts(d)).toHaveLength(1);
     expect(sent.has(`digest-sms:digest:${d}`)).toBe(false);
@@ -380,7 +384,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     // The third report queues the complete digest; the clock's next beat finds it there.
     await runBrief('online', d);
     expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
-    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['ceo-digest']);
     expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
     expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
     expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, ...normalLines));
@@ -390,7 +394,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     const d = freshDay();
     clock.at = etInstant(d, '10:45');
     const marks = new Set<string>();
-    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['division-briefs']);
     expect(await tasksLike(`digest:${d}%`)).toEqual([]); // the clock is past 10:30, but the briefs were queued just now
     for (const division of ['salon', 'finance', 'online'] as const) await runBrief(division, d);
     expect((await tasksLike(`digest:${d}%`)).map((t) => t.idempotency_key)).toEqual([`digest:${d}`]);
@@ -403,12 +407,12 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     clock.at = etInstant(d, '08:30');
     const marks = new Set<string>();
     await runBrief('salon', d);
-    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['division-briefs']);
     clock.at = etInstant(d, '10:29');
-    expect(await runDueJobs(deps, marks)).toEqual([]);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual([]);
     expect(await tasksLike(`digest:${d}%`)).toEqual([]);
     clock.at = etInstant(d, '10:30');
-    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['ceo-digest']);
     expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}:partial`, assistant_id: 'owner', payload: { job: 'ceo_digest', date: d, partial: true } }]);
     expect(await runQueued(`digest:${d}:partial`)).toEqual({ status: 'done' });
     expect(sent.get(`digest-sms:digest:${d}:partial`)).toBe(digestText(d, 'Salon: running normally.', 'Finance: no report yet.', 'Online: no report yet.'));
@@ -429,11 +433,11 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     clock.at = etInstant(d, '08:30');
     const marks = new Set<string>();
     await runBrief('salon', d);
-    expect(await runDueJobs(deps, marks)).toEqual(['division-briefs']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['division-briefs']);
     expect(await tasksLike(`digest:${d}%`)).toEqual([]);
     await rows(`update public.tasks set status = 'failed' where idempotency_key = any($1)`, [[`brief:finance:${d}`, `brief:online:${d}`]]); // out of attempts
     clock.at = etInstant(d, '08:31');
-    expect(await runDueJobs(deps, marks)).toEqual(['ceo-digest']);
+    expect(await runDueJobs(deps, marks, BRIEF_JOBS)).toEqual(['ceo-digest']);
     expect(await tasksLike(`digest:${d}%`)).toMatchObject([{ idempotency_key: `digest:${d}:partial` }]);
   });
 
@@ -445,7 +449,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     await runBrief('online', d);
     expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
     clock.at = etInstant(d, '08:30');
-    await runDueJobs(deps, new Set());
+    await runDueJobs(deps, new Set(), BRIEF_JOBS);
     expect(await tasksLike(`digest:${d}%`)).toHaveLength(1);
     expect(await runQueued(`digest:${d}`)).toEqual({ status: 'done' });
     expect(sent.get(`digest-sms:digest:${d}`)).toBe(digestText(d, 'Salon: running normally.', 'Finance: running normally.', 'Online: running normally.'));

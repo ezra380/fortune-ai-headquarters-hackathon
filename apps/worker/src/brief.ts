@@ -7,6 +7,7 @@ import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import type { Command } from './commands.ts';
 import { approverOf, done, errorText, fail, fitSms, isLiveNumber, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
+import { readData } from './data-read.ts';
 import { DEPARTMENT_LABEL, ROUND_DEPARTMENTS, isDepartment, sliceFor, type Department } from './departments.ts';
 import { companyDay, enqueueDigest } from './digest.ts';
 import { formatValue } from './finance.ts';
@@ -74,14 +75,16 @@ export async function divisionData(
     if (ctx) await receipt(deps, { runId: ctx.runId, taskId: ctx.task.id, step: 'brief.data', assistant, started, outcome, dataSource, detail });
   };
   try {
-    if (!deps.data) throw new Error('business data (packages/data) is not connected');
+    const data = deps.data;
+    if (!data) throw new Error('business data (packages/data) is not connected');
     const asOf = started.toISOString();
     let read: DivisionData;
-    if (deps.data.getDivisionMetrics) {
-      read = await deps.data.getDivisionMetrics({ division, period: deps.period, asOf });
+    const byDivision = data.getDivisionMetrics?.bind(data);
+    if (byDivision) {
+      read = await readData(() => byDivision({ division, period: deps.period, asOf }));
       if (read.division !== division) throw new Error(`the data source answered for the ${read.division} division, not ${division}`);
     } else {
-      const all = await deps.data.getFinanceMetrics({ asOf, period: deps.period });
+      const all = await readData(() => data.getFinanceMetrics({ asOf, period: deps.period }));
       read = { division, metrics: isDepartment(division) ? sliceFor(division, all.metrics) : [...all.metrics], attention: [], queryHash: all.queryHash, view: all.view };
     }
     if (read.metrics.length === 0) throw new Error(`the data source returned no metrics for the ${division} division`);

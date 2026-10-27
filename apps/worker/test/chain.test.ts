@@ -399,10 +399,14 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
       deps.data = null;
       await askForPlans();
       expect(lastTo(ownerPhone)).toBe("Business data isn't connected yet, so I can't prepare plans. Nothing was sent.");
-      deps.data = { health: async () => ({ ok: false, detail: 'down' }), getFinanceMetrics: async () => { throw new Error('zetaris is down'); } };
+      // Merge wave 1, item c: a provider's own text (an HTTP body, a host name) never reaches the receipt or the task's error.
+      const body = 'HTTP 500: AnalysisException near SELECT * FROM fortune_hq_v2.period_metrics on zetaris-node-7.internal:18121';
+      deps.data = { health: async () => ({ ok: false, detail: 'down' }), getFinanceMetrics: async () => { throw new Error(body); } };
       const { roundId } = await askForPlans();
       expect(lastTo(ownerPhone)).toBe("I couldn't read the business data just now, so no department could plan. Nothing was sent.");
-      expect((await receiptsOf((await roundTask(roundId)).id))[0]).toMatchObject({ step: 'owner.data', outcome: 'failed', detail: 'zetaris is down' });
+      expect((await receiptsOf((await roundTask(roundId)).id))[0]).toMatchObject({ step: 'owner.data', outcome: 'failed', detail: 'Business data could not be read (ZETARIS_READ).' });
+      const failed = (await pool.query('select last_error from public.tasks where id = $1', [(await roundTask(roundId)).id])).rows[0] as { last_error: string };
+      expect(failed.last_error).toBe('the business data could not be read: Business data could not be read (ZETARIS_READ).');
       expect(planCalls()).toBe(0);
     } finally {
       deps.data = saved;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DivisionBrief, type Attention, type DataPort, type Receipt } from '@fahq/contracts';
 import { parseCommand } from '../src/commands.ts';
 import type { WorkerDeps } from '../src/common.ts';
@@ -61,7 +61,13 @@ describe('where a division gets its numbers (divisionData)', () => {
     const fails = async (port: DataPort | null) => divisionData(depsWith(port), 'salon', { runId: 'r', task: task as never }).then(() => 'read', (e: Error) => e.message);
     expect(await fails(null)).toBe('business data (packages/data) is not connected');
     expect(await fails({ ...dataMock, getFinanceMetrics: async () => ({ metrics: [], queryHash: 'c'.repeat(64), view: 'v' }) })).toBe('the data source returned no metrics for the salon division');
-    expect(await fails({ ...dataMock, getFinanceMetrics: async () => { throw new Error('Zetaris is down'); } })).toBe('Zetaris is down');
+    // Merge wave 1, item c (the brief lane's twin): the provider's own text goes to the log, never to the receipt or the error.
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await fails({ ...dataMock, getFinanceMetrics: async () => { throw new Error('HTTP 500: AnalysisException on zetaris-node-7.internal'); } })).toBe('Business data could not be read (ZETARIS_READ).');
+    expect(await fails({ ...dataMock, getDivisionMetrics: async () => { throw new Error('HTTP 502: <html>bad gateway</html>'); } })).toBe('Business data could not be read (ZETARIS_READ).');
+    expect(receipts.slice(-2).map((r) => r.detail)).toEqual(Array(2).fill('Business data could not be read (ZETARIS_READ).'));
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringMatching(/^worker\.zetaris_read_failed Error: HTTP 500/), expect.stringMatching(/^worker\.zetaris_read_failed Error: HTTP 502/)]);
+    log.mockRestore();
     expect(await fails({ ...dataMock, getDivisionMetrics: async () => ({ division: 'online', metrics: mockMetrics, attention: [], queryHash: 'c'.repeat(64), view: 'v' }) })).toBe('the data source answered for the online division, not salon');
     expect(receipts.slice(-4).map((r) => [r.step, r.outcome])).toEqual(Array(4).fill(['brief.data', 'failed']));
   });

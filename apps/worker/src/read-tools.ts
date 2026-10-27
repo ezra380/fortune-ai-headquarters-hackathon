@@ -3,6 +3,7 @@ import {
   AssistantId, DEFAULT_PERIODS, MetricId, phonePattern, type DataPort, type Division, type DivisionData, type Period, type ReadTool, type RowRead,
 } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
+import { readData } from './data-read.ts';
 import { explainProposal } from './explain.ts';
 import { summarizeUsage } from './reports.ts';
 import type { Store } from './store.ts';
@@ -61,20 +62,6 @@ function scrub(value: unknown): unknown {
   return value;
 }
 
-/**
- * One read of the data port. A provider's own text (an HTTP body, SQL, a host name) never reaches the script, and
- * so never an answer: it gets a fixed sentence with a code, the log gets the detail with any phone number or email
- * masked (Law 7; read-tools.test.ts "keeps the provider's text away from the script").
- */
-async function portRead<T>(read: () => Promise<T>): Promise<T> {
-  try {
-    return await read();
-  } catch (error) {
-    const detail = String(scrub(error instanceof Error ? `${error.name}: ${error.message}` : 'unknown')).replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]');
-    console.error(`worker.zetaris_read_failed ${detail.slice(0, 300)}`);
-    throw new Error('Business data could not be read (ZETARIS_READ).');
-  }
-}
 
 function tool<S extends z.ZodType>(def: {
   name: string;
@@ -127,7 +114,7 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   const asOf = () => ctx.now().toISOString();
   const financeMetrics = async (period: Period, only?: 'online' | 'salon') => {
     const data = connected();
-    const { metrics, queryHash, view } = await portRead(() => data.getFinanceMetrics({ asOf: asOf(), period }));
+    const { metrics, queryHash, view } = await readData(() => data.getFinanceMetrics({ asOf: asOf(), period }));
     return {
       view,
       queryHash,
@@ -139,7 +126,7 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     const data = connected();
     const read = data.getDivisionMetrics?.bind(data);
     if (!read) throw new Error(`This data source has no ${d} division read (it needs data version 2).`);
-    return portRead(() => read({ division: d, period, asOf: asOf() }));
+    return readData(() => read({ division: d, period, asOf: asOf() }));
   };
   /** A division tool reads its division's mart when the port has divisions; otherwise its business, as before. */
   const divisionMetrics = async (name: keyof typeof TOOL_DIVISION, period: Period) => {
@@ -166,7 +153,7 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     const data = connected();
     const readRows = data.readRows?.bind(data);
     if (!readRows) throw new Error('This data source has no row reads (they need data version 2).');
-    const r = await portRead(() => readRows({ ...read, asOf: asOf() }));
+    const r = await readData(() => readRows({ ...read, asOf: asOf() }));
     return { dataDate: r.dataDate, view: r.view, queryHash: r.queryHash, totals: r.totals, rows: r.rows.slice(0, clampRows(limit, 20)) };
   };
   /** The value of a metric a division read returned, or null when the read has none (a ratio over nothing). */
@@ -233,7 +220,7 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
         const info = data.catalog?.find((m) => m.id === metricId);
         const from = SERIES_DIVISIONS[caller].find((d) => info?.divisions?.includes(d));
         if (!from) throw new Error(`${metricId} is not one of the metrics your division reads.`);
-        return portRead(() => series({ division: from, metricId, asOf: asOf() }));
+        return readData(() => series({ division: from, metricId, asOf: asOf() }));
       },
     }),
     tool({
