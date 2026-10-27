@@ -23,7 +23,8 @@ const WasmMemory = (globalThis as unknown as {
 
 type ToolFn = (...args: unknown[]) => Promise<unknown>;
 export type ResolvedProvider = { name: string; fns: Record<string, ToolFn> };
-export type ExecuteResult = { result: unknown; error?: string; logs?: string[] };
+/** `toolCalls` counts every call the script made to a `codemode.*` function, including refused ones. */
+export type ExecuteResult = { result: unknown; error?: string; logs?: string[]; toolCalls: number };
 
 export type QuickJsExecutorOptions = {
   timeoutMs?: number;
@@ -41,6 +42,16 @@ export class QuickJsExecutor {
     code: string,
     providersOrFns: ResolvedProvider[] | Record<string, ToolFn>,
   ): Promise<ExecuteResult> {
+    const count = { toolCalls: 0 };
+    const outcome = await this.run(code, providersOrFns, count);
+    return { ...outcome, toolCalls: count.toolCalls };
+  }
+
+  private async run(
+    code: string,
+    providersOrFns: ResolvedProvider[] | Record<string, ToolFn>,
+    count: { toolCalls: number },
+  ): Promise<Omit<ExecuteResult, 'toolCalls'>> {
     const providers: ResolvedProvider[] = Array.isArray(providersOrFns)
       ? providersOrFns
       : [{ name: 'codemode', fns: providersOrFns }];
@@ -67,7 +78,6 @@ export class QuickJsExecutor {
     const logs: string[] = [];
     const pending = new Set<QuickJSDeferredPromise>();
     let disposed = false;
-    let toolCalls = 0;
     // A failure while running the script's continuation after a tool call (outside execute's own
     // try): it ends the run instead of escaping as an unhandled rejection that kills the process.
     let fatal: string | null = null;
@@ -85,8 +95,8 @@ export class QuickJsExecutor {
         pending.add(deferred);
         const fns = byName.get(provider);
         const run = async (): Promise<string> => {
-          toolCalls += 1;
-          if (toolCalls > maxToolCalls) throw new Error(`tool call limit (${maxToolCalls}) reached`);
+          count.toolCalls += 1;
+          if (count.toolCalls > maxToolCalls) throw new Error(`tool call limit (${maxToolCalls}) reached`);
           if (!fns || !Object.hasOwn(fns, name)) throw new Error(`unknown tool ${provider}.${name}`);
           const args = JSON.parse(argsJson) as unknown[];
           return JSON.stringify((await fns[name]!(...args)) ?? null);

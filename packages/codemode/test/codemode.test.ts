@@ -40,6 +40,18 @@ describe('QuickJS sandbox executor', () => {
     expect(many.error).toMatch(/tool call limit/);
   });
 
+  it('counts the calls the script made, whether it succeeds, fails or makes none', async () => {
+    expect((await exec.execute('async () => 1', tools)).toolCalls).toBe(0);
+    const two = await exec.execute('async () => [await codemode.add({ a: 1, b: 1 }), await codemode.add({ a: 2, b: 2 })]', tools);
+    expect(two.result).toEqual([2, 4]);
+    expect(two.toolCalls).toBe(2);
+    const failed = await exec.execute('async () => { await codemode.add({ a: 1, b: 1 }); throw new Error("late"); }', tools);
+    expect(failed.error).toBe('late');
+    expect(failed.toolCalls).toBe(1);
+    expect((await exec.execute('async () => codemode.deleteEverything({})', tools)).toolCalls).toBe(1); // refused, still a call
+    expect((await exec.execute('async () => 1', [{ name: 'bad name', fns: {} }])).toolCalls).toBe(0);
+  });
+
   it('reports a thrown error as a plain message, never an empty one', async () => {
     expect((await exec.execute('async () => { throw new Error("nope"); }', tools)).error).toBe('nope');
     expect((await exec.execute('async () => { throw ""; }', tools)).error).toBeTruthy();
