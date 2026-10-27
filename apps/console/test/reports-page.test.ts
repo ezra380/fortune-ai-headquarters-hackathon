@@ -44,6 +44,12 @@ describe('the Divisions view: the division tabs', () => {
     expect(page.hash()).toBe('#divisions/salon');
   });
 
+  it('styles its buttons with a class of their own: the page subtitle is `sub`, and a button must not look like it', async () => {
+    const classes = (await drawPage('divisions', payload())).buttonClasses();
+    expect(classes.length).toBeGreaterThan(4);
+    expect(new Set(classes)).toEqual(new Set(['subtab']));
+  });
+
   it('does not ask the server again when a tab is pressed: it draws from what it has', async () => {
     const page = await drawPage('divisions', payload());
     await page.click('Online');

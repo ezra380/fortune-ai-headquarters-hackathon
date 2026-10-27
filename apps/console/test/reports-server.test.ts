@@ -109,7 +109,7 @@ describe('a head\'s own page: /?division=', () => {
     expect(res.headers['content-type']).toBe('text/html; charset=utf-8');
     expect(res.text).toContain('<title>Fortune AI Headquarters · Finance division</title>');
     expect(res.text).toContain('<h1>Finance division</h1>');
-    expect(res.text).toContain('George, Finance, reports to Alan');
+    expect(res.text).toContain('A read-only view of this division only.');
     // The markup around the script and the style (the script itself is the owner's page's script, which names every tab).
     const markup = res.text.replace(/<script>[\s\S]*<\/script>/, '').replace(/<style>[\s\S]*<\/style>/, '');
     expect(markup).not.toContain('class="tab"');
@@ -132,10 +132,13 @@ describe('a head\'s own page: /?division=', () => {
     expect(head.text).not.toMatch(/innerHTML|<script src|onclick=/);
   });
 
-  it('names each head\'s own manager and division', async () => {
+  it('names each head\'s own division, in the title and the heading', async () => {
     const c = await start();
-    expect((await request(c.port, { path: '/?division=online' })).text).toContain('Georgette, Online, reports to Emma');
-    expect((await request(c.port, { path: '/?division=salon' })).text).toContain('Cindy, Salon, reports to Esther');
+    for (const [id, name] of [['finance', 'Finance'], ['online', 'Online'], ['salon', 'Salon']]) {
+      const text = (await request(c.port, { path: `/?division=${id}` })).text;
+      expect(text, id).toContain(`<title>Fortune AI Headquarters · ${name} division</title>`);
+      expect(text, id).toContain(`<h1>${name} division</h1>`);
+    }
   });
 
   it('answers 404 for a division that is not one of the three, and shows the owner\'s page when none is named', async () => {

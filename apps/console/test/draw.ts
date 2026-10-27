@@ -67,6 +67,8 @@ export type DrawnPage = {
   hash: () => string;
   /** Every button label drawn into the panel. */
   buttons: () => string[];
+  /** The style class of every button drawn into the panel. */
+  buttonClasses: () => string[];
 };
 
 /** Runs the page's own script with a fake document, the way the browser would. */
@@ -121,6 +123,7 @@ export async function drawPage(id: string, payload: unknown, options: DrawOption
     },
     hash: () => hash,
     buttons: () => panel.all().filter((e) => e.tag === 'button').map((e) => e.textContent),
+    buttonClasses: () => panel.all().filter((e) => e.tag === 'button').map((e) => e.className),
   };
 }
 

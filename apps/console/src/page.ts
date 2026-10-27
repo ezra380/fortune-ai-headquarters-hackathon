@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { MANAGERS } from '@fahq/contracts';
 import { TABS } from './departments.ts';
 import type { BriefDivision } from './divisions.ts';
 import { BRIEF_DIVISIONS } from './divisions.ts';
@@ -64,11 +63,11 @@ section section{margin:22px 0 0}
 .empty{padding:16px 14px;color:var(--muted);font-size:.9375rem}
 .digest{margin:2px 0 0}
 .subs{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0 0}
-.sub{font:inherit;font-size:.875rem;font-weight:700;line-height:1.3;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);cursor:pointer;min-height:40px}
-.sub[aria-pressed=true]{color:var(--ink);background:var(--paper);border-color:var(--ink)}
-.sub:hover{color:var(--ink)}
-.sub:focus-visible,.link:focus-visible,summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-.chips .sub{min-height:36px;padding:6px 12px}
+.subtab{font:inherit;font-size:.875rem;font-weight:700;line-height:1.3;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);cursor:pointer;min-height:40px}
+.subtab[aria-pressed=true]{color:var(--ink);background:var(--paper);border-color:var(--ink)}
+.subtab:hover{color:var(--ink)}
+.subtab:focus-visible,.link:focus-visible,summary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.chips .subtab{min-height:36px;padding:6px 12px}
 .link{display:inline-block;color:var(--ink);font-size:.875rem;font-weight:700;text-decoration:underline;text-underline-offset:3px;margin:2px 12px 2px 0;overflow-wrap:anywhere}
 h3.sec{margin:14px 0 4px}
 .label{margin:10px 0 2px;color:var(--muted);font-size:.8125rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
@@ -319,7 +318,7 @@ const SCRIPT = `
 
   function managerLine(v) { return v.manager.name + ', ' + v.manager.title + ', reports to ' + v.manager.reportsTo; }
   function button(label, onClick) {
-    var b = h('button', 'sub', label);
+    var b = h('button', 'subtab', label);
     b.setAttribute('type', 'button');
     b.addEventListener('click', onClick);
     return b;
@@ -877,11 +876,10 @@ export const PAGE_HTML = documentOf({
  */
 export function headPageHtml(division: BriefDivision): string {
   const name = escapeHtml(BRIEF_DIVISIONS.find((d) => d.id === division)?.name ?? division);
-  const m = MANAGERS[division];
   return documentOf({
     title: `Fortune AI Headquarters · ${name} division`,
     heading: `${name} division`,
-    sub: `${escapeHtml(m.manager)}, ${escapeHtml(m.title)}, reports to ${escapeHtml(m.head)}. A read-only view of this division only. Nothing here can send, approve or change anything.`,
+    sub: 'A read-only view of this division only. Nothing here can send, approve or change anything.',
     nav: '',
     footer: `<span id="updated" role="status">Loading…</span> · refreshes every 10 seconds<br>This is the head's view of the ${name} division only. In production, each head's site is part of the Fortune Hub.`,
   });
