@@ -511,6 +511,58 @@ describe('the cloud loader', () => {
   });
 });
 
+// The HQ Manager posts its review to the owner as kind 'report' and attaches the ADOPT approval (12 hours) to that message.
+describe('the cloud loader: the approval that waits on the HQ Manager\'s review', () => {
+  const noBrain = () => ({ dataDir: path.join(tmp(), 'missing'), meterlessDir: path.join(tmp(), 'none') });
+  const isCountOnly = (call: Call) => (call.options as { head?: boolean } | undefined)?.head === true;
+  const adopt = { action: 'adopt_change', status: 'pending', expires_at: '2026-10-27T08:00:00Z', decided_at: null };
+
+  function managerReviewDb() {
+    return recorder((call) => {
+      if (call.table === 'assistants') return { data: { display_name: 'x', sms_from: null } };
+      if (call.table === 'assistant_messages') {
+        if (call.ops.includes('eq(kind,report)')) return { data: [{ id: 'review-message' }] };
+        if (call.ops.includes('eq(kind,proposal)')) return { data: [], count: 0 }; // no proposal anywhere
+        return { data: [{ id: 'review-message', from_assistant: 'manager', to_assistant: 'owner', kind: 'report', status: 'open', created_at: '2026-10-26T20:00:00Z', body: {} }] };
+      }
+      if (call.table === 'approvals') {
+        // Only a lookup that names the review's message finds the approval.
+        const names = call.ops.some((op) => op.startsWith('in(message_id,') && op.includes('review-message'));
+        if (!names) return { data: [], count: 0 };
+        return isCountOnly(call) ? { data: null, count: 1 } : { data: [adopt] };
+      }
+      return { data: [], count: 0 };
+    });
+  }
+
+  it.each(['manager', 'owner'] as const)('shows the %s tab the review\'s pending ADOPT approval and counts it', async (id) => {
+    const r = managerReviewDb();
+    const raw = await createCloudLoader({ db: r.db, now: () => NOW, brain: noBrain() })(id);
+    expect(raw.approvals).toEqual([adopt]);
+    expect(raw.counts.pendingApprovals).toBe(1);
+    expect(raw.counts.proposals).toBe(0); // a review is not a proposal
+    const reviews = r.calls.find((c) => c.table === 'assistant_messages' && c.ops.includes('eq(kind,report)'))!;
+    expect(reviews.select).toBe('id');
+    expect(reviews.ops).toContain(`or(from_assistant.eq.${id},to_assistant.eq.${id})`);
+    expect(Number(reviews.ops.find((op) => op.startsWith('limit('))?.slice(6, -1))).toBeLessThanOrEqual(100);
+  });
+
+  it('counts no approval as zero only after it has looked at both proposals and reviews', async () => {
+    const r = recorder(() => ({ data: [], count: 0 }));
+    const raw = await createCloudLoader({ db: r.db, now: () => NOW, brain: noBrain() })('manager');
+    expect(raw.counts.pendingApprovals).toBe(0);
+    expect(r.calls.some((c) => c.table === 'approvals')).toBe(false);
+    expect(r.calls.filter((c) => c.table === 'assistant_messages' && c.ops.some((op) => op === 'eq(kind,report)' || op === 'eq(kind,proposal)'))).toHaveLength(2);
+  });
+
+  it('shows the count as unknown, not zero, when the review messages cannot be read', async () => {
+    const r = recorder((call) => (call.table === 'assistant_messages' && call.ops.includes('eq(kind,report)') ? { data: null, error: { message: 'boom', code: '57014' } } : { data: [], count: 0 }));
+    const raw = await createCloudLoader({ db: r.db, now: () => NOW, brain: noBrain() })('manager');
+    expect(raw.counts.pendingApprovals).toBeNull();
+    expect(raw.notes).toContain('The mailbox could not be read right now (57014).');
+  });
+});
+
 // ---- The brain reader ------------------------------------------------------------------------------
 
 describe('the brain reader', () => {

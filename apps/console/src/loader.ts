@@ -16,7 +16,7 @@ import { BRAIN_NOTE, USAGE_WINDOW_HOURS } from './departments.ts';
 // without who decided them (decided_by) and without the review's raw digest.
 
 const LIMITS = {
-  tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, proposalIds: 100,
+  tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, messageIds: 100,
   reports: 15, managerReports: 30, usageRows: 500, lessons: 20, recommendations: 3,
 };
 const OPEN_TASK_STATUSES = ['queued', 'running', 'waiting'];
@@ -198,7 +198,7 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
       part('The open-task count', null as number | null, async () =>
         mustCount(await db.from('tasks').select('id', { count: 'exact', head: true }).eq('assistant_id', id).in('status', OPEN_TASK_STATUSES)),
       ),
-      part('The mailbox', null as { rows: RawMessage[]; proposals: number; proposalIds: string[] } | null, async () => {
+      part('The mailbox', null as { rows: RawMessage[]; proposals: number; approvalMessageIds: string[] } | null, async () => {
         const rows = must<RawMessage[]>(
           await db
             .from('assistant_messages')
@@ -207,15 +207,20 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
             .order('created_at', { ascending: false })
             .limit(LIMITS.mailbox),
         );
-        const proposals = await db
-          .from('assistant_messages')
-          .select('id', { count: 'exact' })
-          .eq('kind', 'proposal')
-          .or(mine)
-          .order('created_at', { ascending: false })
-          .limit(LIMITS.proposalIds);
-        const ids = must<{ id: string }[]>(proposals).map((p) => p.id);
-        return { rows, proposals: proposals.count ?? ids.length, proposalIds: ids };
+        // Two kinds of message carry an approval: a proposal (send or decide a plan) and the HQ Manager's review,
+        // which is posted to the owner as a 'report' with the ADOPT approval attached. Only proposals are counted as proposals.
+        const idsOfKind = (kind: 'proposal' | 'report') =>
+          db
+            .from('assistant_messages')
+            .select('id', { count: 'exact' })
+            .eq('kind', kind)
+            .or(mine)
+            .order('created_at', { ascending: false })
+            .limit(LIMITS.messageIds);
+        const [proposals, reviews] = await Promise.all([idsOfKind('proposal'), idsOfKind('report')]);
+        const proposalIds = must<{ id: string }[]>(proposals).map((p) => p.id);
+        const reviewIds = must<{ id: string }[]>(reviews).map((r) => r.id);
+        return { rows, proposals: proposals.count ?? proposalIds.length, approvalMessageIds: [...new Set([...proposalIds, ...reviewIds])] };
       }),
       part('Texts and printouts', [] as RawOutbox[], async () =>
         must<RawOutbox[]>(
@@ -248,17 +253,17 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
       readBrain(id, options.brain),
     ]);
 
-    // Approvals for the proposals this assistant sent or received (the code hash is never requested).
+    // Approvals for the proposals and reviews this assistant sent or received (the code hash is never requested).
     let approvals: RawApproval[] = [];
     let pendingApprovals: number | null = null;
-    const proposalIds = mailbox?.proposalIds ?? [];
-    if (mailbox && proposalIds.length > 0) {
+    const approvalMessageIds = mailbox?.approvalMessageIds ?? [];
+    if (mailbox && approvalMessageIds.length > 0) {
       approvals = await part('Approvals', [] as RawApproval[], async () =>
         must<RawApproval[]>(
           await db
             .from('approvals')
             .select('action,status,expires_at,decided_at')
-            .in('message_id', proposalIds)
+            .in('message_id', approvalMessageIds)
             .order('created_at', { ascending: false })
             .limit(LIMITS.approvals),
         ),
@@ -268,7 +273,7 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
           await db
             .from('approvals')
             .select('id', { count: 'exact', head: true })
-            .in('message_id', proposalIds)
+            .in('message_id', approvalMessageIds)
             .eq('status', 'pending')
             .gt('expires_at', now().toISOString()),
         ),
