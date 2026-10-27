@@ -245,8 +245,8 @@ describe('numberTrace', () => {
     expect(trace('Finance used 1,500 tokens in and 3000 out.', 'That is 1.5k tokens in.', 'Average 112.4 s, so about 112 s.', 'One step took 75 s.', 'About 40% of runs.')).toEqual([]);
   });
 
-  it('ignores ranks, ids, dates and the plain numbers 1, 2 and 3', () => {
-    expect(trace('Recommendation 2 of 3 is about the 1st assistant.', 'See m:online.ads.google.roas on 2026-10-26 (period 2026-10-mtd) with nemotron-3-ultra.')).toEqual([]);
+  it('ignores ids, dates, periods and model names, which are names and not claims', () => {
+    expect(trace('See m:online.ads.google.roas on 2026-10-26 (period 2026-10-mtd) with nemotron-3-ultra.')).toEqual([]);
   });
 
   it('refuses a number that is not in the data, naming the text and the number', () => {
@@ -265,6 +265,76 @@ describe('numberTrace', () => {
   it('finds numbers inside the data\'s own strings and nested values', () => {
     expect(numberTrace([['t', 'The plan took 75 s.']], { deep: { list: ['finance.plans took 75 s'] } })).toEqual([]);
     expect(numberTrace([['t', 'It was 75.']], { deep: { list: [74] } })).toEqual(['t: "75" is not a number in the data']);
+  });
+});
+
+// Figures that once slipped past the trace (senior review, Law 5). Every case here failed before the fix.
+describe('numberTrace: small counts, glued units, slashes and signs', () => {
+  const quiet = { byAssistant: [{ assistant: 'finance', tasks: 12, failed: 0, inputTokens: 1500 }] };
+  const trace = (data: unknown, ...texts: string[]) => numberTrace(texts.map((t, i) => [`text ${i + 1}`, t] as const), data);
+  const no = (label: number, n: string) => `text ${label}: "${n}" is not a number in the data`;
+
+  it('checks the plain numbers 1, 2 and 3 like any other', () => {
+    expect(trace(quiet, 'Finance failed 3 times.')).toEqual([no(1, '3')]);
+    expect(trace(quiet, 'Finance had 2 failed tasks and 1 pending approval.')).toEqual([no(1, '2'), no(1, '1')]);
+    expect(trace(quiet, 'You have 2 pending approvals.')).toEqual([no(1, '2')]);
+    expect(trace({ pending: 2 }, 'You have 2 pending approvals.')).toEqual([]);
+    expect(trace(quiet, 'Finance had 12 tasks and 0 failed.')).toEqual([]);
+  });
+
+  it('checks ranks as well: nothing is exempt for being a rank', () => {
+    expect(trace(quiet, 'Recommendation 2 of 3 is about the 1st assistant.')).toEqual([no(1, '2'), no(1, '3'), no(1, '1')]);
+  });
+
+  it('checks zero, one, two and three written as words', () => {
+    expect(trace(quiet, 'Finance had two pending approvals.')).toEqual([no(1, 'two')]);
+    expect(trace(quiet, 'Three tasks failed and one was slow.')).toEqual([no(1, 'Three'), no(1, 'one')]);
+    expect(trace(quiet, 'Finance had zero failures.')).toEqual([]); // failed: 0 is in the data
+    expect(trace({ failed: 1, tasks: 3 }, 'One task failed and three were slow.')).toEqual([]);
+    expect(trace(quiet, 'Anyone, someone and everyone can ask.')).toEqual([]); // not number words
+  });
+
+  it('counts only digits in the data, never number words inside its strings', () => {
+    expect(trace({ note: 'one retry, two tasks' }, 'There was 1 retry.')).toEqual([no(1, '1')]);
+  });
+
+  it('checks a number that has letters glued to it', () => {
+    expect(trace(quiet, 'Over the last 48h finance failed.')).toEqual([no(1, '48')]);
+    expect(trace(quiet, 'finance.plans took 95sec on average.')).toEqual([no(1, '95')]);
+    expect(trace(quiet, 'Finance spent 4000tokens.')).toEqual([no(1, '4000')]);
+    expect(trace(quiet, 'That is 7kg and 5xyz.')).toEqual([no(1, '7'), no(1, '5')]);
+    expect(trace(quiet, 'Finance spent 1500tokens on 12tasks.')).toEqual([]);
+    expect(trace(quiet, 'About 1.5k tokens in 12 tasks.')).toEqual([]); // k still means a thousand
+  });
+
+  it('checks ordinals as counts', () => {
+    expect(trace(quiet, 'It failed for the 7th time.')).toEqual([no(1, '7')]);
+    expect(trace(quiet, 'It was the 12th task.')).toEqual([]);
+  });
+
+  it('checks both sides of a slash or a colon', () => {
+    expect(trace(quiet, 'Finance failed 7/40 tasks.')).toEqual([no(1, '7'), no(1, '40')]);
+    expect(trace(quiet, 'A ratio of 7:40.')).toEqual([no(1, '7'), no(1, '40')]);
+    expect(trace(quiet, '12/12 tasks ran.')).toEqual([]);
+    expect(trace(quiet, 'Tasks:12 ran.')).toEqual([]);
+    expect(trace(quiet, 'The ratio is nvidia/nemotron-3-ultra.')).toEqual([]); // a model name is a name
+  });
+
+  it('keeps the minus sign: -1500 is not 1500', () => {
+    expect(trace(quiet, 'Finance changed by -1500 tokens.')).toEqual([no(1, '-1500')]);
+    expect(trace(quiet, 'Finance changed by −1500 tokens (−12 tasks).')).toEqual([no(1, '−1500'), no(1, '−12')]);
+    expect(trace(quiet, 'Finance changed by -$1500.')).toEqual([no(1, '-1500')]);
+    expect(trace({ change: -1500 }, 'Finance changed by -1500 tokens.')).toEqual([]);
+    expect(trace({ note: 'down -1500 tokens' }, 'Finance changed by −1500.')).toEqual([]);
+    expect(trace({ change: -1500 }, 'Finance fell by 1500 tokens.')).toEqual([]); // a size may describe a drop
+    expect(trace({ share: -0.05 }, 'Down -5%.')).toEqual([]);
+    expect(trace({ share: 0.05 }, 'Down -5%.')).toEqual([no(1, '-5%')]);
+  });
+
+  it('does not read a range as a minus sign: both ends are checked as plain numbers', () => {
+    expect(trace({ a: 10, b: 20 }, 'Between 10-20 tasks, 10–20 even.')).toEqual([]);
+    expect(trace({ a: 10 }, 'Between 10-20 tasks.')).toEqual([no(1, '20')]);
+    expect(trace({ a: 10, b: 20 }, 'Tasks - 20 of them.')).toEqual([]); // a spaced dash is not a sign
   });
 });
 
@@ -293,7 +363,7 @@ describe('checkReview', () => {
   });
 
   it('refuses two recommendations with the same rank', () => {
-    const check = checkReview(review({ recommendations: [rec(1, 'finance', 'One thing.'), rec(1, 'owner', 'Another thing.')] }), digest, []);
+    const check = checkReview(review({ recommendations: [rec(1, 'finance', 'First thing.'), rec(1, 'owner', 'Another thing.')] }), digest, []);
     expect(check).toEqual({ ok: false, objections: ['recommendation ranks must be different: rank each one 1, 2 or 3, once'] });
   });
 
@@ -315,6 +385,21 @@ describe('checkReview', () => {
         'finding 1: "113" is not a number in the data',
         'recommendation 1 change: "40" is not a number in the data',
         'recommendation 1 why: "1501" is not a number in the data',
+      ],
+    });
+  });
+
+  it('checks the small numbers 1, 2 and 3 in every text, a rank mentioned in prose included', () => {
+    const check = checkReview(review({
+      summary: 'Finance failed 3 times.',
+      recommendations: [rec(1, 'finance', 'Fix the check.', 'This follows recommendation 2 and two earlier problems.')],
+    }), digest, []);
+    expect(check).toEqual({
+      ok: false,
+      objections: [
+        'summary: "3" is not a number in the data',
+        'recommendation 1 why: "2" is not a number in the data',
+        'recommendation 1 why: "two" is not a number in the data',
       ],
     });
   });

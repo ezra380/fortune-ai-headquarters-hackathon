@@ -191,13 +191,32 @@ export function summarizeUsage(rows: readonly UsageRow[], since: Date): { since:
 
 // ---- The number trace --------------------------------------------------------------------------
 
-// Every number a model writes must be a number it was given. A number matches a source number when the
-// source number, rounded to 0, 1 or 2 decimals, equals it (so 112.4 may be written 112). Percentages
-// may also match the source number times 100 (0.0512 as 5.12%). The plain numbers 1, 2 and 3 are ignored
-// (ranks, "one of the 3 recommendations"). Larger numbers written as words are refused, never skipped.
+// Every number a model writes must be a number it was given. This catches a model that makes figures up;
+// it cannot tell whether a real figure was put in the right sentence. Each rule below has a test in
+// units.test.ts ("numberTrace"), and docs/manager.md ("The number trace") says the same in plain words.
+//
+//  - What counts as written: digits (thousands commas, a decimal part, a % k M ms s x suffix); a minus sign
+//    in front; and the words zero, one, two and three. Every one counts: 1, 2 and 3 get no pass for being
+//    small, ranks or ordinals (7th), and both sides of 7/40 or 7:40 are checked.
+//  - Letters glued to digits are a unit and hide nothing (48h, 95sec, 4000tokens, 7kg). Only the suffixes
+//    above change the value (1.5k is 1500).
+//  - Larger number words (four ... billion, dozen) are refused: write digits, and only if the number is in the data.
+//  - What does not count: dates, periods and metric ids (removed first), and digits that belong to a name:
+//    right after letters (gpt4, v2), after a hyphen that follows a letter (nemotron-3-ultra), after a dot
+//    that follows a letter or digit (v1.2), after an underscore.
+//  - What matches: a given number rounded to 0, 1 or 2 decimals equals the written one (112.4 may be written
+//    112); a percentage may also match the given number times 100 (0.0512 as 5.12%). A number written with
+//    a minus sign must match a negative number in the data. One written without may describe a drop
+//    ("fell by 1500" for -1500). In the data only digits count, never number words inside its strings.
+//  - Not traced, so not covered: other words for numbers (once, twice, both, half, "no failures").
 
 const BIG_WORDS = /\b(?:four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen)\b/gi;
-const NUMBER = /(?<![\p{L}\p{N}_:/]|[\p{L}\p{N}_]\.|\p{L}-)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(%|[kK](?![\p{L}\d])|M(?![\p{L}\d])|(?:ms|s|x|×|st|nd|rd|th)(?![\p{L}\d]))?(?![\p{L}\d_])/gu;
+const SMALL_WORDS = /\b(?:zero|one|two|three)\b/gi;
+const SMALL_VALUE = { zero: 0, one: 1, two: 2, three: 3 } as const;
+const NUMBER = /(?<![\p{L}\p{N}_]|[\p{L}\p{N}_]\.|\p{L}-)(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(%|[kK](?![\p{L}\d])|M(?![\p{L}\d])|(?:ms|s|x|×)(?![\p{L}\d]))?(?!\d)/gu;
+// A minus sign (or typographic minus or en dash) right in front of a number, not joined to the end of a word or number
+// (so "10-20" and "10–20" are ranges), with an optional currency sign between ("-$1500").
+const SIGN_BEFORE = /(?<![\p{L}\p{N}_])[-−–][$£€]?$/u;
 
 function normalize(text: string): string {
   return text
@@ -209,30 +228,36 @@ function normalize(text: string): string {
 
 export type TracedNumber = { raw: string; value: number; percent: boolean };
 
-export function numbersWritten(input: string): { found: TracedNumber[]; words: string[] } {
-  const text = normalize(input);
+/** The numbers written as digits in already-normalized text. A leading minus sign makes the value negative. */
+function digitsIn(text: string): TracedNumber[] {
   const found: TracedNumber[] = [];
   for (const m of text.matchAll(NUMBER)) {
     const [raw, whole, fraction, suffix] = m;
-    if (whole === undefined || (suffix !== undefined && /^(st|nd|rd|th)$/.test(suffix))) continue; // "3rd" is not a claim
+    if (whole === undefined) continue;
     let value = Number(whole.replaceAll(',', '') + (fraction ? `.${fraction}` : ''));
     if (suffix === 'k' || suffix === 'K') value *= 1e3;
     if (suffix === 'M') value *= 1e6;
     if (!Number.isFinite(value)) continue;
-    const plainSmall = !fraction && !suffix && (value === 1 || value === 2 || value === 3);
-    if (plainSmall) continue;
-    found.push({ raw: raw.trim(), value, percent: suffix === '%' });
+    const sign = SIGN_BEFORE.exec(text.slice(0, m.index ?? 0))?.[0].charAt(0) ?? '';
+    found.push({ raw: `${sign}${raw}`, value: sign ? -value : value, percent: suffix === '%' });
   }
-  return { found, words: [...text.matchAll(BIG_WORDS)].map((w) => w[0]) };
+  return found;
 }
 
-/** Every number in a JSON value: numbers, and numbers written inside its strings. Absolute values. */
+/** Every number a text claims: digits first, then zero/one/two/three as words. Larger number words come back in `words`. */
+export function numbersWritten(input: string): { found: TracedNumber[]; words: string[] } {
+  const text = normalize(input);
+  const spoken = [...text.matchAll(SMALL_WORDS)].map((w) => ({ raw: w[0], value: SMALL_VALUE[w[0].toLowerCase() as keyof typeof SMALL_VALUE], percent: false }));
+  return { found: [...digitsIn(text), ...spoken], words: [...text.matchAll(BIG_WORDS)].map((w) => w[0]) };
+}
+
+/** Every number in a JSON value: numbers, and the digits written inside its strings. Signed. */
 export function numbersGiven(source: unknown): number[] {
   const out = new Set<number>();
   const walk = (v: unknown, depth: number) => {
     if (depth > 12) return;
-    if (typeof v === 'number' && Number.isFinite(v)) out.add(Math.abs(v));
-    else if (typeof v === 'string') for (const n of numbersWritten(v).found) out.add(Math.abs(n.value));
+    if (typeof v === 'number' && Number.isFinite(v)) out.add(v);
+    else if (typeof v === 'string') for (const n of digitsIn(normalize(v))) out.add(n.value);
     else if (Array.isArray(v)) for (const x of v) walk(x, depth + 1);
     else if (v && typeof v === 'object') for (const x of Object.values(v)) walk(x, depth + 1);
   };
@@ -243,6 +268,14 @@ export function numbersGiven(source: unknown): number[] {
 const roundTo = (x: number, k: number) => Math.round(x * 10 ** k) / 10 ** k;
 const same = (given: number, written: number) => [0, 1, 2].some((k) => Math.abs(roundTo(given, k) - written) < 1e-9);
 
+/** A written number with a minus sign must match a negative given number; one without may match either sign. */
+function inData(given: readonly number[], n: TracedNumber): boolean {
+  return given.some((g) => {
+    const compared = n.value < 0 ? g : Math.abs(g);
+    return same(compared, n.value) || (n.percent && same(compared * 100, n.value));
+  });
+}
+
 /** Objections (plain sentences) for every number or number-word in `texts` that `source` does not contain. */
 export function numberTrace(texts: readonly (readonly [label: string, text: string])[], source: unknown): string[] {
   const given = numbersGiven(source);
@@ -251,9 +284,7 @@ export function numberTrace(texts: readonly (readonly [label: string, text: stri
     const { found, words } = numbersWritten(text);
     for (const w of words) objections.push(`${label}: write "${w}" in digits so it can be checked, and only if the number is in the data`);
     for (const n of found) {
-      const value = Math.abs(n.value);
-      const ok = given.some((g) => same(g, value) || (n.percent && same(g * 100, value)));
-      if (!ok) objections.push(`${label}: "${n.raw}" is not a number in the data`);
+      if (!inData(given, n)) objections.push(`${label}: "${n.raw}" is not a number in the data`);
     }
   }
   return objections;

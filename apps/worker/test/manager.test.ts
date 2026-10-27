@@ -307,6 +307,15 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(report.suggestions[0]).toMatchObject({ kind: 'prompt', about: 'manager' });
   });
 
+  it('rejects a review that makes up a small count just as it rejects a large one', async () => {
+    const small = makeReview({ summary: 'Finance had 3 failures.' }).json; // the digest has no 3
+    const { task } = await askForReview(small, small);
+    expect(lastTo(ownerPhone)).toBe("The review didn't pass its number check, so I'm not sending it.");
+    expect(smsTo(ownerPhone).filter((b) => b.includes('HQ Manager review'))).toEqual([]);
+    expect(JSON.parse(model.of('manager.review')[1]!.user).previousAttemptRejectedBecause).toContain('summary: "3" is not a number in the data');
+    expect(task).toMatchObject({ status: 'failed' });
+  });
+
   it('accepts a review that passes on the correction round, and reports that it needed one', async () => {
     const { task } = await askForReview(badReview(), makeReview().json);
     expect(lastTo(ownerPhone)).toContain('HQ Manager review (last 24 h)');
@@ -483,6 +492,15 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
       const steps = await stepsOf((await taskOfText(messageSid)).id);
       expect(steps.at(-1)).toMatchObject({ step: 'owner.answer', outcome: 'refused', detail: 'answer: "9" is not a number in the data' });
       expect((await reportOf((await taskOfText(messageSid)).id)).suggestions[0]).toMatchObject({ kind: 'prompt', about: 'owner' });
+    });
+
+    it('does not text the owner a made-up small count: 0 pending approvals is never "2"', async () => {
+      codeMode.respond(() => okResult({ pendingApprovals: 0, openTasks: 4 }));
+      model.script('front-door', router('owner', 'status'));
+      model.script('owner.answer', 'You have 2 pending approvals.');
+      const messageSid = await textIn(ownerPhone, 'Is anything waiting on me?');
+      expect(lastTo(ownerPhone)).toBe("Here's what I found: pendingApprovals: 0; openTasks: 4");
+      expect((await stepsOf((await taskOfText(messageSid)).id)).at(-1)).toMatchObject({ step: 'owner.answer', outcome: 'refused', detail: 'answer: "2" is not a number in the data' });
     });
 
     it('sends the facts as they are when the answer model fails', async () => {
