@@ -285,18 +285,21 @@ describe("the HQ Manager's daily review on the clock", () => {
   }) as unknown as WorkerDeps;
   const review = SCHEDULE.filter((j) => j.name === 'manager-review');
 
-  it('queues one quiet review task keyed by the New York day, however often the clock asks, from one worker or a restarted one', async () => {
+  it('queues two quiet review tasks keyed by the New York day, the internal one and the doors one, however often the clock asks, from one worker or a restarted one', async () => {
     expect(review).toHaveLength(1);
     const tasks = new Map<string, Queued>();
     const queued = new Set<string>();
     expect(await runDueJobs(deps('2026-10-27T13:00:00Z', tasks), queued, review)).toEqual(['manager-review']);
     expect(await runDueJobs(deps('2026-10-27T13:05:00Z', tasks), queued, review)).toEqual([]); // asked again: nothing
     expect(await runDueJobs(deps('2026-10-27T14:00:00Z', tasks), new Set(), review)).toEqual(['manager-review']); // a restarted worker
+    const at = new Date('2026-10-27T13:00:00Z');
     expect([...tasks.values()]).toEqual([
-      { assistant: 'manager', kind: 'scheduled', key: 'review:daily:2026-10-27', payload: { job: 'manager_review', hours: 24, quiet: true }, now: new Date('2026-10-27T13:00:00Z') },
+      // HQ Manager lane (wave 2): the internal review reads work reports only and may apply by itself; the doors review applies nothing by itself.
+      { assistant: 'manager', kind: 'scheduled', key: 'review:daily:2026-10-27', payload: { job: 'manager_review', hours: 24, quiet: true, scope: 'internal' }, now: at },
+      { assistant: 'manager', kind: 'scheduled', key: 'review:doors:2026-10-27', payload: { job: 'manager_review', hours: 24, quiet: true, scope: 'doors' }, now: at },
     ]);
     expect(await runDueJobs(deps('2026-10-28T13:00:00Z', tasks), queued, review)).toEqual(['manager-review']); // the next day
-    expect([...tasks.keys()]).toEqual(['review:daily:2026-10-27', 'review:daily:2026-10-28']);
+    expect([...tasks.keys()]).toEqual(['review:daily:2026-10-27', 'review:doors:2026-10-27', 'review:daily:2026-10-28', 'review:doors:2026-10-28']);
   });
 });
 

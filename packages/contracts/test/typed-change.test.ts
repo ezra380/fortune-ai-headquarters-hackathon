@@ -56,6 +56,17 @@ describe('TypedRecommendation', () => {
     expect(parse({ kind: 'delete_profile' }).success).toBe(false);
     expect(parse({ kind: 'reads', reads: { add: ['my_lessons'], extra: 1 } }).success).toBe(false);
   });
+
+  it('takes a retire with its target, the exact text and why, and nothing else', () => {
+    const retire = { target: 'lesson', text: 'Name the month in every answer.', why: 'A newer lesson says the same.' };
+    expect(parse({ kind: 'retire', retire }).data).toMatchObject({ kind: 'retire', retire });
+    expect(parse({ kind: 'retire', retire: { ...retire, target: 'note' } }).success).toBe(true);
+    expect(firstIssue({ kind: 'retire' })).toBe('retire: a retire needs the target, the exact text and why');
+    expect(firstIssue({ retire })).toBe('retire: a lesson recommendation takes no retire');
+    for (const bad of [{ ...retire, target: 'skill' }, { ...retire, text: '' }, { ...retire, why: '' }, { ...retire, text: 'x'.repeat(301) }, { ...retire, extra: 1 }, { target: 'lesson', text: 'x' }]) {
+      expect(parse({ kind: 'retire', retire: bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
 });
 
 describe('the review the manager writes', () => {
@@ -74,10 +85,11 @@ describe('the review the manager writes', () => {
 });
 
 describe('who applies a change', () => {
-  it('says so for every kind, and today no kind is applied without the one-time code of the owner', () => {
+  it('says so for every kind: the manager applies a lesson, a skill note and a retire; read tools and the model wait for the owner\'s code', () => {
     expect(Object.keys(MANAGER_APPLIES).sort()).toEqual([...ChangeKind.options].sort());
-    // Turning one on is Ezra's decision, in writing (docs/manager.md, "Who decides what changes"): this test is the tripwire.
-    expect(MANAGER_APPLIES).toEqual({ lesson: false, skill_note: false, reads: false, model: false });
+    // Ezra approved this in writing on 2026-10-27 (docs/manager.md, "Who decides what changes"). Changing it again is his
+    // decision: this test is the tripwire.
+    expect(MANAGER_APPLIES).toEqual({ lesson: true, skill_note: true, retire: true, reads: false, model: false });
   });
 });
 
@@ -85,6 +97,7 @@ describe('RecommendationDetail', () => {
   it('holds the typed part and the reason the program did not apply it, and nothing else', () => {
     expect(RecommendationDetail.parse({})).toEqual({});
     expect(RecommendationDetail.parse({ reads: { add: ['my_lessons'] }, refused: 'because' })).toEqual({ reads: { add: ['my_lessons'], remove: [] }, refused: 'because' });
+    expect(RecommendationDetail.parse({ retire: { target: 'note', text: 'Say the month.', why: 'Outdated.' } })).toEqual({ retire: { target: 'note', text: 'Say the month.', why: 'Outdated.' } });
     expect(RecommendationDetail.safeParse({ other: 1 }).success).toBe(false);
     expect(RecommendationDetail.safeParse({ refused: '' }).success).toBe(false);
   });

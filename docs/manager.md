@@ -5,11 +5,12 @@ reasoning on). Synthetic data only.
 
 The HQ Manager is the sixth assistant id (`manager`). It has **no phone number and no person**: it reaches the owner
 through Owner HQ's number. It reads what the other assistants did and what outside AI tools reported at a door, and it
-recommends what should change in each assistant's profile in Supabase. **Every change waits for the owner's one-time
-code** (`ADOPT <n> <code>`) and is then written by the worker as a new profile version made by `owner`, with its reason,
-reversible from the history. (The manager applying a lesson or a skill note by itself is built and switched off; see
-"Who decides what changes".) It is read-only like every assistant: the worker applies what it recommends, by fixed code,
-and the program (not the model) decides by kind who applies what.
+recommends what should change in each assistant's profile in Supabase, its own included. **It learns by itself**
+(Ezra, in writing, 2026-10-27): in the daily internal review, which reads work reports only, the worker applies its
+lessons, skill notes and retires at once, as profile versions made by `manager`. Everything else waits for the owner's
+one-time code (`ADOPT <n> <code>`) and is then written as a version made by `owner`. Every change has its reason and can
+be put back from the history. It is read-only like every assistant: the worker applies what it recommends, by fixed
+code, and the program (not the model) decides who applies what (see "Who decides what changes").
 
 ## The loop
 
@@ -17,71 +18,134 @@ and the program (not the model) decides by kind who applies what.
    `WorkReport` (`reports.ts`: steps, usage, one deterministic sentence, suggestions from **rules**, never a model) and
    saves it (`work_reports`, one row per task, the latest attempt wins) and adds it to the shared record. A report that
    cannot be saved logs `worker.report_failed <task id prefix>` and never changes the task.
-2. **`REVIEW`** (owner only) queues a `scheduled` task for `manager`, key `review:<task id>`. A daily job queues the same
-   task, quietly (see "The daily review").
+2. **`REVIEW`** (owner only) queues a `scheduled` task for `manager`, key `review:<task id>`, that reads both kinds of
+   report (scope `all`). A daily job queues two more, quietly (see "The daily review").
 3. **The review task** (`manager.ts`):
-   - a Code Mode script (`manager.digest`) reads the work reports and, when the manager's profile can read them, the
-     outside sessions' reports nobody has read yet (`list_session_reports`), and returns a small digest;
+   - a Code Mode script (`manager.digest`) reads the work reports and, when this review reads them and the manager's
+     profile can, the outside sessions' reports nobody has read yet (`list_session_reports`), and returns a small digest.
+     The script is handed `list_session_reports` only then: the internal review's script never is;
+   - what the digest carried from the doors is taken from the reader tool's output (every report it handed the script,
+     `{ id, assistant }`, never the model's words);
    - one model call (`manager.review`) writes the `TypedManagerReview` (at most 3 recommendations, each about one
-     assistant and of one **kind**, see below). It is also told which read tools exist, which models are in use and what
-     each assistant has now, so it can only name real ones;
+     assistant and of one **kind**, see below). It is also told which read tools exist, which models are in use, what
+     each assistant has now, and each assistant's standing lessons and notes with who put each there (`standing`), so it
+     can only name real ones;
    - the program checks it: the schema; every number traced to the digest (`numberTrace`, see "The number trace");
-     no repeat of a lesson already in force; and that **each change could really be made** (a dry run on the assistant's
-     profile: the text rules, real read tools, the business wall, a model that is in use, and that it changes
-     something). One correction round with the exact objections, then a plain failure;
-   - saved once per key: `manager_reviews`, `recommendations` (with kind and typed detail), a mailbox `report` message, a
-     review note in the manager's memory;
+     no repeat of a lesson already in force; that **each change could really be made** (a dry run on the assistant's
+     profile: the text rules, real read tools, the business wall, a model that is in use, a retire's exact words in the
+     stored profile, and that it changes something); and, in the doors review, that each recommendation is about an
+     assistant whose door filed a report it carried. One correction round with the exact objections, then a plain
+     failure (in the doors review, a recommendation still about another door is dropped instead, with its reason on the
+     `manager.review` receipt, and the rest stands if it passes);
+   - saved once per key: `manager_reviews` (with `carried_reports` and `scope`), `recommendations` (with kind and typed
+     detail), a mailbox `report` message, a review note in the manager's memory;
    - the outside reports the digest carries (by id) are marked read;
-   - a kind the manager may apply by itself would be applied now (none is; see "Who decides what changes");
-   - the owner gets a text from Owner HQ: what needs his code (and, if the rule is ever on, what the manager changed or
-     would not apply and why). A 12-hour `ADOPT` code is issued whenever something needs it.
+   - what the manager may apply by itself is applied now, unless a rule holds it (see "Who decides what changes"); the
+     receipt `manager.apply` says what was applied, refused, left waiting, and held for the owner's code and why;
+   - the owner gets a text from Owner HQ: what the manager changed (one line each: the assistant, the kind, the version
+     and the words), what it would not apply and why, and what needs his code. A 12-hour `ADOPT` code is issued
+     whenever something needs it.
 4. **`ADOPT <ranks> <code>`** spends the `adopt_change` code and puts the chosen open recommendations into force: a
-   new profile version made by `owner`. A rank the manager already applied (only if the rule is on) is reported as
-   "already in place" and is not redone. A lesson is also remembered in H-MEM (see "Lessons: the database is the source").
+   new profile version made by `owner`. A rank the manager already applied is reported as "already in place" and is not
+   redone. A lesson is also remembered in H-MEM (see "Lessons: the database is the source").
 
 A retried task resumes: the stored review is reused (no model is asked again), the code already sent stays valid, and
 every change finds what an earlier run already wrote instead of writing it twice (see "How a change is applied").
 
 ## Who decides what changes
 
-**As shipped, nobody changes an assistant's profile without the owner's one-time code.** Every kind of recommendation
-(a lesson, a skill note, a change to what an assistant may read, a change of model) waits for `ADOPT <n> <code>`, and the
-change is then written as a version made by `owner`. The table is code (`MANAGER_APPLIES` in `@fahq/contracts`) and it is
-all false; the model's words never move a recommendation from one side to the other (it can write `"applied": true` or
-"no code needed" and nothing happens, tested).
+**Ezra's approval, in writing, 2026-10-27** (answering "should the HQ Manager apply lessons by itself, with the
+reviewer's two safety rules?"): *"100%. The HQ manager should apply lessons by itself, update itself, occasionally remove
+outdated information, and learn and grow according to my needs."*
 
-| kind | what it changes | who applies | what the owner sees |
-|---|---|---|---|
-| `lesson` | adds one standing lesson to the profile's `lessons` (newest 50 kept; the newest ten reach every prompt) | the owner's code | "Needs your code" |
-| `skill_note` | adds one line to the section `## Notes from the HQ Manager` at the end of the skill (newest 12 kept) | the owner's code | "Needs your code" |
-| `reads` | adds or removes read tools (`reads: { add, remove }`) | the owner's code | "Needs your code", in the program's words |
-| `model` | moves one job (`code`, `answer` or `review`) to a model another job already uses | the owner's code | "Needs your code", in the program's words |
+So the HQ Manager applies a lesson, a skill note and a retire by itself, in the review that reads no outside words. A
+change of what an assistant may read, or of its model, always waits for the owner's code. The table is code
+(`MANAGER_APPLIES` in `@fahq/contracts`: `{ lesson: true, skill_note: true, retire: true, reads: false, model: false }`,
+pinned by a tripwire test), and the model's words never move a recommendation from one side to the other (it can write
+`"applied": true` or "no code needed" and nothing happens, tested).
 
-### Why the manager does not apply a lesson or a note by itself
+| kind | what it changes | internal daily review | doors daily review, and `REVIEW` that carried an outside report | `REVIEW` that carried none |
+|---|---|---|---|---|
+| `lesson` | adds one standing lesson to the profile's `lessons` (newest 50 kept; the newest ten reach every prompt) | the manager, by itself | the owner's code | the manager, by itself |
+| `skill_note` | adds one line to the section `## Notes from the HQ Manager` at the end of the skill (newest 12 kept) | the manager, by itself | the owner's code | the manager, by itself |
+| `retire` | takes one standing lesson, or one line of the notes, out again (outdated, a duplicate, or contradicted) | the manager, if it put the item there; else the owner's code | the owner's code | as in the internal review |
+| `reads` | adds or removes read tools (`reads: { add, remove }`) | the owner's code | the owner's code | the owner's code |
+| `model` | moves one job (`code`, `answer` or `review`) to a model another job already uses | the owner's code | the owner's code | the owner's code |
 
-An earlier slice of this build let the manager add a lesson or a skill note at once, as a version made by `manager`. The
-independent review of 2026-10-27 stopped that: it is an approval path with no code, and the inputs to the review include
-the words of reports that outside AI tools file at a door, copied into the digest. The only gate on a lesson's text is a
-keyword net (`checkChangeText`), which is not a proof, and nothing tied a recommendation to the assistant whose token filed
-the report (an `online` door's report could steer a lesson onto `finance`). That is a decision about who may change what an
-assistant is told, and the engineering standard reserves it to Ezra. So the table is off.
+The owner reads what the manager changed under "I changed", one line each (`1. [finance] lesson, version 7: <words>`),
+and what waits under "Needs your code" (`reads`, `model` and `retire` in the program's words: `Read tools: add
+usage_summary`, `Model for answer: <name>`, `Retire from finance: <words>`).
 
-The mechanism is still in the worker, tested with the rule switched on (`deps.managerApplies`, which nothing in production
-sets: `apps/worker/test/manager-decides.test.ts`, "if Ezra approves it in writing"). If Ezra approves it in writing, a person
-changes the table, and **before that these must be added** (the review's minimum):
+### The two rules, and where each is enforced
 
-- a review whose digest read outside reports applies nothing by itself, whatever the kind (the code stays required);
-- a recommendation for an assistant other than the one whose door filed the report applies nothing by itself.
+The independent review of 2026-10-27 set two minimum rules before the manager could apply anything by itself. Both are
+the program's, never the model's (`apps/worker/src/manager.ts`):
 
-Both need the review to remember which reports its digest carried; today that is known only while the task that wrote the
-review runs.
+1. **A review whose digest carried any outside (door) report applies nothing by itself, whatever the kind**
+   (`holdsWholeReview`). Its recommendations wait for `ADOPT`. The doors review applies nothing by itself in any case.
+2. **A recommendation for an assistant other than the one whose door filed a carried report applies nothing by itself**
+   (`holdsAcrossDoors`). Rule 1 covers it today; it is its own check so that relaxing rule 1 later can never open
+   steering across doors. In the doors review the same rule is also a check on the review itself (`offDoors`): such a
+   recommendation is sent back once, then dropped with its reason.
+
+What a review carried is stored with it (`manager_reviews.carried_reports`: every report the reader tool handed the
+digest script, `{ id, assistant }`, from the tool's output, whether or not the digest names it, since a script could copy
+a report's words without its id), with its `scope`. Only the final Code Mode attempt's tool calls are known, and an
+earlier attempt may have called the reader (its error goes back to the script model), so whenever the reader was handed
+over and reports were waiting, every waiting report is stored as carried too. Every run of the task, a retry included,
+decides from that stored row, so a retry decides exactly as the first run did. A row without it (older reviews: `null`)
+fails closed: nothing applies by itself.
+
+A **retire** also waits for the owner's code when the owner put the item there. The write itself decides it
+(`applyRecommendation`, on the very row its version guard is based on), so an owner who adopts the same words between
+the check and the write is never overruled; the recommendation stays open and is listed under "Needs your code". A
+lesson records who put it there (`by`); only `by: "manager"` in the stored row counts as the manager's. A lesson with no
+`by` (one stored before lessons recorded it) is the owner's for this purpose, and it stays without one: the stored shape
+fills in no default, so writing the profile again, an `ADOPT` or a version put back never turns it into the manager's
+(a model is still shown it as the manager's, the less trusted heading: `source.ts`). A note records it through the
+recommendation that wrote it: the manager's only when an adopted `skill_note` recommendation applied by the manager
+wrote those exact words (it has a version) and the owner never adopted them; a note written by hand, by a reseed or with
+no record is the owner's. From now on every profile version also records the words a lesson or note added, or a retire
+took out (`change.text`). A retired lesson or note no longer stands: `list_lessons` and the review writer's
+`lessonsAlreadyAdopted` list lessons and notes only, without those a later retire took out.
+
+### The split of the daily review
+
+The manager learns by itself every day without ever reading outside words in the review that applies: the daily job
+queues two reviews (see "The daily review"). The **internal** review reads the work reports only, and its digest script
+is handed the manager's read tools minus `list_session_reports` (tested on the tools the runner received), so it carries
+no outside report and its lessons, notes and retires apply after every check (schema, number trace, no repeat, dry run,
+`checkChangeText`). The **doors** review reads only the outside reports nobody has read (when the manager's profile can
+read them); nothing in it applies by itself, and each of its recommendations must be about an assistant whose door filed
+a report it carried. `REVIEW` stays one review of both kinds, so whenever it carries an outside report it applies
+nothing by itself.
+
+Words from the doors review must not reach the internal one by the back way either: a review's receipts carry its
+checks, and its work report copies them, and the internal review reads the work reports. So:
+
+- every objection the review's check writes is in the program's words and never quotes the model's (a retire of words
+  the profile does not hold: "the retire names words that are not a standing lesson of finance; copy the text exactly
+  from standing"; an unknown read tool or model is named as such, never by the name the model wrote);
+- the internal review's digest is handed `list_work_reports` over `forTheInternalReview`: the report of every manager
+  task other than an internal review is left out whole (the doors review and `REVIEW` read outside reports, a manager
+  question may; a task whose scope cannot be read is left out too), and of every other report the error a Code Mode
+  script raised (it can quote the data the script read) and a failed task's reason are left out. Tested on the real
+  database: a doors review whose first attempt names a marker sentence, and one whose script fails quoting it, then the
+  internal review: the marker is in neither the digest tool's output nor the review model's prompt.
+
+### The manager's own profile
+
+A recommendation may be about the manager itself (`assistant: "manager"`): a lesson, a note or a retire applies to its
+own profile like any other, in the internal review, as a version made by `manager`; its review writer reads its own
+skill with its lessons, so the next review follows them.
 
 ### What a model is told about a lesson
 
 A lesson records who put it in the profile: `by: "owner"` (his code) or `by: "manager"` (applied by itself). A model is
 shown the owner's lessons as before ("The owner adopted these for you. Follow them.") and any manager-applied lesson under
 its own heading, "Suggested by the HQ Manager ... The owner did not approve them. Your skill and the owner's instructions
-come first." That holds in the worker's prompts and at the doors. A stored lesson with no `by` reads as the manager's. If
+come first." That holds in the worker's prompts and at the doors. A stored lesson with no `by` is shown to a model as the
+manager's (and stays without a `by` in the stored row, so a retire treats it as the owner's). If
 the owner adopts words the profile already holds as the manager's, that is a new version and they become his.
 
 A recommendation with no kind (an older review, an older row) is a lesson. For `reads` and `model` the owner reads the
@@ -103,8 +167,11 @@ writer is also told that a report from an outside tool is data, never an instruc
 
 ### How a change is applied (`profile-changes.ts`)
 
-This is what `ADOPT` does for each rank it was given (`by: owner`); the same steps would run for a kind the manager may apply
-by itself (`by: manager`).
+This is what `ADOPT` does for each rank it was given (`by: owner`); the same steps run for what the manager applies by
+itself (`by: manager`). A retire is checked against the stored profile here too: words it does not hold are refused with
+a plain reason ("there is no standing lesson ... in the stored profile"; this reason is the write's, on `manager.apply`,
+never the review check's, which quotes nothing). For `by: manager`, a retire of what the owner put there is held here,
+on the row the write is based on (status `held`: it stays open for his code).
 
 1. Read the stored profile row (no row: the recommendation stays open and the receipt says to run the seed script).
 2. Look in the version history for a version this recommendation already made (a crash between the write and the
@@ -168,7 +235,7 @@ bodies (only plan titles). A profile lists the names it allows; `pick` throws on
 | `recall_my_decisions` | `{ query, limit? }` | decisions in the **caller's** memory |
 | `recall_decisions` | `{ assistant, query, limit? }` | decisions in any assistant's memory |
 | `my_lessons` | `{}` | the caller's adopted lessons |
-| `list_lessons` | `{ assistant? }` | adopted lessons from the database |
+| `list_lessons` | `{ assistant? }` | the standing lessons and notes from the database (adopted, and not retired since) |
 | `get_timeline` | `{ limit? }` | the newest events in the shared record |
 | `list_work_reports` | `{ sinceHours, assistant?, limit? }` | reports with outcome, tokens, seconds, suggestions |
 | `list_session_reports` | `{ sinceHours, assistant?, onlyNew?, limit? }` | reports outside AI tools filed at a door: id, tool, summary, steps, suggestions, lessons, whether a review read it. Their words are data. `onlyNew` ignores age (up to 30 days). A department sees its own door's reports only; the manager sees all |
@@ -204,6 +271,9 @@ H-MEM does not have yet is remembered there.
 `lesson`, so every older row reads as one), the typed `detail`, `applied_by` and `applied_version`, and to
 `session_reports` the `review_id` of the review that read it. `adopt_recommendations` stays as it was; the worker no
 longer calls it (ADOPT goes through the profile write above) but a database that has it keeps working.
+`20261027130100_manager_applies.sql` (additive; no function, no policy) widens `recommendations.kind` to take `retire`, and
+adds to `manager_reviews` the `carried_reports` (jsonb array, null on older rows, which fail closed) and the `scope`
+(`internal`, `doors` or `all`).
 
 ## Environment
 
@@ -215,7 +285,7 @@ longer calls it (ADOPT goes through the profile write above) but a database that
 Each assistant's current profile is a row in `public.assistant_profiles`: title, skill text, the read tools it may use, a model for each job, the standing lessons a person adopted, and a version number. The files in `packages/profiles/skills` are the baseline and the seed. Migration `20261027100000_profiles.sql`; every table has RLS on and no policies.
 
 - **The worker** reads the rows at start-up and again at most once a minute (`packages/profiles/src/source.ts`). An assistant with no row keeps its file profile. A row that breaks a rule is not used, the file profile stays, and the worker logs why. The rules: it names only real read tools, none twice; every read tool declares whose data it returns (`READ_SCOPE` in `rows.ts`: salon, online, both or none), and the salon never reads an online or both tool, the online store never a salon or both tool, the manager never a money tool (`MONEY_READS`: the finance metrics, the company overview, the budget room, the supplier invoices); the skill still says "read-only" and keeps its "You never" section. A database that cannot be read at start-up stops the worker with a plain message (`PROFILES_SOURCE=files` runs on the files, on purpose). After start-up a failed read keeps the last good profiles and is logged once. The skill text a model sees is the profile's skill, then its newest ten standing lessons if it has any.
-- **Every change is a version.** `save_assistant_profile` (service role only) writes the row and appends a row to `assistant_profile_versions` in one transaction. The writer passes the version it last saw; if the profile has moved on, nothing is written and the function returns null, so two writers never overwrite each other. `made_by` is `seed`, `manager` or `owner`: what the owner approves or puts back is `owner`; `manager` is for a kind the manager may apply by itself, which is none today (see "Who decides what changes"). The history is append-only: a trigger refuses update, delete and truncate for everyone, and the service role has no privilege to do them.
+- **Every change is a version.** `save_assistant_profile` (service role only) writes the row and appends a row to `assistant_profile_versions` in one transaction. The writer passes the version it last saw; if the profile has moved on, nothing is written and the function returns null, so two writers never overwrite each other. `made_by` is `seed`, `manager` or `owner`: what the owner approves or puts back is `owner`; `manager` is what the manager applied by itself (a lesson, a note or a retire; see "Who decides what changes"). The history is append-only: a trigger refuses update, delete and truncate for everyone, and the service role has no privilege to do them.
 - **Seeding.** `npx tsx scripts/seed-profiles.ts` stores the profiles that have no row and leaves every other row as it is (it says which differ from the files). `--force` puts the files' title, skill, reads and models back as a new version and keeps the adopted lessons and the manager's notes at the end of the skill, **and the read tools and the model of each job whose latest change in the history was made by the owner** (what he approved with his code; the script prints `kept what the owner approved: reads, model answer`, and the version's `change` records it). To take an owner's choice back, put an earlier version back. The model names come from the environment at seed time, so after seeding a row decides, not `CODE_MODEL` and the like. The script writes to the local stack unless `--db <url>` or `SUPABASE_DB_URL` says otherwise; it never takes the database from `.env.local`.
 - **The doors.** An outside AI tool gets a **door token** for one assistant: `npx tsx scripts/issue-door-token.ts <assistant> [label]` stores only the token's SHA-256 (`door_tokens`) and writes the token to `.local/door-tokens/<assistant>.token` (mode 600), printing only that path. With the public anon key and the token, a tool can call exactly two functions, as a POST:
   - `door_profile(p_token)` returns `{ assistant, title, version, skill, reads, models, lessons }` for the token's own assistant, nothing else.
@@ -273,14 +343,18 @@ A session report (`file_work_report` at a door) waits in `session_reports` until
 
 ## The daily review
 
-`queueDailyReview(deps)` (`manager-daily.ts`, exported from `manager.ts`) queues today's review of the last 24 hours
-(and of every outside report nobody has read, up to 30 days back, if the manager can read them) as the same scheduled task `REVIEW` queues, with `quiet: true`, so a day
-with nothing to review sends no text. Its key is the day in New York (`review:daily:2026-10-27`), so calling it again the
-same day, from one process or two, queues nothing more and answers `{ queued: false }`. **The worker's daily clock calls
-it** at 09:00 New York time (the `manager-review` job in `scheduler.ts` `SCHEDULE`, after the 08:00 briefs and the 08:30
-digest; merge wave 1). Tests: `digest.test.ts` "holds the HQ Manager's daily review at 09:00 ..." and "queues one quiet review
-task keyed by the New York day ...". `FAHQ_SCHEDULE=off` turns the clock off, and the review is then only asked for by
-`REVIEW`.
+`queueDailyReview(deps)` (`manager-daily.ts`, exported from `manager.ts`) queues today's two reviews of the last 24 hours,
+each as the same kind of scheduled task `REVIEW` queues, with `quiet: true`, so a day with nothing to review sends no text:
+
+- `review:daily:<New York day>`, scope `internal`: the work reports only; it may apply lessons, notes and retires by itself;
+- `review:doors:<New York day>`, scope `doors`: every outside report nobody has read, up to 30 days back, if the manager
+  can read them; nothing in it applies by itself.
+
+Each key is the day in New York, so calling it again the same day, from one process or two, queues nothing more and
+answers `{ internal: { queued: false, key }, doors: { queued: false, key } }`. **The worker's daily clock calls it** at
+09:00 New York time (the `manager-review` job in `scheduler.ts` `SCHEDULE`, after the 08:00 briefs and the 08:30 digest).
+Tests: `digest.test.ts` "holds the HQ Manager's daily review at 09:00 ..." and "queues two quiet review tasks keyed by the
+New York day ...". `FAHQ_SCHEDULE=off` turns the clock off, and the review is then only asked for by `REVIEW`.
 
 ## Lessons: the database is the source
 
@@ -296,8 +370,9 @@ The standing lessons of an assistant are the `lessons` of its profile row. Every
   longer holds, because a version was put back or the 50-lesson limit let it go, is replaced by a "lesson taken back" note and
   stops reaching the plan writers and `my_lessons` at the next read of the profiles (the manager's "For <assistant>: ..." copy
   too). The lesson stays in H-MEM's history, and if the profile holds it again it is remembered again. A lesson that is not a
-  copy of a profile lesson (adopted before profiles were stored) is never touched. `list_lessons` still lists every adopted
-  recommendation, taken back or not: it is the history, `my_lessons` is what is in force.
+  copy of a profile lesson (adopted before profiles were stored) is never touched. `list_lessons` lists the adopted lessons
+  and notes that a later retire did not take out (a version put back by hand is not tracked there: `my_lessons` is what is
+  in force).
 - Lessons adopted before this change are in `recommendations` (and in the H-MEM of the machine that adopted them), not in a
   profile row. They are not copied across; `list_lessons` still shows them.
 
@@ -313,10 +388,10 @@ what the owner approved, so a put-back is also how an owner's choice is taken ba
 
 ## Tests for what the manager decides
 
-- `packages/contracts/test/typed-change.test.ts`: the kinds, what each needs, an older recommendation is a lesson, and that no kind is applied without the owner's code (the table is a tripwire); `redact.test.ts`: the phone and code masks.
-- `packages/profiles/test/changes.test.ts`: every rule a lesson, a note, a read-tool change and a model change must meet, with a case for each (every phone spacing, a code in two groups, the health words); the notes section; the limits that drop the oldest; who applied a lesson. `db-source.test.ts`: the profile source, a forced read when one is already under way, and the skill text for the owner's lessons and the manager's. `seed-owner.test.ts`: which choices a reseed keeps.
-- `apps/worker/test/manager-decides.test.ts` (real database and Meterless, profile tables in memory): as shipped, a lesson, a note, a read and a model each wait for the code and are written by ADOPT as a version made by the owner; the model's words, and an outside report, change nothing; every refusal; outside reports (marked only when the digest carries them, windowed to 30 days, closed when older, ignored when the profile cannot read them); the daily review and its quiet day; lessons reaching the next Code Mode answer under the right heading, another machine's H-MEM, and leaving the plan writer and `my_lessons` when a version is put back. Then, with `deps.managerApplies` set (the mechanism, off): a note and a lesson applied with no code and a version made by the manager; several in order; the 50-lesson limit; the profile moved on; another writer getting in first; a crash between the write and the mark.
-- `apps/worker/test/manager.test.ts`: the whole loop REVIEW, check, ADOPT, replay (and, with the rule on, the manager's own application).
+- `packages/contracts/test/typed-change.test.ts`: the kinds (retire with its target, exact text and why), what each needs, an older recommendation is a lesson, and the table `{ lesson, skill_note, retire: true; reads, model: false }` (a tripwire); `redact.test.ts`: the phone and code masks.
+- `packages/profiles/test/changes.test.ts`: every rule a lesson, a note, a read-tool change and a model change must meet, with a case for each (every phone spacing, a code in two groups, the health words); the notes section; the limits that drop the oldest; who applied a lesson; a retire of a lesson or a note by its exact text, refused when the words are not there, and who put a lesson there (`lessonAddedBy`: no record is the owner's). `db-source.test.ts`: the profile source, a forced read when one is already under way, and the skill text for the owner's lessons and the manager's. `seed-owner.test.ts`: which choices a reseed keeps.
+- `apps/worker/test/manager-decides.test.ts` (real database and Meterless, profile tables in memory): with the manager switched off (`deps.managerApplies` all false), a lesson and a note wait and ADOPT writes them as the owner's; the model's words change nothing; a read and a model always wait; rule 1 (a REVIEW that carried an outside report holds everything, and says so on `manager.apply`), rule 2 on its own, a report from one door holding a lesson for another; every refusal; outside reports (marked only when the digest carries them, windowed to 30 days, closed when older, ignored when the profile cannot read them); the two daily reviews and their quiet day; lessons reaching the next Code Mode answer under the right heading, another machine's H-MEM, and leaving the plan writer and `my_lessons` when a version is put back. As shipped: a note and a lesson applied with no code and a version made by the manager; several in order; the 50-lesson limit; the profile moved on; another writer getting in first; a crash between the write and the mark. The split and retire ("the internal review learns by itself ..."): the internal review's script never handed `list_session_reports` and its lesson applied; a retry of a review that carried an outside report, and a stored review with no record, apply nothing; the doors review holds everything and refuses, then drops, a recommendation about another door, and ADOPT still works; a retire of the manager's lesson applied with no code, its H-MEM copy taken back; a retire of the owner's lesson held and adopted by code; a retire of words the profile does not hold refused; a note the manager wrote retired by itself and a hand-written note held; the manager's own profile updated. Review fixes: a doors review's objection and script error never reach the internal review's digest or prompt; a REVIEW whose final script never called the reader still counts the waiting reports as carried; a lesson with no `by` stays the owner's after the manager writes the profile in the same review; the write itself holds a retire of the owner's lesson; `list_lessons` drops a retired lesson and the retire itself; and, with no database, `forTheInternalReview` leaves out every manager task but an internal review, and script errors and failure reasons from the rest.
+- `apps/worker/test/manager.test.ts`: the whole loop REVIEW, check, ADOPT, replay, with the manager switched off, and as shipped (the manager's own application, and ADOPT reporting what it already applied).
 - `apps/worker/test/profile-lessons.test.ts`: the H-MEM copy of the profile lessons in step with the stored profiles.
 - `apps/worker/test/store-manager.test.ts`: the store's calls on the real database and Data API (nothing writes a profile version there: it cannot be taken back).
-- `supabase/tests/profiles.test.ts`: `--force` keeps the manager's notes and the owner's reads and models; putting a version back (nothing in the history changes, the undo can be undone, a stale version or a racing writer is refused), and `revert-profile.ts` and `seed-profiles.ts` run as programs; the database masks what `@fahq/contracts` masks; a door list item holds one field.
+- `supabase/tests/profiles.test.ts`: `--force` keeps the manager's notes and the owner's reads and models; putting a version back (nothing in the history changes, the undo can be undone, a stale version or a racing writer is refused, a retired lesson comes back with its `by` and a lesson with none stays without one), and `revert-profile.ts` and `seed-profiles.ts` run as programs; the database masks what `@fahq/contracts` masks; a door list item holds one field.

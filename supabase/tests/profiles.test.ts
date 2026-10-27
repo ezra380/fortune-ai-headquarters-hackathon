@@ -822,6 +822,21 @@ describe('seeding profiles (a second throwaway database)', () => {
     expect(managerNotes((await onlineRow()).skill)).toEqual(['Name the month.']);
   });
 
+  it('puts a retired lesson back with its record of who added it, and a lesson with no such record stays without one', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const before = await onlineRow();
+    const owners = { text: 'Say which month.', source: 'rec-owner', adoptedAt: '2026-10-27T09:00:00Z', by: 'owner' };
+    const older = { text: 'Name the period.', source: 'rec-older', adoptedAt: '2026-10-01T09:00:00Z' }; // from before lessons recorded who added them
+    const both = await saveOnline(before.version, { lessons: [older, owners], by: 'owner' });
+    // A retire is a version like any other, written through save_assistant_profile.
+    await saveOnline(both!, { lessons: [older], by: 'manager', reason: 'The HQ Manager applied a retire: outdated' });
+    expect((await onlineRow()).lessons).toEqual([older]);
+    await restoreProfileVersion(scratch, 'online', both!);
+    // Read, checked and written back again: a missing record is never filled in as the manager's (a retire would then take it with no code).
+    expect((await onlineRow()).lessons).toEqual([older, owners]);
+  });
+
   it('refuses, in plain words and writing nothing, a version that is not there, one that is not a version number, and a profile that is not stored', async ({ skip }) => {
     if (!scratchName) skip();
     await seedProfiles(scratch, {});

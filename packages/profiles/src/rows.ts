@@ -14,9 +14,11 @@ export const ProfileLesson = z.object({
   adoptedAt: Timestamp,
   /**
    * Who put it in the profile: the owner (with his one-time code) or the HQ Manager (by itself). A lesson with no
-   * record of that reads as the manager's, the less trusted of the two, and is shown to a model as such (source.ts).
+   * record of that stays without one when the profile is written again or put back (no default is filled in here):
+   * a model is shown it as the manager's, the less trusted of the two (source.ts), and a retire treats it as the
+   * owner's, so taking it out waits for his code (lessonAddedBy).
    */
-  by: z.enum(['manager', 'owner']).default('manager'),
+  by: z.enum(['manager', 'owner']).optional(),
 });
 export type ProfileLesson = z.infer<typeof ProfileLesson>;
 

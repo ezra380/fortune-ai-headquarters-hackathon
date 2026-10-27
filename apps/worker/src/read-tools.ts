@@ -328,7 +328,7 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     }),
     tool({
       name: 'list_lessons',
-      description: 'Adopted recommendations (standing lessons) from the database, newest first; one assistant or all.',
+      description: 'The standing lessons and skill notes in force (adopted, and not retired since) from the database, newest first; one assistant or all.',
       signature: '(args: { assistant?: "owner" | "finance" | "salon" | "online" | "manager" }) => Promise<{ lessons: { assistant: string; text: string; adoptedAt: string }[] }>',
       schema: z.object({ assistant: AssistantId.optional() }).strict(),
       run: async ({ assistant }) => ({
