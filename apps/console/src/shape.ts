@@ -1,10 +1,13 @@
-import type { DepartmentInfo, DepartmentView, PlaceholderView, RawDepartment } from './departments.ts';
-import { SALON_MESSAGE } from './departments.ts';
+import type {
+  DepartmentInfo, DepartmentView, ManagerBlock, PlaceholderView, RawDepartment, RawManager, RawRecommendation, RawReview,
+  RawUsageRow, RawWorkReport, RecommendationView, ReportView, ReviewView, UsageCounts,
+} from './departments.ts';
+import { SALON_MESSAGE, USAGE_WINDOW_HOURS } from './departments.ts';
 import { cleanText, clip, maskNumber } from './scrub.ts';
 
 // Turns what a data source returned into what the owner may see. Only known fields are copied (an
 // unknown field, such as a code hash, is dropped, never passed along), every text is cleaned, and
-// every list is cut to a small size.
+// every list is cut to a small size. This file is the one place that decides what leaves the server.
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -23,6 +26,7 @@ const iso = (v: unknown): string | null => {
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
+const rows = <T>(list: readonly T[] | undefined, max: number): T[] => (Array.isArray(list) ? list.slice(0, max) : []);
 
 /**
  * The first 8 characters of an id, shown as two groups of four ("3f2a-91bc"). Grouping keeps an
@@ -51,10 +55,179 @@ export function placeholderView(info: DepartmentInfo): PlaceholderView {
   return { id: info.id, name: info.name, placeholder: true, message: SALON_MESSAGE };
 }
 
-const LIMITS = { tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, memory: 10, timeline: 30, notes: 8 };
+const LIMITS = {
+  tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, memory: 10, timeline: 30, notes: 8,
+  reports: 15, managerReports: 30, suggestions: 5, findings: 6, recommendations: 3, lessons: 20, usageRows: 5000,
+};
+
+// ---- jsonb columns: checked, never trusted. A bad shape becomes one plain note, never a crash. ----
+
+const NOTES = {
+  usage: 'Some work reports have usage details that could not be read, so those details are left out.',
+  suggestions: 'Some work-report suggestions could not be read and are left out.',
+  review: 'The latest review could not be read in full (unexpected shape). What could not be read is left out.',
+  findings: 'Some findings in the latest review could not be read and are left out.',
+  status: 'Some recommendations have a status this console does not know. They are shown as unknown.',
+} as const;
+type NoteKey = keyof typeof NOTES;
+type Flag = (key: NoteKey) => void;
+
+/** jsonb normally arrives parsed; JSON text is parsed too. Anything unreadable comes back undefined. */
+const parsed = (v: unknown): unknown => {
+  if (typeof v !== 'string') return v;
+  try {
+    return JSON.parse(v) as unknown;
+  } catch {
+    return undefined;
+  }
+};
+
+/** The report's own column when it has one; the usage jsonb is only the fallback. Both are counts, never text. */
+const countOr = (primary: unknown, fallback: unknown): number => whole(primary === null || primary === undefined ? fallback : primary);
+
+function shapeReport(r: RawWorkReport, flag: Flag): ReportView {
+  const usage = parsed(r.usage);
+  const usageRecord = isRecord(usage) ? usage : null;
+  if (!usageRecord) flag('usage');
+  let codeMode: ReportView['codeMode'] = null;
+  if (usageRecord && usageRecord.codeMode !== undefined && usageRecord.codeMode !== null) {
+    const cm = usageRecord.codeMode;
+    if (isRecord(cm)) codeMode = { scripts: whole(cm.scripts), toolCalls: whole(cm.toolCalls), resultChars: whole(cm.resultChars) };
+    else flag('usage');
+  }
+
+  const rawSuggestions = parsed(r.suggestions);
+  const suggestions: ReportView['suggestions'] = [];
+  if (!Array.isArray(rawSuggestions)) flag('suggestions');
+  else {
+    for (const item of rawSuggestions) {
+      const t = isRecord(item) ? text(item.text, 300) : '';
+      if (!isRecord(item) || t === '') {
+        flag('suggestions');
+        continue;
+      }
+      if (suggestions.length < LIMITS.suggestions) suggestions.push({ kind: text(item.kind, 20), about: text(item.about, 20), text: t });
+    }
+  }
+
+  const started = iso(r.started_at);
+  const ended = iso(r.ended_at);
+  return {
+    taskId: shortId(r.task_id),
+    assistant: text(r.assistant_id, 20),
+    taskKind: text(r.task_kind, 40),
+    outcome: text(r.outcome, 20),
+    summary: text(r.summary, 300),
+    modelCalls: countOr(r.model_calls, usageRecord?.modelCalls),
+    inputTokens: countOr(r.input_tokens, usageRecord?.inputTokens),
+    outputTokens: countOr(r.output_tokens, usageRecord?.outputTokens),
+    durationMs: started && ended ? Math.max(0, new Date(ended).getTime() - new Date(started).getTime()) : null,
+    endedAt: ended,
+    codeMode,
+    suggestions,
+  };
+}
+
+const zeroCounts = (): UsageCounts => ({ tasks: 0, done: 0, failed: 0, retrying: 0, modelCalls: 0, inputTokens: 0, outputTokens: 0 });
+const LIVE_ASSISTANTS = ['owner', 'finance', 'online', 'manager'];
+
+/** The last day of finished work, added up per assistant. Every live assistant has a row, even at zero. */
+function shapeUsage(source: readonly RawUsageRow[]): NonNullable<ManagerBlock['usage']> {
+  const by = new Map<string, UsageCounts>(LIVE_ASSISTANTS.map((id) => [id, zeroCounts()]));
+  const total = zeroCounts();
+  for (const r of source.slice(0, LIMITS.usageRows)) {
+    const id = text(r.assistant_id, 20) || 'unknown';
+    const mine = by.get(id) ?? zeroCounts();
+    by.set(id, mine);
+    for (const c of [mine, total]) {
+      c.tasks += 1;
+      if (r.outcome === 'done') c.done += 1;
+      else if (r.outcome === 'failed') c.failed += 1;
+      else if (r.outcome === 'retrying') c.retrying += 1;
+      c.modelCalls += whole(r.model_calls);
+      c.inputTokens += whole(r.input_tokens);
+      c.outputTokens += whole(r.output_tokens);
+    }
+  }
+  const order = (id: string): number => {
+    const i = LIVE_ASSISTANTS.indexOf(id);
+    return i < 0 ? 99 : i;
+  };
+  const ids = [...by.keys()].sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+  return { windowHours: USAGE_WINDOW_HOURS, rows: ids.map((id) => ({ assistant: id, ...by.get(id)! })), total };
+}
+
+const RECOMMENDATION_STATUSES = ['proposed', 'adopted', 'expired'] as const;
+
+function shapeRecommendation(r: RawRecommendation, flag: Flag): RecommendationView {
+  const known = (RECOMMENDATION_STATUSES as readonly string[]).includes(r.status);
+  if (!known) flag('status');
+  return {
+    rank: typeof r.rank === 'number' && Number.isFinite(r.rank) ? whole(r.rank) : null,
+    assistant: text(r.assistant_id, 20),
+    change: text(r.change, 300),
+    why: text(r.why, 300),
+    status: known ? (r.status as RecommendationView['status']) : 'unknown',
+    decidedAt: iso(r.decided_at),
+  };
+}
+
+function shapeReview(r: RawReview, recommendations: readonly RawRecommendation[], flag: Flag): ReviewView {
+  const body = parsed(r.review);
+  let summary: string | null = null;
+  const findings: ReviewView['findings'] = [];
+  if (!isRecord(body)) flag('review');
+  else {
+    summary = maybeText(body.summary, 500);
+    if (summary === null) flag('review');
+    if (Array.isArray(body.findings)) {
+      for (const f of body.findings) {
+        const t = isRecord(f) ? text(f.text, 300) : '';
+        if (!isRecord(f) || t === '') flag('findings');
+        else if (findings.length < LIMITS.findings) findings.push({ assistant: text(f.assistant, 20), text: t });
+      }
+    } else if (body.findings !== undefined) flag('findings');
+  }
+  const recs = rows(recommendations, LIMITS.recommendations)
+    .map((x) => shapeRecommendation(x, flag))
+    .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99));
+  return {
+    createdAt: iso(r.created_at),
+    coversFrom: iso(r.covers_from),
+    coversTo: iso(r.covers_to),
+    reportCount: whole(r.report_count),
+    model: maybeText(r.model, 120),
+    summary,
+    findings,
+    recommendations: recs,
+  };
+}
+
+function shapeManager(m: RawManager | undefined, flag: Flag): ManagerBlock {
+  const raw: RawManager = m ?? { usageRows: [], review: null, recommendations: [], lessons: [], unread: [] };
+  // A standing lesson is an adopted recommendation, newest first, whatever order the source used.
+  const lessons = rows(raw.lessons, LIMITS.lessons * 2)
+    .filter((l) => l.status === 'adopted')
+    .map((l) => ({ assistant: text(l.assistant_id, 20), change: text(l.change, 300), adoptedAt: iso(l.decided_at) }))
+    .sort((a, b) => (b.adoptedAt ?? '').localeCompare(a.adoptedAt ?? ''))
+    .slice(0, LIMITS.lessons);
+  return {
+    usage: raw.usageRows === null ? null : shapeUsage(Array.isArray(raw.usageRows) ? raw.usageRows : []),
+    review: raw.review ? shapeReview(raw.review, raw.recommendations, flag) : null,
+    lessons,
+    unread: rows(raw.unread, 3),
+  };
+}
 
 export function shapeDepartment(raw: RawDepartment, info: DepartmentInfo, now: Date): DepartmentView {
-  const rows = <T>(list: readonly T[] | undefined, max: number): T[] => (Array.isArray(list) ? list.slice(0, max) : []);
+  const flagged = new Set<NoteKey>();
+  const flag: Flag = (key) => {
+    flagged.add(key);
+  };
+  const isManager = info.id === 'manager';
+  // Each live tab shows its own assistant's latest 15 reports; the HQ Manager sees the latest 30 of all of them.
+  const reports = rows(raw.reports, isManager ? LIMITS.managerReports : LIMITS.reports).map((r) => shapeReport(r, flag));
+  const manager = isManager ? shapeManager(raw.manager, flag) : undefined;
 
   return {
     id: info.id,
@@ -116,8 +289,12 @@ export function shapeDepartment(raw: RawDepartment, info: DepartmentInfo, now: D
         durationMs: started && ended ? Math.max(0, new Date(ended).getTime() - new Date(started).getTime()) : null,
         detail: maybeText(r.detail, 200),
         live: typeof r.live === 'boolean' ? r.live : null,
+        inputTokens: count(r.input_tokens),
+        outputTokens: count(r.output_tokens),
       };
     }),
+    reports,
+    ...(manager ? { manager } : {}),
     memory: rows(raw.decisions, LIMITS.memory).map((d) => ({
       text: text(d.content, 400),
       tags: rows(d.tags, 8).filter((t): t is string => typeof t === 'string').map((t) => text(t, 60)),
@@ -127,6 +304,9 @@ export function shapeDepartment(raw: RawDepartment, info: DepartmentInfo, now: D
       type: text(e.type, 60),
       at: iso(e.at),
     })),
-    notes: rows(raw.notes, LIMITS.notes).map((n) => text(n, 300)).filter((n) => n !== ''),
+    // The source's own notes first, then one plain line for each kind of unreadable jsonb found while shaping.
+    notes: [...rows(raw.notes, LIMITS.notes).map((n) => text(n, 300)), ...[...flagged].map((k) => NOTES[k])]
+      .filter((n) => n !== '')
+      .slice(0, LIMITS.notes),
   };
 }
