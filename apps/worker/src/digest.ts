@@ -138,7 +138,6 @@ function reportsIn(lines: readonly DigestLine[]): string {
 export async function ceoDigest(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
   const job = DigestJob.safeParse(task.payload);
   if (!job.success) return fail('the digest job needs a date (YYYY-MM-DD)');
-  if (task.assistant_id !== 'owner') return fail(`the CEO digest belongs to the owner assistant, not the ${task.assistant_id} assistant`);
   const { date, request } = job.data;
   const key = digestKey(date, request);
   let owner: PersonRow;
