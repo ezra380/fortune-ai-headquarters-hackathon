@@ -127,7 +127,7 @@ async function runDepartment(round: Round, department: Department, request: Mess
   let result: PlanResult;
   try {
     result = await writePlans({
-      model: deps.models.nvidia, planModel: deps.models.planModel, department, source, memory, now: started,
+      model: deps.models.nvidia, planModel: deps.models.planModel, department, source, data: deps.data ?? undefined, memory, now: started,
       request: round.requestText, period: deps.period, lessons: memory.lessons(10).map((m) => m.content),
     });
   } catch (error) {

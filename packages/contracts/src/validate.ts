@@ -7,9 +7,17 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //  - Every free-text field is scanned (title, summary, actions, test, stop-loss, risks, projection
 //    labels and assumptions, evidence notes, lever labels, memory notes). Each number found must match
 //    a value of the same kind: a dollar amount a dollar value, a percentage a percentage, "2.4x" a
-//    ratio, a bare number of 100 or more a dollar or count value. Allowed values are cited metrics,
-//    projection inputs and results, and levers (a proposed price, discount, budget or count: a
-//    choice, not a fact). Durations ("90 days") and years ("in 2026") are not claims.
+//    ratio, a bare number of 100 or more a dollar or count value, a bare decimal ("1.35") one of those or a
+//    ratio. Allowed values are cited metrics, projection inputs and results, and levers (a proposed price,
+//    discount, budget or count: a choice, not a fact). Durations ("90 days"), years ("in 2026") and row ids
+//    ("demo-rt-01234", "SUP-2201") are not claims; "a sub-$5,000 test" is.
+//  - A small count (under 100) is a claim when the words after it name what a cited count metric counts
+//    ("3 overdue invoices", "3 of the overdue invoices"): it must then be THAT count's value, one of its own
+//    projections, or a count lever. The phrases come from the data's catalog (`nouns`); the most specific one
+//    wins ("late repairs" over "repairs"), and a phrase two cited counts with different values share is refused
+//    until the plan names which. Without the catalog's phrases small counts are not checked.
+//  - A seasonal budget (an approved cap's projection, once the plan cites last year's index or the projection names
+//    the season) must use the index's value as its factor.
 //  - Numbers in words ("twelve thousand dollars") and digits the scanner cannot read are refused,
 //    never skipped.
 //  - A plan declares which businesses it touches and cites numbers from exactly those. One sentence
@@ -31,7 +39,16 @@ const RESULT_WORDS = /\b(profit|revenue|sales|income|gain|uplift|expected|projec
 // levers ("the combined effect of ads and email"), which is not a salon + online figure.
 const COMBINING_WORDS = /\b(both businesses|salon and online|online and salon|salon \+ online|online \+ salon|salon plus online|online plus salon|across both|whole company|company-wide)\b/i;
 
-export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck {
+// A seasonal budget: an approved ad budget cap, and the index its factor must be.
+const BUDGET_CAP = /^m:online\.budget\.[a-z]+\.cap$/;
+const SEASON_INDEX = 'm:online.season.last_year_index';
+
+/** For each count metric, the phrases that name what it counts (from the data's catalog): "late repairs", "repairs". */
+export type CountNouns = ReadonlyMap<string, readonly string[]>;
+/** A count metric a plan cites: its value, its own projection results and the phrases that name it, word by word. */
+type CitedCount = { id: string; value: number; results: number[]; phrases: string[][] };
+
+export function checkPlans(raw: unknown, metrics: readonly Metric[], nouns: CountNouns = new Map()): PlanCheck {
   const parsed = ProfitPlansSchema.safeParse(raw);
   if (!parsed.success) {
     return {
@@ -45,7 +62,7 @@ export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck 
   const ranks = parsed.data.plans.map((p) => p.rank).sort((a, b) => a - b);
   if (ranks.join(',') !== '1,2,3') errors.push('plans must be ranked 1, 2 and 3, once each');
   const everyPool: Allowed[] = [];
-  for (const plan of parsed.data.plans) everyPool.push(...checkPlan(plan, byId, errors, cited));
+  for (const plan of parsed.data.plans) everyPool.push(...checkPlan(plan, { byId, nouns }, errors, cited));
   for (const c of parsed.data.memoryConflicts) checkText(`memory note ${c.memoryId}`, c.note, everyPool, errors);
   return errors.length > 0
     ? { ok: false, errors }
@@ -54,18 +71,25 @@ export function checkPlans(raw: unknown, metrics: readonly Metric[]): PlanCheck 
 
 function checkPlan(
   plan: Plan,
-  byId: ReadonlyMap<string, Metric>,
+  data: { byId: ReadonlyMap<string, Metric>; nouns: CountNouns },
   errors: string[],
   cited: Set<string>,
 ): Allowed[] {
+  const { byId } = data;
   const where = `plan ${plan.rank}`;
   const pool = poolOf(plan, byId);
   const units = new Set<BusinessUnit>();
   const citedValues: { value: number; business: BusinessUnit }[] = [];
+  // The plan's cited counts that the catalog names: a small number next to one of their phrases is a claim.
+  const counts = new Map<string, CitedCount>();
 
   const useMetric = (m: Metric) => {
     cited.add(m.id);
     units.add(m.business);
+    const phrases = m.unit === 'count' ? data.nouns.get(m.id) ?? [] : [];
+    if (phrases.length > 0 && !counts.has(m.id)) {
+      counts.set(m.id, { id: m.id, value: m.value, results: [], phrases: phrases.map((p) => p.toLowerCase().split(/\s+/).filter(Boolean)) });
+    }
     const prefix = m.id.split(':')[1]?.split('.')[0];
     if (prefix !== m.business) errors.push(`${where}: metric ${m.id} is labeled ${m.business}, not ${prefix}`);
   };
@@ -83,6 +107,7 @@ function checkPlan(
     citedValues.push({ value: m.value, business: m.business });
   }
 
+  const citesIndex = plan.evidence.some((e) => e.metricId === SEASON_INDEX) || plan.projections.some((p) => p.baseMetricId === SEASON_INDEX);
   for (const p of plan.projections) {
     const m = byId.get(p.baseMetricId);
     if (!m) {
@@ -90,9 +115,17 @@ function checkPlan(
       continue;
     }
     useMetric(m);
+    counts.get(m.id)?.results.push(p.result);
     const expected = m.value * p.factor;
     if (!close(p.result, expected, 0.002)) {
       errors.push(`${where}: projection "${p.label}" says ${p.result} but ${m.id} × ${p.factor} = ${round2(expected)}`);
+    }
+    // A seasonal budget is the approved cap × last year's index for the month (PLAN_SYSTEM rule 2): once a plan
+    // cites the index, or a cap projection names the season, the cap's factor must be the index's value.
+    if (BUDGET_CAP.test(m.id) && (citesIndex || /\bseason/i.test(`${p.label} ${p.assumption}`))) {
+      const index = byId.get(SEASON_INDEX);
+      if (!citesIndex || !index) errors.push(`${where}: projection "${p.label}" is a seasonal budget, so cite ${SEASON_INDEX} and use its value as the factor`);
+      else if (!close(p.factor, index.value, 0.001)) errors.push(`${where}: projection "${p.label}" multiplies ${m.id} by ${p.factor}, but a seasonal budget's factor is ${SEASON_INDEX} (${index.value})`);
     }
     if (m.business !== 'combined' && COMBINING_WORDS.test(`${p.label} ${p.assumption}`)) {
       errors.push(`${where}: projection "${p.label}" reads as a salon + online figure but its base is ${m.business} only`);
@@ -132,13 +165,26 @@ function checkPlan(
     ...plan.evidence.flatMap((e, i): [string, string][] => (e.note ? [[`evidence ${i + 1} note`, e.note]] : [])),
     ...plan.levers.map((l, i): [string, string] => [`lever ${i + 1} label`, l.label]),
   ];
-  for (const [field, text] of texts) checkText(`${where} ${field}`, text, pool, errors);
+  for (const [field, text] of texts) checkText(`${where} ${field}`, text, pool, errors, [...counts.values()]);
   return pool;
 }
 
-function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[]): void {
-  const { found, unreadable } = scan(text);
+function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[], counts: readonly CitedCount[] = []): void {
+  const { found, unreadable, small } = scan(text);
   for (const u of unreadable) errors.push(`${where}: "${u}" is a number the checker cannot read; write it in digits`);
+  const levers = pool.filter((a) => a.business === null && a.kind === 'count');
+  for (const n of small) {
+    const named = countsNamed(n.next, counts);
+    if (!named || levers.some((a) => close(n.value, a.value, 0))) continue; // names no cited count, or is a choice
+    const said = `"${[n.raw, ...n.next.slice(0, named.end + 1)].join(' ')}"`;
+    const [first] = named.counts;
+    if (new Set(named.counts.map((c) => c.value)).size > 1) {
+      const which = named.counts.map((c) => `"${ownPhrase(c, named.counts)}"`).join(' or ');
+      errors.push(`${where}: ${said} could be ${named.counts.map((c) => `${c.id} (${c.value})`).join(' or ')}; name which, as in ${which}`);
+    } else if (first && !named.counts.some((c) => [c.value, ...c.results].some((v) => close(n.value, v, 0)))) {
+      errors.push(`${where}: ${said} counts what ${first.id} counts, so it must be its value (${first.value}), one of its projections or a count lever`);
+    }
+  }
   for (const sentence of splitSentences(found)) {
     for (const n of sentence) {
       if (!pool.some((a) => accepts(n, a))) errors.push(`${where}: "${n.raw}" in the text is not one of its cited or projected numbers`);
@@ -147,6 +193,12 @@ function checkText(where: string, text: string, pool: readonly Allowed[], errors
       errors.push(`${where}: one sentence mixes salon and online numbers (${sentence.map((n) => n.raw).join(', ')})`);
     }
   }
+}
+
+/** A count's first qualified phrase that none of the others shares, to suggest when a plan must say which it means. */
+function ownPhrase(c: CitedCount, others: readonly CitedCount[]): string {
+  const shared = new Set(others.filter((o) => o !== c).flatMap((o) => o.phrases.map((p) => p.join(' '))));
+  return c.phrases.map((p) => p.join(' ')).find((p) => p.includes(' ') && !shared.has(p)) ?? c.id;
 }
 
 /**
@@ -218,7 +270,8 @@ function accepts(n: FoundNumber, a: Allowed): boolean {
     case 'usd': return a.kind === 'usd' && same(n.value, a.value, 0.01);
     case 'percent': return a.kind === 'percent' && (Math.abs(n.value - a.value) <= 0.5 || same(n.value, a.value, 0.02));
     case 'ratio': return a.kind === 'ratio' && same(n.value, a.value, 0.01);
-    case 'plain': return (a.kind === 'usd' || a.kind === 'count') && same(n.value, a.value, 0.01);
+    // A bare decimal may also be a ratio written without its "x" (an index of 1.35).
+    case 'plain': return (a.kind === 'usd' || a.kind === 'count' || (a.kind === 'ratio' && !Number.isInteger(n.value))) && same(n.value, a.value, 0.01);
   }
 }
 
@@ -251,7 +304,52 @@ export function numbersIn(text: string): FoundNumber[] {
   return scan(text).found;
 }
 
-function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
+/** A plain number under 100 (not a duration or a year) and the words after it that can name what it counts. */
+type SmallCount = { raw: string; value: number; next: string[] };
+
+// What a small number counts is named by the words right after it: up to four, past a lead-in ("3 of the overdue
+// invoices"), up to a clause break, another number or a joining word ("call 2 owners about the repairs" counts owners).
+const LEAD_IN = new Set(['of', 'the', 'these', 'those', 'our', 'your', 'its', 'their', 'all', 'still', 'other']);
+const JOINING = new Set([
+  'of', 'about', 'for', 'with', 'and', 'or', 'but', 'to', 'from', 'by', 'in', 'on', 'at', 'per', 'a', 'an', 'each', 'who', 'whose',
+  'that', 'which', 'so', 'then', 'than', 'into', 'over', 'under', 'while', 'when', 'if', 'before', 'after',
+]);
+function nextWords(after: string): string[] {
+  const clause = after.split(/[.,;:!?()[\]\n\d]/)[0] ?? '';
+  const words = (clause.match(/\p{L}[\p{L}'-]*/gu) ?? []).map((w) => w.toLowerCase());
+  let start = 0;
+  while (start < words.length && LEAD_IN.has(words[start]!)) start++;
+  const end = words.findIndex((w, i) => i >= start && JOINING.has(w));
+  return words.slice(start, end === -1 ? undefined : end).slice(0, 4);
+}
+
+/**
+ * The cited counts the words after a small number name: those whose most specific phrase fits (its words in
+ * order among them), and where the last matched word sits. Null when no cited count's phrase fits.
+ */
+function countsNamed(words: readonly string[], counts: readonly CitedCount[]): { counts: CitedCount[]; end: number } | null {
+  const fit = (phrase: readonly string[]) => {
+    let i = 0;
+    let end = -1;
+    for (const [at, w] of words.entries()) {
+      if (i < phrase.length && w === phrase[i]) {
+        i++;
+        end = at;
+      }
+    }
+    return i === phrase.length ? { size: i, end } : null;
+  };
+  const best = counts.map((c) => {
+    const [top] = c.phrases.map(fit).filter((f) => f !== null).sort((a, b) => b.size - a.size);
+    return { c, size: top?.size ?? 0, end: top?.end ?? -1 };
+  });
+  const size = Math.max(0, ...best.map((b) => b.size));
+  if (size === 0) return null;
+  const top = best.filter((b) => b.size === size);
+  return { counts: top.map((b) => b.c), end: Math.max(...top.map((b) => b.end)) };
+}
+
+function scan(input: string): { found: FoundNumber[]; unreadable: string[]; small: SmallCount[] } {
   const text = normalize(input);
   const unreadable = [...text.matchAll(WORD_NUMBERS)].map((m) => m[0]);
   for (const m of text.matchAll(/\p{Nd}+/gu)) if (/[^0-9]/.test(m[0])) unreadable.push(m[0]);
@@ -264,6 +362,7 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
     if (/[\p{L}_.:\d]/u.test(prev)) continue; // part of a word, an id or a version ("Q4", "m:online", "v1.2")
     const [raw, dollar, whole, fraction, exponent, unitRaw, currencyWord] = m;
     if (whole === undefined) continue;
+    if (!dollar && !unitRaw && !currencyWord && !fraction && !exponent && isRowId(text, at + whole.length)) continue;
     let base = Number(whole.replaceAll(',', '') + (fraction ?? ''));
     if (exponent) base *= 10 ** Number(exponent);
     if (!Number.isFinite(base)) continue;
@@ -283,6 +382,7 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
   }
 
   const found: FoundNumber[] = [];
+  const small: SmallCount[] = [];
   for (const r of raws) {
     const isPercent = r.unit === '%' || r.unit.startsWith('percent') || r.unit.startsWith('per') || r.unit === 'pct';
     const isRatio = r.unit === 'x' || r.unit === '×';
@@ -295,11 +395,26 @@ function scan(input: string): { found: FoundNumber[]; unreadable: string[] } {
     const plain = !money && !isPercent && !isRatio && !(r.unit in MAGNITUDE);
     if (plain && TIME_AFTER.test(after)) continue; // a duration
     if (plain && r.plainInt && r.base >= 1900 && r.base <= 2100 && YEAR_BEFORE.test(text.slice(0, r.at))) continue; // a year
-    if (plain && Math.abs(value) < 100) continue; // small counts ("3 plans", "14 days")
+    // Small whole numbers ("3 plans"): a claim only next to a cited count's phrase. A bare decimal ("1.35") is a claim.
+    if (plain && r.plainInt && Math.abs(value) < 100) {
+      small.push({ raw: r.raw, value, next: nextWords(after) });
+      continue;
+    }
     const kind = money ? 'usd' : isPercent ? 'percent' : isRatio ? 'ratio' : 'plain';
     found.push({ raw: r.raw, value, percent: kind === 'percent', kind, at: r.at, sentence: sentenceIndex(text, r.at) });
   }
-  return { found, unreadable };
+  return { found, unreadable, small };
+}
+
+// Row ids are names, not amounts (design 4e): a synthetic row's id ("demo-rt-01234", "demo-s-3") and a supplier
+// number ("SUP-2201"). Only bare digits that end such an id exactly are skipped, so "a sub-$5,000 test", "mid-30%",
+// "ROAS-9.5x" and "the top-100 buyers" are still read (review 2026-10-27).
+const ROW_ID = /(?:^|[^\p{L}\p{N}_-])(?:demo(?:-[a-z]+)+-[a-z]*|sup-)\d+$/iu;
+const ID_END = /^(?:$|[\s,;:)!?]|\.(?:\s|$))/;
+
+/** Do the digits ending at `end` close a row id, with nothing glued after them? */
+function isRowId(text: string, end: number): boolean {
+  return ROW_ID.test(text.slice(0, end)) && ID_END.test(text.slice(end));
 }
 
 function sentenceIndex(text: string, at: number): number {

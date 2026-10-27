@@ -1,6 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { AssistantId, type DataPort } from '@fahq/contracts';
+import {
+  AssistantId, DEFAULT_PERIODS, MetricId, type DataPort, type Division, type DivisionData, type Metric, type Period, type RowRead,
+} from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { loadProfiles, skillFrontmatter, type ReadToolName } from '@fahq/profiles';
 
@@ -20,7 +22,6 @@ export type BrainMcpDeps = {
   now: () => Date;
 };
 
-const period = z.enum(['2026-09', '2026-10-mtd']);
 const query = z.string().min(2).max(300);
 const limit = z.number().int().min(1).max(10).optional();
 
@@ -40,25 +41,69 @@ export function registerSkillPrompt(server: McpServer, profileId: AssistantId): 
   );
 }
 
-async function readMetrics(deps: BrainMcpDeps, forPeriod: z.infer<typeof period>, only?: 'online') {
-  if (!deps.data) return refuse('Business data is not connected yet (packages/data).');
+const NOT_CONNECTED = 'Business data is not connected yet (packages/data).';
+const READ_FAILED = 'Business data could not be read (ZETARIS_READ).';
+const plain = (m: Metric) => ({ id: m.id, label: m.label, value: m.value, unit: m.unit, business: m.business, period: m.period });
+
+/** A refusal the door words itself: a plain sentence, safe to show. Any other error is the provider's text. */
+class DoorRefusal extends Error {}
+
+/** The failure for the server log: its kind and text, cut short, with any email address or phone number masked. */
+const logDetail = (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}` : 'unknown')
+  .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]').replace(/\+?\d[\d ().-]{8,}\d/g, '[phone]').slice(0, 300);
+
+/**
+ * Runs one read of the data port; a missing port or a failed read is a plain refusal, never a guess. A provider's
+ * own text (an HTTP body, SQL, a host name) never reaches the client: it gets a fixed sentence with a code, and
+ * the detail goes to the server log (Law 7; doors.test.ts "keeps the provider's text out of the answer").
+ */
+async function fromData(deps: BrainMcpDeps, read: (data: DataPort, asOf: string) => Promise<Record<string, unknown>>) {
+  if (!deps.data) return refuse(NOT_CONNECTED);
   try {
-    const r = await deps.data.getFinanceMetrics({ asOf: deps.now().toISOString(), period: forPeriod });
-    return ok({
-      view: r.view,
-      queryHash: r.queryHash,
-      metrics: r.metrics
-        .filter((m) => !only || m.business === only)
-        .map((m) => ({ id: m.id, label: m.label, value: m.value, unit: m.unit, business: m.business, period: m.period })),
-    });
+    return ok(await read(deps.data, deps.now().toISOString()));
   } catch (error) {
-    return refuse(`Business data could not be read: ${error instanceof Error ? error.message : 'unknown error'}`);
+    if (error instanceof DoorRefusal) return refuse(`Business data could not be read: ${error.message}`);
+    console.error(`fortune-brain.zetaris_read_failed ${logDetail(error)}`);
+    return refuse(READ_FAILED);
   }
 }
 
-// The reads this door can serve today. The rest of a profile's reads (lessons, work reports, usage,
-// open items, the latest proposal) are served inside the worker only.
-const DOOR_READS: readonly ReadToolName[] = ['get_finance_metrics', 'get_online_metrics', 'recall_decisions', 'recall_my_decisions', 'get_timeline'];
+/** One division's read (data version 2); refused by a port without divisions. */
+async function divisionRead(data: DataPort, division: Division, period: Period, asOf: string): Promise<DivisionData> {
+  if (!data.getDivisionMetrics) throw new DoorRefusal(`this data source has no ${division} division read (it needs data version 2)`);
+  return data.getDivisionMetrics({ division, period, asOf });
+}
+
+// A division tool reads its division's mart when the port has divisions; otherwise its business, as before.
+const readMetrics = (deps: BrainMcpDeps, forPeriod: Period, division: 'finance' | 'online' | 'salon') => fromData(deps, async (data, asOf) => {
+  if (data.getDivisionMetrics) {
+    const r = await divisionRead(data, division, forPeriod, asOf);
+    return { view: r.view, queryHash: r.queryHash, metrics: r.metrics.map(plain), attention: r.attention };
+  }
+  const r = await data.getFinanceMetrics({ asOf, period: forPeriod });
+  return { view: r.view, queryHash: r.queryHash, metrics: r.metrics.filter((m) => division === 'finance' || m.business === division).map(plain) };
+});
+
+/** The rows of one fixed read, at most `limit` shown; the totals cover every matching row. */
+const readRows = (deps: BrainMcpDeps, read: RowRead, limit: number | undefined) => fromData(deps, async (data, asOf) => {
+  if (!data.readRows) throw new DoorRefusal('this data source has no row reads (they need data version 2)');
+  const r = await data.readRows({ ...read, asOf });
+  return { dataDate: r.dataDate, view: r.view, queryHash: r.queryHash, totals: r.totals, rows: r.rows.slice(0, limit ?? 20) };
+});
+
+// Whose metrics a profile's series may be asked for (as in the worker's read tools).
+const SERIES_DIVISIONS: Record<AssistantId, readonly Division[]> = { owner: ['finance', 'hq'], finance: ['finance'], online: ['online'], salon: ['salon'], manager: [] };
+const BUDGET_IDS = /^m:online\.(budget\.|ads\.[a-z]+\.spend$|season\.last_year_index$)/;
+const rowLimit = z.number().int().min(1).max(50).optional();
+
+// The reads this door can serve. The rest of a profile's reads (lessons, work reports, usage, open items, the
+// latest proposal) are served inside the worker only.
+const DOOR_READS: readonly ReadToolName[] = [
+  'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_decisions', 'recall_my_decisions', 'get_timeline',
+  // The division data: these need only the data port.
+  'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
+  'get_waiting_conversations', 'get_low_stock_interest',
+];
 
 /** What a profile's door offers: its reads, limited to what the door can serve. Empty for the salon placeholder. */
 export function doorReads(profileId: AssistantId): ReadToolName[] {
@@ -71,6 +116,8 @@ export function createBrainMcpServer(deps: BrainMcpDeps, profileId: AssistantId 
   const may = (name: ReadToolName) => reads.includes(name);
   const server = new McpServer({ name: 'fortune-brain', version: '0.1.0' });
   registerSkillPrompt(server, profileId);
+  // Exactly the periods the data serves (version 1: the last two).
+  const period = z.enum(deps.data?.periods ?? DEFAULT_PERIODS);
 
   if (may('get_finance_metrics')) {
     server.registerTool(
@@ -80,7 +127,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, profileId: AssistantId 
           'Salon and online finance metrics for one period, read through Zetaris (read-only). Salon and online stay separate; combined totals are labeled "combined". Every metric carries the query hash it came from.',
         inputSchema: { period },
       },
-      ({ period: p }) => readMetrics(deps, p),
+      ({ period: p }) => readMetrics(deps, p, 'finance'),
     );
   }
 
@@ -95,6 +142,20 @@ export function createBrainMcpServer(deps: BrainMcpDeps, profileId: AssistantId 
       ({ period: p }) => readMetrics(deps, p, 'online'),
     );
   }
+
+  if (may('get_salon_metrics')) {
+    server.registerTool(
+      'get_salon_metrics',
+      {
+        description:
+          'Salon metrics for one period, read through Zetaris (read-only; synthetic data standing in for the head stylist\'s own backend). Salon only. Every metric carries the query hash it came from.',
+        inputSchema: { period },
+      },
+      ({ period: p }) => readMetrics(deps, p, 'salon'),
+    );
+  }
+
+  registerDivisionReads(server, deps, profileId, may, period);
 
   if (may('recall_decisions')) {
     server.registerTool(
@@ -145,6 +206,47 @@ export function createBrainMcpServer(deps: BrainMcpDeps, profileId: AssistantId 
   }
 
   return server;
+}
+
+/** The division data's reads (data version 2), each offered only when the profile lists it. */
+function registerDivisionReads(server: McpServer, deps: BrainMcpDeps, profileId: AssistantId, may: (name: ReadToolName) => boolean, period: z.ZodType<Period>) {
+  const tool = (name: ReadToolName, description: string, inputSchema: z.ZodRawShape, run: (args: any) => ReturnType<typeof fromData>) => {
+    if (may(name)) server.registerTool(name, { description, inputSchema }, run);
+  };
+  tool('get_budget_room', "Each ad channel's approved budget, spend, budget left and share used for one period, from the finance owner's budget sheet and the ad reports in Zetaris (read-only), with the budget attention rules that fired.", { period }, ({ period: p }) =>
+    fromData(deps, async (data, asOf) => {
+      const r = await divisionRead(data, 'finance', p, asOf);
+      return { view: r.view, queryHash: r.queryHash, metrics: r.metrics.filter((m) => BUDGET_IDS.test(m.id)).map(plain), attention: r.attention.filter((a) => a.metricId.startsWith('m:online.budget.')) };
+    }));
+  tool('get_metric_series', "One of your division's metrics in every period, oldest first, from its Zetaris mart (read-only), with its lowest, highest and mean of the twelve whole months.", { metricId: MetricId }, ({ metricId }) =>
+    fromData(deps, async (data, asOf) => {
+      if (!data.getMetricSeries) throw new DoorRefusal('this data source has no series (it needs data version 2)');
+      const info = data.catalog?.find((m) => m.id === metricId);
+      const division = SERIES_DIVISIONS[profileId].find((d) => info?.divisions?.includes(d));
+      if (!division) throw new DoorRefusal(`${metricId} is not one of the metrics your division reads`);
+      return data.getMetricSeries({ division, metricId, asOf });
+    }));
+  tool('get_company_overview', 'The whole company for one period from the HQ mart in Zetaris (read-only): salon and online side by side, never added together, and the attention list (empty means running normally).', { period }, ({ period: p }) =>
+    fromData(deps, async (data, asOf) => {
+      const r = await divisionRead(data, 'hq', p, asOf);
+      const side = (b: string) => r.metrics.filter((m) => m.business === b).map(plain);
+      return { view: r.view, queryHash: r.queryHash, normal: r.attention.length === 0, salon: side('salon'), online: side('online'), combined: side('combined'), attention: r.attention };
+    }));
+  // The same shape as the worker's read tool: one count per source under its business, never added up.
+  tool('get_data_quality', 'Rows each source system sent that failed the data checks and were left out of the numbers, for one period, from Zetaris (read-only): one count per source, each under its business.', { period }, ({ period: p }) =>
+    fromData(deps, async (data, asOf) => {
+      const r = await divisionRead(data, 'hq', p, asOf);
+      const dq = r.metrics.filter((m) => /\.dq\.rejected_/.test(m.id));
+      return { period: p, view: r.view, queryHash: r.queryHash, rejected: Object.fromEntries(dq.map((m) => [m.id, { label: m.label, value: m.value, business: m.business, period: m.period }])) };
+    }));
+  tool('get_repair_tickets', 'Salon repair tickets through Zetaris (read-only): open, late (open over two weeks) or done in the last 30 days, with the count and fee and cost totals of every matching ticket.', { status: z.enum(['open', 'late', 'done']), limit: rowLimit }, ({ status, limit }) =>
+    readRows(deps, { table: 'repairs', status }, limit));
+  tool('get_supplier_invoices', 'Unpaid supplier invoices through Zetaris (read-only): open, overdue or due in the next 30 days, one business or both, with what is owed per business (never added across the two).', { status: z.enum(['open', 'overdue', 'due_30d']), business: z.enum(['salon', 'online']).optional(), limit: rowLimit }, ({ status, business, limit }) =>
+    readRows(deps, { table: 'invoices', status, ...(business ? { business } : {}) }, limit));
+  tool('get_waiting_conversations', 'Customer messages from the last week still waiting for a first answer, through Zetaris (read-only): channel, topic and hours waited; never the text or the customer.', { olderThanHours: z.number().min(0).max(720).optional(), limit: rowLimit }, ({ olderThanHours, limit }) =>
+    readRows(deps, { table: 'waiting', olderThanHours: olderThanHours ?? 0 }, limit));
+  tool('get_low_stock_interest', 'Store products at or below their reorder point on the data date, through Zetaris (read-only), most viewed first, with how many are wanted and how many wanted ones are out of stock.', { limit: rowLimit }, ({ limit }) =>
+    readRows(deps, { table: 'low_stock' }, limit));
 }
 
 async function recall(deps: BrainMcpDeps, who: AssistantId, q: string, n: number | undefined) {

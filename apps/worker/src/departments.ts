@@ -1,7 +1,9 @@
-import type { AssistantId, Metric } from '@fahq/contracts';
+import type { AssistantId, CountNouns, Metric, MetricInfo } from '@fahq/contracts';
 
-// The departments that propose when the owner asks for plans. Each is an expert on its own data:
-// finance reads every metric, the salon only the salon's, online only the online store's.
+// The departments that propose when the owner asks for plans. Each is an expert on its own data: the metrics
+// its division reads (the data's catalog says who reads each one): finance the money of both businesses side
+// by side, the salon the salon's, online the online store's. A port without divisions: finance reads every
+// metric, the others their own business.
 
 export type Department = 'finance' | 'salon' | 'online';
 
@@ -19,15 +21,30 @@ export function departmentsFor(target: AssistantId): Department[] {
   return isDepartment(target) ? [target] : [...ROUND_DEPARTMENTS];
 }
 
-/** The metrics a department may plan from. */
-export function sliceFor(department: Department, metrics: readonly Metric[]): Metric[] {
-  return department === 'finance' ? [...metrics] : metrics.filter((m) => m.business === department);
+/**
+ * The metrics a department may plan from: the ones its division reads, never one the catalog keeps out of plan
+ * writing (planUse false: the validator cannot check its kind of number yet). A metric the catalog does not
+ * know is left out when the catalog has divisions.
+ */
+export function sliceFor(department: Department, metrics: readonly Metric[], catalog: readonly MetricInfo[] = []): Metric[] {
+  const info = new Map(catalog.map((m) => [m.id, m]));
+  const byDivision = catalog.some((m) => m.divisions !== undefined);
+  return metrics.filter((m) => {
+    if (info.get(m.id)?.planUse === false) return false;
+    if (byDivision) return info.get(m.id)?.divisions?.includes(department) ?? false;
+    return department === 'finance' || m.business === department;
+  });
+}
+
+/** What each count metric counts, from the catalog, so the plan checker can hold a plan's small counts to it. */
+export function countNouns(catalog: readonly MetricInfo[] = []): CountNouns {
+  return new Map(catalog.flatMap((m) => (m.unit === 'count' && m.nouns ? [[m.id, m.nouns] as const] : [])));
 }
 
 /** The one line added to the plan writer's rules to name the department and its data. */
 export function departmentLine(department: Department): string {
   const data = department === 'finance'
-    ? 'every metric provided (salon, online and combined)'
+    ? 'the money metrics of both businesses provided, side by side (salon, online and combined)'
     : `only the ${department} metrics provided (the ${department === 'salon' ? 'online' : 'salon'} business is not yours to plan for)`;
   return `You are writing as the ${DEPARTMENT_LABEL[department]} department. Your data is ${data}.`;
 }

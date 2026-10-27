@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantMemory } from '@fahq/brain';
-import { WorkReport, type Receipt } from '@fahq/contracts';
+import { PERIOD_KEYS, WorkReport, type Receipt } from '@fahq/contracts';
 import { parseCommand } from '../src/commands.ts';
 import { departmentLine } from '../src/departments.ts';
-import { PLAN_SYSTEM, PlanError, planDigest, writePlans } from '../src/finance.ts';
+import { PLAN_SYSTEM, PlanError, financePeriod, planDigest, writePlans } from '../src/finance.ts';
 import { checkReview, renderFacts } from '../src/manager.ts';
 import { buildWorkReport, codeModeDetail, numberTrace, summarizeUsage, type UsageRow } from '../src/reports.ts';
 import { dataMock, mockMetrics, modelMock, onlinePlans, salonPlans, validPlans } from './fixtures.ts';
@@ -115,6 +115,35 @@ describe('writePlans', () => {
     await expect(writePlans({ ...base, model: cross, department: 'online' })).rejects.toThrow(/unknown metric m:salon/);
   });
 
+  it("for a department, plans from its division's metrics when the port's catalog names divisions, even from a round's source", async () => {
+    const divisions: Record<string, ('finance' | 'online' | 'salon' | 'hq')[]> = {
+      'm:online.revenue.mazali': ['online', 'finance'], 'm:online.ads.google.spend': ['online', 'finance'], 'm:online.ads.google.roas': ['online'],
+      'm:salon.revenue.wash_set': ['salon', 'finance'], 'm:salon.appointments.count': ['salon'],
+    };
+    const data = { ...dataMock, catalog: mockMetrics.map(({ id, label, unit, business }) => ({ id, label, unit, business, divisions: divisions[id] })) };
+    const model = modelMock([JSON.stringify(validPlans)]);
+    const source = { metrics: mockMetrics, queryHash: 'd'.repeat(64), view: 'the_view' };
+    // Online's own ad return is not Finance's to plan from, so plans citing it fail on Finance's slice.
+    await expect(writePlans({ ...base, data, source, model, department: 'finance' })).rejects.toThrow(/unknown metric m:online.ads.google.roas/);
+    expect((JSON.parse(model.inputs[0]!.user).metrics as { id: string }[]).map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:salon.revenue.wash_set']);
+    const online = await writePlans({ ...base, data, source, model: modelMock([JSON.stringify(onlinePlans)]), department: 'online' });
+    expect(online.metrics.map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:online.ads.google.roas']);
+  });
+
+  it("holds a plan's small counts to what the catalog says each cited count counts, and tells the writer each metric's period", async () => {
+    const data = { ...dataMock, catalog: mockMetrics.map(({ id, label, unit, business }) => ({ id, label, unit, business, ...(id === 'm:salon.appointments.count' ? { nouns: ['appointment', 'appointments'] } : {}) })) };
+    const invented = structuredClone(salonPlans);
+    invented.plans[1]!.actions = ['Add 4 appointments on quiet weekdays'];
+    const model = modelMock([JSON.stringify(invented)]);
+    await expect(writePlans({ ...base, data, model, department: 'salon' })).rejects.toThrow(/"4 appointments" counts what m:salon.appointments.count counts/);
+    expect((JSON.parse(model.inputs[0]!.user).metrics as { period: string }[]).every((m) => m.period === '2026-09')).toBe(true);
+    // The same plans pass when the data names no count words (a port without a catalog), as before.
+    await expect(writePlans({ ...base, model: modelMock([JSON.stringify(invented)]), department: 'salon' })).resolves.toMatchObject({ attempts: 1 });
+    expect(PLAN_SYSTEM).toContain('A metric whose period is "standing" is as of the data date');
+    expect(PLAN_SYSTEM).toContain('A seasonal budget is one too: base m:online.budget.<channel>.cap × factor = the value of m:online.season.last_year_index.');
+    expect(PLAN_SYSTEM).toContain('A number under 100 next to what a cited count metric counts ("3 overdue invoices") must be THAT count\'s value, one of its projections or a count lever; when two cited counts count the same thing, name which ("3 late repairs", not "3 repairs").');
+  });
+
   it('reads the metrics once for a whole round: with a source it never touches the data port', async () => {
     const source = { metrics: mockMetrics, queryHash: 'd'.repeat(64), view: 'the_view' };
     const result = await writePlans({ ...base, data: undefined, source, model: modelMock([JSON.stringify(salonPlans)]), department: 'salon' });
@@ -148,6 +177,19 @@ const rc = (step: string, over: Partial<Receipt> = {}): Receipt => ({
 const task = { id: TASK, assistant_id: 'finance' as const, kind: 'mailbox' };
 const report = (receipts: Receipt[], over: { outcome?: 'done' | 'failed' | 'retrying'; error?: string | null; seconds?: number } = {}) =>
   buildWorkReport({ task, outcome: over.outcome ?? 'done', error: over.error ?? null, receipts, startedAt: t0, endedAt: new Date(t0.getTime() + (over.seconds ?? 5) * 1000) });
+
+// Review 2026-10-27: FINANCE_PERIOD=2026-08 passed startup under data version 1, then every finance read failed.
+describe('financePeriod (FINANCE_PERIOD at startup)', () => {
+  it('uses a period the data serves, and otherwise plans for 2026-09 with a reason to log', () => {
+    expect(financePeriod(undefined)).toEqual({ period: '2026-09', note: null });
+    expect(financePeriod('2026-10-mtd')).toEqual({ period: '2026-10-mtd', note: null });
+    expect(financePeriod('2026-08')).toEqual({
+      period: '2026-09', note: 'FINANCE_PERIOD "2026-08" is not used (this data serves only 2026-09, 2026-10-mtd); planning for 2026-09',
+    });
+    expect(financePeriod('2026-08', PERIOD_KEYS)).toEqual({ period: '2026-08', note: null });
+    expect(financePeriod('2026-13')).toEqual({ period: '2026-09', note: 'FINANCE_PERIOD "2026-13" is not used (it is not a period); planning for 2026-09' });
+  });
+});
 
 describe('buildWorkReport', () => {
   it('turns receipts into a report that passes the contract: steps, usage and one sentence', () => {

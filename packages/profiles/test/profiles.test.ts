@@ -31,11 +31,14 @@ describe('the read-only profiles', () => {
   });
 
   it('gives each assistant exactly its reads and writes', () => {
-    expect(profiles.owner.reads).toEqual(['get_finance_metrics', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal']);
-    expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
-    expect(profiles.online.reads).toEqual(['get_online_metrics', 'recall_my_decisions', 'my_lessons']);
-    expect(profiles.salon.reads).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
-    expect(profiles.manager.reads).toEqual(['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal']);
+    expect(profiles.owner.reads).toEqual([
+      'get_finance_metrics', 'get_company_overview', 'get_budget_room', 'get_metric_series', 'get_repair_tickets', 'get_supplier_invoices',
+      'get_waiting_conversations', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal',
+    ]);
+    expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
+    expect(profiles.online.reads).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'recall_my_decisions', 'my_lessons']);
+    expect(profiles.salon.reads).toEqual(['get_salon_metrics', 'get_metric_series', 'get_repair_tickets', 'recall_my_decisions', 'my_lessons']);
+    expect(profiles.manager.reads).toEqual(['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality']);
     expect(profiles.owner.writes).toEqual(['propose']);
     expect(profiles.finance.writes).toEqual(['propose', 'report']);
     expect(profiles.online.writes).toEqual(['propose', 'report']);
@@ -58,6 +61,18 @@ describe('the read-only profiles', () => {
     expect(profiles.manager.reads).not.toContain('get_finance_metrics');
     expect(profiles.manager.serves).toBeNull();
     expect(profiles.finance.serves).toBe('finance_owner');
+  });
+
+  it('gives each division its own rows and the company view to HQ only (design 3.7)', () => {
+    const readers = (tool: string) => ids.filter((id) => (profiles[id].reads as readonly string[]).includes(tool));
+    expect(readers('get_repair_tickets')).toEqual(['owner', 'salon']);
+    expect(readers('get_supplier_invoices')).toEqual(['owner', 'finance']);
+    expect(readers('get_budget_room')).toEqual(['owner', 'finance']);
+    expect(readers('get_waiting_conversations')).toEqual(['owner', 'online']);
+    expect(readers('get_low_stock_interest')).toEqual(['online']);
+    expect(readers('get_metric_series')).toEqual(['owner', 'finance', 'salon', 'online']);
+    expect(readers('get_company_overview')).toEqual(['owner']);
+    expect(readers('get_data_quality')).toEqual(['manager']);
   });
 
   it('assigns each assistant its model jobs, the salon and online like finance', () => {
@@ -134,7 +149,7 @@ describe('the skills', () => {
 describe('pickTools', () => {
   it('returns exactly the profile tools, in the profile order', () => {
     const picked = pickTools(allTools(), profiles.finance);
-    expect(picked.map((t) => t.name)).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
+    expect(picked.map((t) => t.name)).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
   });
 
   it('never returns a tool the profile does not list, even when more are available', () => {
@@ -145,7 +160,7 @@ describe('pickTools', () => {
       expect(names).not.toContain('propose_task');
       expect(names).not.toContain('send_sms');
     }
-    expect(pickTools(all, profiles.salon).map((t) => t.name)).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
+    expect(pickTools(all, profiles.salon).map((t) => t.name)).toEqual(['get_salon_metrics', 'get_metric_series', 'get_repair_tickets', 'recall_my_decisions', 'my_lessons']);
   });
 
   it('throws on a name that is missing from the available tools', () => {

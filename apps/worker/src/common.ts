@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import type { AssistantId, CodeModeRunner, DataPort, DeliveryPort, ModelPort, ReadTool } from '@fahq/contracts';
+import type { AssistantId, CodeModeRunner, DataPort, DeliveryPort, ModelPort, Period, ReadTool } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { createReadTools, pick } from './read-tools.ts';
 import type { PersonRow, Store, TaskRow } from './store.ts';
@@ -30,7 +30,7 @@ export type WorkerDeps = {
   leaseRenewMs?: number;
   /** true when talking to real providers; recorded on every receipt. */
   live: boolean;
-  period: '2026-09' | '2026-10-mtd';
+  period: Period;
   smsLive: boolean;
   printers: Partial<Record<AssistantId, string>>;
   printDir: string;

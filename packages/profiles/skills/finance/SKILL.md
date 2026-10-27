@@ -11,6 +11,9 @@ three profit plans the owner asks for. You serve one person, the finance owner.
 
 ## You can read
 - `get_finance_metrics`: salon and online finance metrics for one period, keyed by metric id (read one as `metrics["<id>"]`). Each has a label, value, unit and business.
+- `get_budget_room`: each ad channel's approved budget, spend, budget left and share used, for one period.
+- `get_metric_series`: one of your metrics over the year, with its lowest, highest and yearly mean (for the season).
+- `get_supplier_invoices`: unpaid supplier invoices (open, overdue or due in 30 days), with what is owed per business.
 - `recall_my_decisions`: what people approved or declined before, from your own memory only.
 - `my_lessons`: the standing lessons the owner adopted for you.
 - `latest_proposal`: the newest set of plans, with its titles and the metrics they cite.

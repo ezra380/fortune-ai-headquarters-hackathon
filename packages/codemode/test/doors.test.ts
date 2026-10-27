@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { describe, expect, it, vi } from 'vitest';
-import { AssistantId, type DataPort, type Metric } from '@fahq/contracts';
+import { AssistantId, PERIOD_KEYS, type DataPort, type Metric } from '@fahq/contracts';
 import type { Brain } from '@fahq/brain';
 import { loadProfiles } from '@fahq/profiles';
 import { createBrainMcpServer, createCodeModeBrainServer, type BrainMcpDeps } from '../src/index.ts';
@@ -26,6 +26,32 @@ function makeDeps(extra: Partial<BrainMcpDeps> = {}) {
   return { deps, recalled };
 }
 
+/** A FAKE version 2 port: division reads, row reads (30 rows each) and series, recording what it was asked. */
+const V2_ATTENTION = [
+  { metricId: 'm:online.budget.google.used', level: 'act' as const, rule: 'Ad spend went over the approved budget.' },
+  { metricId: 'm:salon.ap.overdue.count', level: 'act' as const, rule: 'Supplier invoices are overdue.' },
+];
+function v2Port() {
+  const asked: unknown[] = [];
+  const v2 = (id: string, business: Metric['business'], value: number): Metric => ({ ...metric(id, business, value), period: '2026-10-mtd' });
+  const byDivision: Record<string, Metric[]> = {
+    finance: [
+      v2('m:online.budget.google.cap', 'online', 2000), v2('m:online.budget.google.room', 'online', -100), v2('m:online.ads.google.spend', 'online', 2100),
+      v2('m:online.ads.total.spend', 'online', 2900), v2('m:online.season.last_year_index', 'online', 1.35), v2('m:online.revenue.total', 'online', 15000), v2('m:salon.ap.overdue', 'salon', 800),
+    ],
+    hq: [v2('m:salon.revenue.total', 'salon', 9000), v2('m:salon.dq.rejected_repairs', 'salon', 1), v2('m:online.dq.rejected_orders', 'online', 2), v2('m:combined.dq.rejected_invoices', 'combined', 1)],
+  };
+  const data: DataPort = {
+    ...makeDeps().deps.data!, periods: PERIOD_KEYS,
+    getDivisionMetrics: async ({ division, period }) => {
+      asked.push({ division, period });
+      return { division, metrics: byDivision[division] ?? [], attention: division === 'finance' ? V2_ATTENTION : [], queryHash: source.queryHash, view: `fortune_demo_v2_${division}_mart` };
+    },
+    readRows: async ({ asOf: _a, ...read }) => { asked.push(read); return { table: read.table, rows: Array.from({ length: 30 }, (_, i) => ({ n: i })), totals: { count: 30 }, dataDate: '2026-10-26', queryHash: source.queryHash, view: 'v' }; },
+  };
+  return { data, asked };
+}
+
 async function connect(server: McpServer) {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
@@ -41,11 +67,14 @@ const text = (r: unknown) => ((r as { content: { text: string }[] }).content[0]?
 describe('profile doors (plain tools)', () => {
   it('offers each profile only the tools it may read', async () => {
     const expected: Record<AssistantId, string[]> = {
-      owner: ['get_finance_metrics', 'get_timeline', 'recall_decisions'],
-      finance: ['get_finance_metrics', 'recall_my_decisions'],
-      online: ['get_online_metrics', 'recall_my_decisions'],
-      salon: ['recall_my_decisions'], // its salon numbers are served inside the worker only
-      manager: ['get_timeline', 'recall_decisions'],
+      owner: [
+        'get_budget_room', 'get_company_overview', 'get_finance_metrics', 'get_metric_series', 'get_repair_tickets', 'get_supplier_invoices', 'get_timeline',
+        'get_waiting_conversations', 'recall_decisions',
+      ],
+      finance: ['get_budget_room', 'get_finance_metrics', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions'],
+      online: ['get_low_stock_interest', 'get_metric_series', 'get_online_metrics', 'get_waiting_conversations', 'recall_my_decisions'],
+      salon: ['get_metric_series', 'get_repair_tickets', 'get_salon_metrics', 'recall_my_decisions'],
+      manager: ['get_data_quality', 'get_timeline', 'recall_decisions'],
     };
     for (const id of AssistantId.options) {
       const client = await connect(createBrainMcpServer(makeDeps().deps, id));
@@ -71,8 +100,115 @@ describe('profile doors (plain tools)', () => {
 
   it('defaults to the owner door', async () => {
     const client = await connect(createBrainMcpServer(makeDeps().deps));
-    expect(await toolNames(client)).toEqual(['get_finance_metrics', 'get_timeline', 'recall_decisions']);
+    expect(await toolNames(client)).toEqual(await toolNames(await connect(createBrainMcpServer(makeDeps().deps, 'owner'))));
+    expect(await toolNames(client)).toContain('get_company_overview');
     await client.close();
+  });
+
+  it('gives the salon door salon numbers only', async () => {
+    const client = await connect(createBrainMcpServer(makeDeps().deps, 'salon'));
+    const r = JSON.parse(text(await client.callTool({ name: 'get_salon_metrics', arguments: { period: '2026-09' } }))) as { metrics: { id: string; business: string }[] };
+    expect(r.metrics.map((m) => m.id)).toEqual(['m:salon.revenue.wash_set']);
+    await client.close();
+  });
+
+  it('serves the division data from a version 2 port: side by side, rows with their totals, a series only of its own ids', async () => {
+    const hq = [metric('m:salon.revenue.total', 'salon', 9000), metric('m:online.revenue.total', 'online', 15000), metric('m:salon.dq.rejected_repairs', 'salon', 1)];
+    const asked: unknown[] = [];
+    const data: DataPort = {
+      ...makeDeps().deps.data!, periods: PERIOD_KEYS,
+      catalog: [{ id: 'm:salon.revenue.total', label: 'x', unit: 'usd', business: 'salon', divisions: ['salon', 'finance', 'hq'] }],
+      getDivisionMetrics: async ({ division }) => ({ division, metrics: hq, attention: [], queryHash: source.queryHash, view: `fortune_demo_v2_${division}_mart` }),
+      readRows: async ({ asOf: _a, ...read }) => { asked.push(read); return { table: read.table, rows: Array.from({ length: 30 }, (_, i) => ({ n: i })), totals: { count: 30 }, dataDate: '2026-10-26', queryHash: source.queryHash, view: 'v' }; },
+      getMetricSeries: async (q) => { asked.push(q.division); return { metricId: q.metricId, label: 'x', unit: 'usd', business: 'salon', points: [], stats: { min: 0, max: 0, mean12: null }, queryHash: source.queryHash, view: 'v' }; },
+    };
+    const owner = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'owner'));
+    const overview = JSON.parse(text(await owner.callTool({ name: 'get_company_overview', arguments: { period: '2026-10-mtd' } }))) as Record<string, { id: string }[]> & { normal: boolean };
+    expect(overview.salon!.map((m) => m.id)).toEqual(['m:salon.revenue.total', 'm:salon.dq.rejected_repairs']);
+    expect(overview.online!.map((m) => m.id)).toEqual(['m:online.revenue.total']);
+    expect(overview.normal).toBe(true);
+    const tickets = JSON.parse(text(await owner.callTool({ name: 'get_repair_tickets', arguments: { status: 'late', limit: 5 } }))) as { rows: unknown[]; totals: { count: number } };
+    expect(tickets.rows).toHaveLength(5);
+    expect(tickets.totals.count).toBe(30);
+    await owner.callTool({ name: 'get_metric_series', arguments: { metricId: 'm:salon.revenue.total' } });
+    expect(asked).toEqual([{ table: 'repairs', status: 'late' }, 'finance']);
+    await owner.close();
+    const online = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'online'));
+    const refused = await online.callTool({ name: 'get_metric_series', arguments: { metricId: 'm:salon.revenue.total' } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain('not one of the metrics your division reads');
+    await online.close();
+    // A version 1 port has no division reads: a plain refusal, never a guess.
+    const v1 = await connect(createBrainMcpServer(makeDeps().deps, 'finance'));
+    const budget = await v1.callTool({ name: 'get_budget_room', arguments: { period: '2026-09' } });
+    expect(budget.isError).toBe(true);
+    expect(text(budget)).toContain('no finance division read (it needs data version 2)');
+    await v1.close();
+  });
+
+  it('serves the budget room from the finance read: only the budget sheet, ad spend and the index, and only the budget attention', async () => {
+    const { data, asked } = v2Port();
+    const finance = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'finance'));
+    const room = JSON.parse(text(await finance.callTool({ name: 'get_budget_room', arguments: { period: '2026-10-mtd' } }))) as { metrics: { id: string }[]; attention: unknown[] };
+    expect(asked).toEqual([{ division: 'finance', period: '2026-10-mtd' }]);
+    expect(room.metrics.map((m) => m.id)).toEqual(['m:online.budget.google.cap', 'm:online.budget.google.room', 'm:online.ads.google.spend', 'm:online.ads.total.spend', 'm:online.season.last_year_index']);
+    expect(room.attention).toEqual([V2_ATTENTION[0]]);
+    await finance.close();
+  });
+
+  it("lists the rejected rows per source under its business, the worker's shape, and adds nothing up", async () => {
+    const manager = await connect(createBrainMcpServer({ ...makeDeps().deps, data: v2Port().data }, 'manager'));
+    const dq = JSON.parse(text(await manager.callTool({ name: 'get_data_quality', arguments: { period: '2026-10-mtd' } })));
+    expect(dq).toEqual({
+      period: '2026-10-mtd', view: 'fortune_demo_v2_hq_mart', queryHash: source.queryHash,
+      rejected: {
+        'm:salon.dq.rejected_repairs': { label: 'm:salon.dq.rejected_repairs', value: 1, business: 'salon', period: '2026-10-mtd' },
+        'm:online.dq.rejected_orders': { label: 'm:online.dq.rejected_orders', value: 2, business: 'online', period: '2026-10-mtd' },
+        'm:combined.dq.rejected_invoices': { label: 'm:combined.dq.rejected_invoices', value: 1, business: 'combined', period: '2026-10-mtd' },
+      },
+    });
+    await manager.close();
+  });
+
+  it('passes each row read on as asked: the invoices of one business or both, the waiting messages, the low stock', async () => {
+    const { data, asked } = v2Port();
+    const finance = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'finance'));
+    await finance.callTool({ name: 'get_supplier_invoices', arguments: { status: 'overdue', business: 'online' } });
+    await finance.callTool({ name: 'get_supplier_invoices', arguments: { status: 'due_30d' } });
+    const bad = await finance.callTool({ name: 'get_supplier_invoices', arguments: { status: 'open', business: 'combined' } });
+    expect(bad.isError).toBe(true);
+    await finance.close();
+    const online = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'online'));
+    await online.callTool({ name: 'get_waiting_conversations', arguments: {} });
+    await online.callTool({ name: 'get_waiting_conversations', arguments: { olderThanHours: 24 } });
+    const stock = JSON.parse(text(await online.callTool({ name: 'get_low_stock_interest', arguments: { limit: 2 } }))) as { rows: unknown[]; totals: { count: number } };
+    expect(stock.rows).toHaveLength(2);
+    expect(stock.totals.count).toBe(30);
+    await online.close();
+    expect(asked).toEqual([
+      { table: 'invoices', status: 'overdue', business: 'online' }, { table: 'invoices', status: 'due_30d' },
+      { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' },
+    ]);
+  });
+
+  // Review 2026-10-27: the door returned the provider's error text (up to 400 characters of an HTTP body).
+  it("keeps the provider's text out of the answer: a fixed sentence with a code, the detail in the server log", async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const failing: DataPort = {
+      ...v2Port().data,
+      getDivisionMetrics: async () => { throw new Error('HTTP 500: AnalysisException near SELECT * FROM fortune_hq_v2.salon_metrics on zetaris-node-7.internal:18121 for demo@example.com'); },
+      readRows: async () => { throw new Error('HTTP 500: SELECT ticket_id FROM fortune_demo_salon.repair_tickets at zetaris-node-7.internal'); },
+    };
+    const owner = await connect(createBrainMcpServer({ ...makeDeps().deps, data: failing }, 'owner'));
+    for (const [name, args] of [['get_company_overview', { period: '2026-09' }], ['get_finance_metrics', { period: '2026-09' }], ['get_repair_tickets', { status: 'open' }]] as const) {
+      const r = await owner.callTool({ name, arguments: args });
+      expect(r.isError, name).toBe(true);
+      expect(text(r), name).toBe('Business data could not be read (ZETARIS_READ).');
+    }
+    await owner.close();
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual(expect.arrayContaining([expect.stringMatching(/^fortune-brain\.zetaris_read_failed Error: HTTP 500: AnalysisException/)]));
+    expect(log.mock.calls.join('\n')).not.toContain('demo@example.com');
+    log.mockRestore();
   });
 
   it('serves the profile skill as the `skill` prompt on every door', async () => {
@@ -97,6 +233,18 @@ describe('profile doors (plain tools)', () => {
     expect(r.metrics.map((m) => m.id)).toEqual(['m:online.revenue.mazali']);
     expect(r.metrics.every((m) => m.business === 'online')).toBe(true);
     await client.close();
+  });
+
+  it('offers exactly the periods the data serves: the last two by default, all thirteen from a version 2 port', async () => {
+    const periodsOf = async (deps: BrainMcpDeps) => {
+      const client = await connect(createBrainMcpServer(deps, 'finance'));
+      const tool = (await client.listTools()).tools.find((x) => x.name === 'get_finance_metrics')!;
+      await client.close();
+      return (tool.inputSchema.properties as { period: { enum: string[] } }).period.enum;
+    };
+    const { deps } = makeDeps();
+    expect(await periodsOf(deps)).toEqual(['2026-09', '2026-10-mtd']);
+    expect(await periodsOf({ ...deps, data: { ...deps.data!, periods: PERIOD_KEYS } })).toEqual([...PERIOD_KEYS]);
   });
 
   it('gives the owner and finance doors both businesses, still separate and labeled', async () => {

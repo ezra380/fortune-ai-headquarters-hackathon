@@ -120,6 +120,24 @@ describe('numbersIn', () => {
     expect(numbersIn('an add-on at $200-300').map((n) => [n.value, n.kind])).toEqual([[200, 'usd'], [300, 'usd']]);
     expect(numbersIn('1,000-2,000 visits').map((n) => n.value)).toEqual([1000, 2000]);
   });
+
+  // Design 4e: a row id ("demo-rt-01234", "demo-inv-00412") used to read as a claim of 1,234 and fail the plan.
+  it('reads the digits of an id after a letter and a hyphen as part of the id, not as an amount', () => {
+    expect(numbersIn('Call about ticket demo-rt-01234 and invoice demo-inv-00412 today.')).toEqual([]);
+    expect(numbersIn('Chase SUP-2201 first.')).toEqual([]);
+    // A minus sign or a range is still read: the hyphen there follows a space or a digit, not a letter.
+    expect(numbersIn('net was -$3,000; a 10-20% lift; down -150 units').map((n) => n.value)).toEqual([-3000, 10, 20, -150]);
+    expect(numbersIn('ticket demo-rt-01234 owes $1,234').map((n) => n.raw)).toEqual(['$1,234']);
+  });
+
+  // Review 2026-10-27: the id rule skipped every figure after a letter and a hyphen, so "a sub-$5,000 test" read nothing.
+  it.each([
+    ['a mid-$45,000 profit', 45000, 'usd'], ['a sub-$5,000 test', 5000, 'usd'], ['a mid-$40k month', 40000, 'usd'],
+    ['a high-35% margin', 35, 'percent'], ['returns in the mid-30% range', 30, 'percent'], ['ROAS-9.5x', 9.5, 'ratio'],
+    ['a sub-5,000 budget', 5000, 'plain'], ['the top-100 buyers', 100, 'plain'], ['a demo-rt-1,234 claim', 1234, 'plain'],
+  ])('still reads a figure after a word and a hyphen that is not a row id: "%s"', (text, value, kind) => {
+    expect(numbersIn(text).map((n) => [n.value, n.kind])).toEqual([[value, kind]]);
+  });
 });
 
 describe('checkPlans against invented numbers (adversarial review, 2026-10-26)', () => {
@@ -201,6 +219,130 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
   it("refuses a metric whose id names a different business than its label", () => {
     expect(() => Metric.parse({ ...metrics[3]!, id: 'm:salon.revenue.wash_set', business: 'online' })).toThrow();
   });
+
+  it('lets an action name a row by its id: the digits after a letter and a hyphen are not an amount (design 4e)', () => {
+    expect(checkPlans(withPlan1({ actions: ['Chase invoice demo-inv-i00412 and ticket demo-rt-01234 first'] }), metrics).ok).toBe(true);
+  });
+
+  // Review 2026-10-27: PLAN_SYSTEM rule 2 said a seasonal budget's factor is last year's index, and nothing checked it.
+  describe('a seasonal budget (the approved cap × last year\'s index for the month)', () => {
+    const budget: Metric[] = [
+      ...metrics,
+      { ...metrics[1]!, id: 'm:online.budget.google.cap', label: 'Approved Google ad budget', value: 2000 },
+      { ...metrics[2]!, id: 'm:online.season.last_year_index', label: 'Online revenue of the same month last year against the average month', value: 1.35 },
+    ];
+    const seasonal = (factor: number, cite = true, label = 'Google budget for the season') => withPlan1({
+      evidence: [{ metricId: 'm:online.revenue.mazali', value: 12400 }, ...(cite ? [{ metricId: 'm:online.season.last_year_index', value: 1.35 }] : [])],
+      projections: [{ label, baseMetricId: 'm:online.budget.google.cap', factor, result: 2000 * factor, assumption: 'Spend follows last year' }],
+      summary: 'Mazali brought in $12,400 last month.', actions: ['Set the Google cap to the seasonal budget'], stopLoss: 'Stop if orders fall.',
+    });
+    const errorsOf = (raw: unknown) => { const r = checkPlans(raw, budget); return r.ok ? [] : r.errors; };
+
+    it("accepts the cap times the index, and refuses any other factor once the plan cites the index", () => {
+      expect(errorsOf(seasonal(1.35))).toEqual([]);
+      expect(errorsOf(seasonal(1.5))).toEqual([
+        'plan 1: projection "Google budget for the season" multiplies m:online.budget.google.cap by 1.5, but a seasonal budget\'s factor is m:online.season.last_year_index (1.35)',
+      ]);
+      expect(errorsOf(seasonal(1.5, true, 'Google cap after a raise'))[0]).toContain("a seasonal budget's factor is m:online.season.last_year_index (1.35)");
+    });
+
+    it('refuses a cap projection that names the season without citing the index, and leaves a plain raise alone', () => {
+      expect(errorsOf(seasonal(1.35, false))).toEqual([
+        'plan 1: projection "Google budget for the season" is a seasonal budget, so cite m:online.season.last_year_index and use its value as the factor',
+      ]);
+      expect(errorsOf(seasonal(1.2, false, 'Google cap after a raise'))).toEqual([]);
+    });
+
+    it('checks an index written as a bare decimal in the text', () => {
+      expect(errorsOf(seasonal(1.35, true, 'Google budget at 1.35 for the season'))).toEqual([]);
+      expect(errorsOf(seasonal(1.35, true, 'Google budget at 1.42 for the season'))).toEqual([
+        'plan 1 projection 1 label: "1.42" in the text is not one of its cited or projected numbers',
+      ]);
+    });
+  });
+
+  it('still refuses an untraced figure written after a word and a hyphen ("a mid-$45,000 profit")', () => {
+    rejects(withPlan1({ summary: 'This adds a mid-$45,000 profit every month.' }), '$45,000');
+    rejects(withPlan1({ summary: 'Run a sub-$5,000 test.' }), '$5,000');
+    rejects(withPlan1({ summary: 'Margins sit in the high-35% range.' }), '35%');
+    rejects(withPlan1({ summary: 'Ads reach ROAS-9.5x.' }), '9.5x');
+  });
+});
+
+// Design 4d: small counts were never checked, so "clear the 5 late repairs" passed when the data said 3.
+describe('checkPlans and small counts next to what a cited count counts', () => {
+  const counts: Metric[] = [
+    ...metrics.filter((m) => m.business === 'salon'),
+    { id: 'm:salon.repairs.open_over_14d.count', label: 'Repairs open longer than two weeks', value: 3, unit: 'count', business: 'salon', period: 'standing', source },
+  ];
+  const nouns = new Map([['m:salon.repairs.open_over_14d.count', ['repair', 'repairs', 'ticket', 'tickets']]]);
+  const salonPlan = (rank: number, overrides: Record<string, unknown> = {}) => plan(rank, {
+    title: `Plan ${rank}: finish the late repairs`, summary: 'Finish the 3 late repairs before new intake.', actions: ['Call each owner today'],
+    evidence: [{ metricId: 'm:salon.repairs.open_over_14d.count', value: 3 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }],
+    projections: [], test: 'Track it for 14 days.', stopLoss: 'Stop if the late count does not fall.', businesses: ['salon'], risks: ['Stylists are busy'], ...overrides,
+  });
+  const three = (p1: Record<string, unknown>) => ({ plans: [salonPlan(1, p1), salonPlan(2), salonPlan(3)], memoryConflicts: [] });
+
+  it("accepts the cited count, and refuses another count of the same thing within two words", () => {
+    expect(checkPlans(three({}), counts, nouns)).toMatchObject({ ok: true });
+    const wrong = checkPlans(three({ summary: 'Finish the 5 late repairs before new intake.' }), counts, nouns);
+    expect(wrong.ok).toBe(false);
+    expect(!wrong.ok && wrong.errors).toEqual(['plan 1 summary: "5 late repairs" counts what m:salon.repairs.open_over_14d.count counts, so it must be its value (3), one of its projections or a count lever']);
+    expect(checkPlans(three({ actions: ['Call the 7 tickets owners'] }), counts, nouns).ok).toBe(false);
+  });
+
+  // Review 2026-10-27: any count in the plan passed, so "16 late repairs" passed on the open count (16).
+  describe('two cited counts that count the same thing', () => {
+    const both: Metric[] = [...counts, { ...counts.at(-1)!, id: 'm:salon.repairs.open.count', label: 'Repairs not finished yet', value: 16 }];
+    const qualified = new Map([
+      ['m:salon.repairs.open_over_14d.count', ['late repair', 'late repairs', 'repair', 'repairs']],
+      ['m:salon.repairs.open.count', ['open repair', 'open repairs', 'repair', 'repairs']],
+    ]);
+    const citing = (p1: Record<string, unknown>) => three({
+      evidence: [{ metricId: 'm:salon.repairs.open_over_14d.count', value: 3 }, { metricId: 'm:salon.repairs.open.count', value: 16 }], ...p1,
+    });
+    const errorsOf = (p1: Record<string, unknown>) => { const r = checkPlans(citing(p1), both, qualified); return r.ok ? [] : r.errors; };
+
+    it("holds a number to the count its words name, never to another count in the plan", () => {
+      expect(errorsOf({ summary: 'Finish the 3 late repairs, then the 16 open repairs.' })).toEqual([]);
+      expect(errorsOf({ summary: 'Finish the 16 late repairs.' })).toEqual([
+        'plan 1 summary: "16 late repairs" counts what m:salon.repairs.open_over_14d.count counts, so it must be its value (3), one of its projections or a count lever',
+      ]);
+      expect(errorsOf({ summary: 'Clear the 3 open repairs.' })[0]).toContain('m:salon.repairs.open.count counts, so it must be its value (16)');
+    });
+
+    it('asks which count a bare noun means when the counts it could be differ', () => {
+      expect(errorsOf({ summary: 'Finish the 3 repairs this week.' })).toEqual([
+        'plan 1 summary: "3 repairs" could be m:salon.repairs.open_over_14d.count (3) or m:salon.repairs.open.count (16); name which, as in "late repair" or "open repair"',
+      ]);
+      // A count lever is a choice, whatever it is next to.
+      expect(errorsOf({ actions: ['Book 5 repairs a day'], levers: [{ label: 'Repairs booked a day', value: 5, unit: 'count' }] })).toEqual([]);
+    });
+  });
+
+  it('reads the words after "of the" and further than two words ("3 of the overdue invoices", "4 overdue supplier invoices")', () => {
+    const owed: Metric[] = [
+      ...metrics.filter((m) => m.business === 'salon'),
+      { id: 'm:salon.ap.overdue.count', label: 'Overdue salon supplier invoices', value: 4, unit: 'count', business: 'salon', period: 'standing', source },
+    ];
+    const invoiceNouns = new Map([['m:salon.ap.overdue.count', ['overdue invoice', 'overdue invoices', 'invoice', 'invoices']]]);
+    const raw = (summary: string) => ({ plans: [1, 2, 3].map((rank) => salonPlan(rank, {
+      summary, evidence: [{ metricId: 'm:salon.ap.overdue.count', value: 4 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }],
+    })), memoryConflicts: [] });
+    expect(checkPlans(raw('Pay 3 of the overdue invoices first.'), owed, invoiceNouns).ok).toBe(false);
+    expect(checkPlans(raw('Pay 5 overdue supplier invoices first.'), owed, invoiceNouns).ok).toBe(false);
+    expect(checkPlans(raw('Pay 4 of the overdue invoices first.'), owed, invoiceNouns).ok).toBe(true);
+    // A joining word ends what the number names: 2 owners, not 2 invoices.
+    expect(checkPlans(raw('Call 2 owners about the overdue invoices.'), owed, invoiceNouns).ok).toBe(true);
+  });
+
+  it('accepts a count lever, and leaves alone a number next to other words, a duration, or no catalog words at all', () => {
+    const lever = three({ actions: ['Book 5 repairs a day'], levers: [{ label: 'Repairs booked a day', value: 5, unit: 'count' }] });
+    expect(checkPlans(lever, counts, nouns).ok).toBe(true);
+    expect(checkPlans(three({ actions: ['Open 2 evening slots and call 5 owners'] }), counts, nouns).ok).toBe(true);
+    expect(checkPlans(three({ actions: ['Finish them in 5 days, then review the repairs'] }), counts, nouns).ok).toBe(true);
+    expect(checkPlans(three({ summary: 'Finish the 5 late repairs before new intake.' }), counts).ok).toBe(true); // no nouns given: as before
+  });
 });
 
 describe('mixedSentences (the same rule for a reason or a note written about picked plans)', () => {
@@ -225,6 +367,10 @@ describe('mixedSentences (the same rule for a reason or a note written about pic
     expect(mixedSentences(text, [bothPlan], probe)).toEqual([['$12,400', '$18,900']]);
     // With other picks beside it (the salon's own plan holds 6,200, nothing that collides with these two).
     expect(mixedSentences(text, [bothPlan, salonPlan], probe)).toEqual([['$12,400', '$18,900']]);
+  });
+
+  it('is not hidden by a hyphen glued to each figure ("online-$12,400 … salon-$6,200")', () => {
+    expect(mixedSentences('Mazali online-$12,400 beat wash and set salon-$6,200.', [onlinePlan, salonPlan], probe)).toEqual([['$12,400', '$6,200']]);
   });
 
   it('lets each side be quoted in its own sentence, and a business with itself', () => {

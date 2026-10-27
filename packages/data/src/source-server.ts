@@ -1,18 +1,34 @@
 import http from 'node:http';
-import { generateBusiness, type SyntheticBusiness } from './synthetic.ts';
+import { generateBusiness, generateYear, type SyntheticBusiness, type SyntheticYear } from './synthetic.ts';
 
-// The three separately owned "systems" Zetaris federates, served as read-only JSON APIs.
+// The separately owned "systems" Zetaris federates, served as read-only JSON APIs.
 // Each response is {"data": [...]} because Zetaris REST tables are proven on wrapped arrays,
 // not bare top-level arrays. Bound to 127.0.0.1; Zetaris reaches it via host.docker.internal.
+// Version 1's routes serve version 1's rows unchanged; version 2's sit under /v2 beside them.
+
+type Served = { v1: SyntheticBusiness; v2: SyntheticYear };
 
 export const SOURCE_ROUTES = {
-  '/salon/appointments': (b: SyntheticBusiness) => b.salon.appointments,
-  '/online/orders': (b: SyntheticBusiness) => b.online.orders,
-  '/marketing/ads': (b: SyntheticBusiness) => b.marketing.ads,
-  '/marketing/email': (b: SyntheticBusiness) => b.marketing.email,
+  '/salon/appointments': (d: Served) => d.v1.salon.appointments,
+  '/online/orders': (d: Served) => d.v1.online.orders,
+  '/marketing/ads': (d: Served) => d.v1.marketing.ads,
+  '/marketing/email': (d: Served) => d.v1.marketing.email,
+  '/v2/salon/appointments': (d: Served) => d.v2.salon.appointments,
+  '/v2/online/orders': (d: Served) => d.v2.online.orders,
+  '/v2/marketing/ads': (d: Served) => d.v2.marketing.ads,
+  '/v2/marketing/email': (d: Served) => d.v2.marketing.email,
+  '/v2/finance/budgets': (d: Served) => d.v2.finance.budgets,
+  '/v2/online/order_costs': (d: Served) => d.v2.online.orderCosts,
+  '/v2/online/refunds': (d: Served) => d.v2.online.refunds,
+  '/v2/online/checkouts': (d: Served) => d.v2.online.checkouts,
+  '/v2/online/inventory': (d: Served) => d.v2.online.inventory,
+  '/v2/support/messages': (d: Served) => d.v2.support.messages,
+  '/v2/salon/repairs': (d: Served) => d.v2.salon.repairs,
+  '/v2/finance/invoices': (d: Served) => d.v2.finance.invoices,
 } as const;
 
-export function createSourceServer(business: SyntheticBusiness = generateBusiness()): http.Server {
+export function createSourceServer(business: SyntheticBusiness = generateBusiness(), year: SyntheticYear = generateYear()): http.Server {
+  const served: Served = { v1: business, v2: year };
   return http.createServer((req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { Allow: 'GET, HEAD' }).end();
@@ -28,7 +44,7 @@ export function createSourceServer(business: SyntheticBusiness = generateBusines
       res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'not found' }));
       return;
     }
-    const body = JSON.stringify({ data: route(business) });
+    const body = JSON.stringify({ data: route(served) });
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(req.method === 'HEAD' ? undefined : body);
   });
