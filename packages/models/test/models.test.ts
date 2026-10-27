@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkMeterless, createModelClient, ModelError, modelsFromEnv, normalizeMeterlessUrl, parseJsonObject, positiveInt, type TokenBudget } from '../src/index.ts';
+import { checkMeterless, createModelClient, ModelError, modelsFromEnv, normalizeMeterlessUrl, parseJsonObject, positiveInt, stripReasoning, type TokenBudget } from '../src/index.ts';
 
 const ask = { purpose: 'test', model: 'nvidia/x', system: 'sys', user: 'hi', maxTokens: 100, temperature: 0, json: true };
 
@@ -50,6 +50,15 @@ describe('parseJsonObject', () => {
   it('reads fenced JSON and refuses prose', () => {
     expect(parseJsonObject('```json\n{"plans":[]}\n```')).toEqual({ plans: [] });
     expect(() => parseJsonObject('no json here')).toThrow(/JSON object/);
+  });
+
+  // Nightshift (2026-10-27) returns Nemotron's reasoning inline, ending with a lone closing tag and no opening one.
+  it('drops reasoning that ends with a lone </think>, so its braces and words never reach the answer', () => {
+    const inline = 'The user wants {"headline": string}. Revenue was 412.</think>{"headline": "Revenue totals $412"}';
+    expect(parseJsonObject(inline)).toEqual({ headline: 'Revenue totals $412' });
+    expect(stripReasoning('We need to answer briefly.</think>\nRevenue was $412 this month.')).toBe('Revenue was $412 this month.');
+    expect(stripReasoning('<think>plan</think>Answer.')).toBe('Answer.');
+    expect(stripReasoning('No reasoning here.')).toBe('No reasoning here.');
   });
 });
 

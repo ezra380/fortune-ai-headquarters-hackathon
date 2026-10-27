@@ -123,9 +123,14 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
   };
 }
 
-/** Reasoning models may prepend <think>…</think>; only the answer is returned. */
+/**
+ * Reasoning models may prepend <think>…</think>; only the answer is returned. Through Nightshift (2026-10-27) Nemotron's
+ * reasoning arrives inline with only the closing tag, so everything up to the last lone </think> is reasoning too.
+ */
 export function stripReasoning(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  const paired = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  const lone = paired.toLowerCase().lastIndexOf('</think>');
+  return (lone >= 0 ? paired.slice(lone + '</think>'.length) : paired).trim();
 }
 
 /** Parses one JSON object from model text: tolerates code fences, nothing else. */
