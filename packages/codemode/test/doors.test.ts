@@ -248,6 +248,20 @@ describe('a door with a report to file (how serve.ts builds it)', () => {
     await code.close();
   });
 
+  it('marks every read tool read-only and the report as the one thing that writes, adding a single row', async () => {
+    for (const id of AssistantId.options) {
+      const client = await connect(createBrainMcpServer(makeDeps({ fileReport: filed() }).deps, id));
+      for (const tool of (await client.listTools()).tools) {
+        if (tool.name === 'file_work_report') {
+          expect(tool.annotations, tool.name).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
+        } else {
+          expect(tool.annotations, `${id} ${tool.name}`).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+        }
+      }
+      await client.close();
+    }
+  });
+
   it('keeps the report out of the sandbox: a script cannot file one, and `code` does not offer it', async () => {
     const report = filed();
     const client = await connect(await createCodeModeBrainServer(makeDeps({ fileReport: report }).deps, {}, 'finance'));

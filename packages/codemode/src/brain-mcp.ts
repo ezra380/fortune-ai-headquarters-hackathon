@@ -31,6 +31,10 @@ export type FileReport = (report: SessionReport) => Promise<FiledReport>;
 export type DoorProfileArg = AssistantId | AssistantProfile;
 const profileOf = (arg: DoorProfileArg): AssistantProfile => (typeof arg === 'string' ? loadProfiles({})[arg] : arg);
 
+// What a client may assume about a tool before it calls it: the reads change nothing; the report adds one row.
+const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
+const WRITES_ONE_ROW = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
+
 const period = z.enum(['2026-09', '2026-10-mtd']);
 const query = z.string().min(2).max(300);
 const limit = z.number().int().min(1).max(10).optional();
@@ -112,6 +116,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, arg: DoorProfileArg = '
       'get_finance_metrics',
       {
         description: words.get_finance_metrics,
+        annotations: READ_ONLY,
         inputSchema: { period },
       },
       ({ period: p }) => readMetrics(deps, p),
@@ -123,6 +128,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, arg: DoorProfileArg = '
       'get_online_metrics',
       {
         description: words.get_online_metrics,
+        annotations: READ_ONLY,
         inputSchema: { period },
       },
       ({ period: p }) => readMetrics(deps, p, 'online'),
@@ -134,6 +140,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, arg: DoorProfileArg = '
       'recall_decisions',
       {
         description: words.recall_decisions,
+        annotations: READ_ONLY,
         inputSchema: { assistant: AssistantId, query, limit },
       },
       async ({ assistant: who, query: q, limit: n }) => recall(deps, who, q, n),
@@ -145,6 +152,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, arg: DoorProfileArg = '
       'recall_my_decisions',
       {
         description: words.recall_my_decisions,
+        annotations: READ_ONLY,
         inputSchema: { query, limit },
       },
       async ({ query: q, limit: n }) => recall(deps, profile.memory, q, n),
@@ -156,6 +164,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, arg: DoorProfileArg = '
       'get_timeline',
       {
         description: words.get_timeline,
+        annotations: READ_ONLY,
         inputSchema: { limit: z.number().int().min(1).max(100).optional() },
       },
       async ({ limit: n }) => {
@@ -171,6 +180,7 @@ export function createBrainMcpServer(deps: BrainMcpDeps, arg: DoorProfileArg = '
       'propose_task',
       {
         description: 'Queue a request for an assistant. This only proposes: a person approves anything that touches money, customers or ads.',
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
         inputSchema: { assistant: AssistantId, text: z.string().min(3).max(1000), by: z.string().min(2).max(80) },
       },
       async (input) => ok(await propose(input)),
@@ -201,7 +211,7 @@ const WORK_REPORT_DESCRIPTION =
  * checks again and masks phone numbers and codes. A retry of the same report is stored once (the reporter's key).
  */
 export function registerWorkReportTool(server: McpServer, fileReport: FileReport): void {
-  server.registerTool('file_work_report', { description: WORK_REPORT_DESCRIPTION, inputSchema: reportInput }, async (input) => {
+  server.registerTool('file_work_report', { description: WORK_REPORT_DESCRIPTION, annotations: WRITES_ONE_ROW, inputSchema: reportInput }, async (input) => {
     const note = (items: string[] | undefined) => (items?.length ? items.map((text) => ({ text })) : undefined);
     const parsed = SessionReport.safeParse({
       tool: (server.server.getClientVersion()?.name ?? 'unknown tool').slice(0, 60),

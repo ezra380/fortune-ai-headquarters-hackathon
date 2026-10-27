@@ -74,11 +74,12 @@ npm run zetaris:setup                   # Zetaris sources, views and the proof (
 npx tsx scripts/try-live-plans.ts       # LIVE Nemotron routing + plans on LIVE Zetaris metrics
 npm run console                         # the owner's read-only Admin console (127.0.0.1:5180)
 npm run worker -- --once                # drain the queue once (dry-run SMS without Twilio)
-npx tsx packages/codemode/src/serve.ts  # the brain MCP server behind Code Mode (stdio)
+npx tsx packages/codemode/src/serve.ts --local  # the brain MCP server behind Code Mode (stdio), file profiles
 ```
 
-Connect the brain to Claude Code: `claude mcp add fortune-brain -- npx tsx packages/codemode/src/serve.ts`.
-Cursor, Codex and Gemini CLI use the same command as a stdio MCP server.
+Connect the brain to Claude Code: `claude mcp add fortune-brain -- npx tsx packages/codemode/src/serve.ts --local`.
+Cursor, Codex and Gemini CLI use the same command as a stdio MCP server. To serve an assistant's stored profile and
+let the tool file its end-of-work report, give it a door token instead of `--local` (see `docs/manager.md`).
 
 ## Safety rules (each has a test)
 
