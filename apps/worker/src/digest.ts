@@ -15,6 +15,9 @@ import type { MessageRow, PersonRow, TaskRow } from './store.ts';
 //            missing). The complete digest still follows when the last report arrives.
 //   built  → from the latest status line of the day for each division (mailbox reports to `owner`)
 //   sent   → one text, keyed by the digest, and the digest itself kept as a mailbox row so a retry sends the same words
+// On a day the weekly reports are in, a second digest follows the third weekly report (digest:<date>:weekly, or
+// digest:<date>:weekly:<id of the REPORT text>): one line per division from the managers' weekly CEO lines, by the same
+// rules and within the same length. The day's own digest still reads only the briefs' lines.
 
 /** The most characters the digest may have: three short lines and a heading, readable at a glance. */
 export const DIGEST_MAX = 480;
@@ -89,8 +92,15 @@ function shares(lengths: readonly number[], budget: number): number[] {
  * not all fit.
  */
 export function buildDigest(date: string, rows: readonly Pick<MessageRow, 'body'>[]): { text: string; lines: DigestLine[] } {
-  const lines = digestLines(rows);
-  const heading = `Company status for ${date}:`;
+  return compose(`Company status for ${date}:`, digestLines(rows));
+}
+
+/** The weekly digest: the same lines and rules, from the managers' weekly status lines (rows newest first). */
+export function buildWeeklyDigest(weekOf: string, rows: readonly Pick<MessageRow, 'body'>[]): { text: string; lines: DigestLine[] } {
+  return compose(`Weekly reports, week of ${weekOf}:`, digestLines(rows));
+}
+
+function compose(heading: string, lines: DigestLine[]): { text: string; lines: DigestLine[] } {
   const starts = lines.map((line) => {
     const label = `${DEPARTMENT_LABEL[line.division]}: `;
     if (line.state === 'missing') return `${label}no report yet.`;
@@ -112,13 +122,28 @@ export async function currentDigest(deps: Pick<WorkerDeps, 'store' | 'now'>): Pr
 
 // ---- The scheduled job ---------------------------------------------------------------------------------
 
-const DigestJob = z.object({ job: z.literal('ceo_digest'), date: z.iso.date(), request: z.uuid().optional(), partial: z.boolean().optional() });
+const DigestJob = z.object({
+  job: z.literal('ceo_digest'), date: z.iso.date(), request: z.uuid().optional(), partial: z.boolean().optional(),
+  /** Set for the weekly digest: the Monday of the week the weekly reports cover. */
+  weekOf: z.iso.date().optional(),
+});
 
 /**
  * digest:<date> is the day's digest; digest:<date>:<id of the BRIEF text> is the one that follows a BRIEF;
  * digest:<date>:partial is the one the clock sends when a report did not come in time.
  */
 export const digestKey = (date: string, request?: string, partial?: boolean) => `digest:${date}${request ? `:${request}` : ''}${partial ? ':partial' : ''}`;
+
+/** digest:<date>:weekly follows the day's three weekly reports; digest:<date>:weekly:<id of the REPORT text> follows a REPORT ALL. */
+export const weeklyDigestKey = (date: string, request?: string) => `digest:${date}:weekly${request ? `:${request}` : ''}`;
+
+/** Queues the weekly digest for Owner HQ, once per key. */
+export async function enqueueWeeklyDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string, weekOf: string, request?: string): Promise<void> {
+  await deps.store.enqueueTask({
+    assistant: 'owner', kind: 'scheduled', key: weeklyDigestKey(date, request),
+    payload: { job: 'ceo_digest', date, weekOf, ...(request ? { request } : {}) }, now: deps.now(),
+  });
+}
 
 /** Queues the digest for Owner HQ. Queuing it twice for the same key changes nothing. */
 export async function enqueueDigest(deps: Pick<WorkerDeps, 'store' | 'now'>, date: string, request?: string): Promise<void> {
@@ -151,8 +176,9 @@ function reportsIn(lines: readonly DigestLine[]): string {
 export async function ceoDigest(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
   const job = DigestJob.safeParse(task.payload);
   if (!job.success) return fail('the digest job needs a date (YYYY-MM-DD)');
-  const { date, request, partial } = job.data;
-  const key = digestKey(date, request, partial);
+  const { date, request, partial, weekOf } = job.data;
+  if (weekOf && partial) return fail('a weekly digest follows the third weekly report and is never partial');
+  const key = weekOf ? weeklyDigestKey(date, request) : digestKey(date, request, partial);
   let owner: PersonRow;
   try {
     owner = await deps.store.personByAssistant('owner');
@@ -166,15 +192,17 @@ export async function ceoDigest(task: TaskRow, deps: WorkerDeps, runId: string):
   if (!doc) {
     let built: ReturnType<typeof buildDigest>;
     try {
-      built = buildDigest(date, await deps.store.divisionStatusMessages(date));
+      built = weekOf
+        ? buildWeeklyDigest(weekOf, await deps.store.weeklyStatusMessages(date))
+        : buildDigest(date, await deps.store.divisionStatusMessages(date));
     } catch (error) {
       await receipt(deps, { runId, taskId: task.id, step: 'digest.build', assistant: 'owner', started, outcome: 'failed', detail: errorText(error, 'the reports could not be read') });
       throw error;
     }
-    summary = reportsIn(built.lines);
+    summary = `${weekOf ? `weekly reports of the week of ${weekOf}; ` : ''}${reportsIn(built.lines)}`;
     doc = await deps.store.postMessage({
       from: 'owner', to: 'owner', kind: 'report', replyTo: null, dedupeKey: `digestdoc:${key}`,
-      body: { type: 'ceo_digest', date, text: built.text, reports: built.lines },
+      body: { type: 'ceo_digest', date, text: built.text, reports: built.lines, ...(weekOf ? { weekOf } : {}) },
     });
   }
   const words = typeof doc.body.text === 'string' ? doc.body.text : '';

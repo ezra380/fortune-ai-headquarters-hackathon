@@ -11,7 +11,7 @@ import {
 } from './brief.ts';
 import { done, errorText, fail, fitSms, isLiveNumber, newCode, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
 import { sliceFor } from './departments.ts';
-import { companyDay } from './digest.ts';
+import { companyDay, enqueueWeeklyDigest } from './digest.ts';
 import { PlanError, writePlans } from './finance.ts';
 import { numberTrace } from './reports.ts';
 import type { PersonRow, TaskRow, WeeklyReportRow, WorkerReportRow } from './store.ts';
@@ -34,7 +34,8 @@ import { WORKERS, dailyWorker, workerKey } from './workers.ts';
 //   save     → weekly_reports, once per key; the status is the worst of the worker reports' and the division's attention.
 //   deliver  → a mailbox row the head's code hangs from, a status line for the CEO division, a text to the head with one
 //              code (APPROVE <1-3> <code>, 24 hours), an email row and a print row. The delivery lane sends the email and
-//              the printout; nothing here is sent anywhere but the outbox.
+//              the printout; nothing here is sent anywhere but the outbox. The third weekly report of a run queues the
+//              weekly CEO digest (digest.ts): one line per division from the managers' CEO lines.
 // weekly:<division>:<Monday> is the week's run; weekly:<division>:<Monday>:<task id> the run a REPORT text asked for. Every
 // step is keyed by it, so a task that runs again asks no model twice and sends no second code.
 
@@ -538,11 +539,25 @@ async function deliver(run: Run, row: WeeklyReportRow): Promise<Outcome> {
   await deps.store.addEmailOutbox({ toPersonId: head.id, from: assistant, body: weeklySubject(row.report), attachmentRef: ref, dedupeKey: `weekly-email:${row.id}` });
   await deps.store.addOutbox({ channel: 'print', toPersonId: head.id, from: assistant, body: `${row.report.manager}'s weekly report printout`, attachmentRef: ref, dedupeKey: `weekly-print:${row.id}` });
   const texted = await textHead(run, row, doc.id);
+  const digest = await queueDigestWhenAllIn(run);
   await receipt(deps, {
     runId, taskId: task.id, step: 'weekly.deliver', assistant, started, outcome: 'ok',
-    detail: `status ${row.status}${row.written_by === 'rule' ? ' (rule-written)' : ''}; CEO line posted; email and printout queued; ${texted}`,
+    detail: `status ${row.status}${row.written_by === 'rule' ? ' (rule-written)' : ''}; CEO line posted; email and printout queued; ${texted}${digest ? '; all three weekly reports are in, weekly CEO digest queued' : ''}`,
   });
   return done;
+}
+
+/**
+ * The weekly CEO digest follows the third division's weekly report of this run (Monday's, or a REPORT ALL text's): whoever
+ * delivers last sees all three weekly lines and queues it; two that finish together ask for the same key. A head's own
+ * REPORT is one division's run, so it never completes a set.
+ */
+async function queueDigestWhenAllIn(run: Run): Promise<boolean> {
+  const { deps, date, weekOf, request } = run;
+  const posted = await Promise.all(ManagedDivision.options.map((d) => deps.store.messageByKey(`weeklystatus:${weeklyKey(d, date, request)}`)));
+  if (!posted.every((message) => message !== null)) return false;
+  await enqueueWeeklyDigest(deps, date, weekOf, request);
+  return true;
 }
 
 /** The head's text, with one code per report. No live number for the assistant means no text, and a receipt that says so. */

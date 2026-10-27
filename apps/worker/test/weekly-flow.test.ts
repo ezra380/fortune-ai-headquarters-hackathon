@@ -139,6 +139,7 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
   const numbers: Record<string, string | null> = {};
   const mine = { tasks: new Set<string>(), reports: new Set<string>() };
   const briefs = new Set<string>();
+  const digests = new Set<string>();
   // The texts as they were queued and the codes issued (the database blanks a code once a text is handled).
   const sent = new Map<string, string>();
   const issued: { key: string; code: string; created: boolean }[] = [];
@@ -215,9 +216,11 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
   // Leave nothing pending for other lanes' tests, which share this database.
   afterEach(async () => {
     const keys = [...mine.reports].flatMap((id) => [`weekly-sms:${id}`, `weekly-email:${id}`, `weekly-print:${id}`])
-      .concat([...briefs].flatMap((id) => [`brief-sms:${id}`, `brief-print:${id}`]), [...mine.tasks].map((id) => `reply:${id}`));
+      .concat([...briefs].flatMap((id) => [`brief-sms:${id}`, `brief-print:${id}`]), [...mine.tasks].map((id) => `reply:${id}`), [...digests].map((k) => `digest-sms:${k}`));
     await pool.query(
       `update public.outbox set status = 'skipped', last_error = 'reset by weekly test', body = regexp_replace(body, '\\m[0-9]{6}\\M', '••••••', 'g') where status = 'pending' and dedupe_key = any($1)`, [keys]);
+    // The weekly digests this test queued: run by hand above, never by a claim loop.
+    await pool.query(`update public.tasks set status = 'cancelled' where status in ('queued', 'waiting') and idempotency_key = any($1)`, [[...digests]]);
     await pool.query(`update public.approvals set status = 'expired' where status = 'pending' and message_id in (select id from public.assistant_messages where dedupe_key like 'weeklydoc:weekly:%:21__-__-__%' or dedupe_key like 'briefdoc:brief:online:21__-__-__')`);
     // The runs a REPORT text of this test queued (weekly:<division>:<Monday>:<text's task id>), and nothing of another test's.
     await pool.query(`update public.tasks set status = 'cancelled' where status in ('queued', 'waiting') and idempotency_key like 'weekly:%' and split_part(idempotency_key, ':', 4) = any($1)`, [[...mine.tasks]]);
@@ -432,6 +435,57 @@ describe.skipIf(!api)('weekly reports (real database; the models, Code Mode and 
     expect(await rows('select id from public.weekly_reports where report_key = $1', [first.key])).toHaveLength(1);
     expect(issued.filter((i) => i.key === `weekly-sms:${first.row.id}`).map((i) => i.created)).toEqual([true, false]);
     expect(await rows('select id from public.assistant_messages where dedupe_key = $1', [`weeklystatus:${first.key}`])).toHaveLength(1);
+  });
+
+  it("the third weekly report of the day queues the weekly CEO digest: one line per division from the managers' CEO lines, texted to the owner once", async () => {
+    const monday = freshMonday();
+    deps.now = () => new Date('2199-12-31T00:00:00Z'); // the digest is queued for later than any test runs, so no claim loop picks it up
+    const key = `digest:${monday}:weekly`;
+    digests.add(key);
+    await storeWorkerReport(googleReport(addDays(monday, -2), 'Google ads return 2.4x; little budget room is left.'));
+    attention.online = [{ metricId: 'm:online.service.missed_sale_intent.count', level: 'act', rule: 'Buyers who asked to buy got no answer.' }];
+    for (const d of ['finance', 'online', 'salon']) model.script(`${d}.weekly_needs`, JSON.stringify({ requests: [] }));
+    model.script('finance.weekly', JSON.stringify(financeWords(monday)));
+    model.script('finance.plans', JSON.stringify(financePaths));
+    model.script('online.weekly', JSON.stringify(onlineWords));
+    model.script('salon.weekly', new Error('the provider is down'));
+    const digestTask = async () => (await rows('select id, status, payload from public.tasks where idempotency_key = $1', [key]))[0];
+    const deliverOf = async (taskId: string) => (await stepsOf(taskId)).find((s) => s.step === 'weekly.deliver')!.detail as string;
+
+    const finance = await run('finance', monday);
+    const online = await run('online', monday);
+    expect(await digestTask()).toBeUndefined(); // two of three: nothing yet
+    // The day's brief line for Finance is not a weekly line: the weekly digest never reads it.
+    await deps.store.postMessage({
+      from: 'finance', to: 'owner', kind: 'report', replyTo: null, dedupeKey: `status:brief:finance:${monday}`,
+      body: { type: 'division_status', division: 'finance', date: monday, status: 'act', ceoLine: 'A brief line, not the week.' },
+    });
+    const salon = await run('salon', monday);
+    expect([finance.row.status, online.row.status, salon.row.status]).toEqual(['watch', 'act', 'normal']);
+    expect(await deliverOf(finance.task.id)).not.toMatch(/digest/);
+    expect(await deliverOf(online.task.id)).not.toMatch(/digest/);
+    expect(await deliverOf(salon.task.id)).toMatch(/; all three weekly reports are in, weekly CEO digest queued$/);
+    const queued = await digestTask();
+    expect(queued).toMatchObject({ status: 'queued', payload: { job: 'ceo_digest', date: monday, weekOf: monday } });
+
+    // Owner HQ writes it once and texts it once, however often its task runs.
+    numbers.owner = '+12125550125';
+    const task: TaskRow = { id: queued.id, assistant_id: 'owner', kind: 'scheduled', status: 'running', payload: queued.payload, attempts: 1, max_attempts: 3 };
+    expect(await handleTask(task, deps)).toEqual({ status: 'done' });
+    const words = [
+      `Weekly reports, week of ${monday}:`,
+      'Salon: running normally.',
+      `Finance: needs a look — ${financeWords(monday).ceoLine}`,
+      `Online: needs a decision — ${onlineWords.ceoLine}`,
+    ].join('\n');
+    expect(sent.get(`digest-sms:${key}`)).toBe(words);
+    expect(await message(`digestdoc:${key}`)).toMatchObject({ from_assistant: 'owner', to_assistant: 'owner', body: { type: 'ceo_digest', date: monday, weekOf: monday, text: words } });
+    expect((await stepsOf(queued.id)).find((s) => s.step === 'digest.send')).toMatchObject({
+      outcome: 'ok', detail: `text queued for the owner; weekly reports of the week of ${monday}; reports in: salon normal, finance watch, online act`,
+    });
+    expect(await handleTask(task, deps)).toEqual({ status: 'done' });
+    expect(await rows('select id from public.outbox where dedupe_key = $1', [`digest-sms:${key}`])).toHaveLength(1);
+    expect(model.calls.filter((c) => c.purpose.includes('digest'))).toEqual([]); // a program writes the digest, never a model
   });
 
   it('REPORT by text: the owner asks for one division or all three, a head for her own only; each run is keyed by the text', async () => {

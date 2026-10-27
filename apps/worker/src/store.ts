@@ -560,6 +560,11 @@ export function createStore(url: string, serviceKey: string) {
     async weeklyReport(id: string): Promise<WeeklyReportRow> {
       return must(await db.from('weekly_reports').select('*').eq('id', id).single(), 'read weekly report') as WeeklyReportRow;
     },
+    /** The weekly status lines of a day (the managers' CEO lines to Owner HQ), newest first: what the weekly digest is built from. */
+    async weeklyStatusMessages(date: string): Promise<MessageRow[]> {
+      return must(await db.from('assistant_messages').select('*').eq('to_assistant', 'owner').eq('kind', 'report')
+        .eq('body->>type', 'weekly_status').eq('body->>date', date).order('created_at', { ascending: false }).limit(200), 'weekly statuses') as MessageRow[];
+    },
     /** Records the message the head approves against, once: a report that already has one keeps it. */
     async setWeeklyReportMessage(id: string, messageId: string) {
       must(await db.from('weekly_reports').update({ message_id: messageId }).eq('id', id).is('message_id', null), 'weekly report message');
