@@ -247,6 +247,7 @@ shows). A division head's `STATUS` is unchanged: "Open items for your assistant:
 |---|---|---|
 | 08:00 | `division-briefs` | `brief:finance:<date>`, `brief:salon:<date>`, `brief:online:<date>` |
 | 08:30 | `ceo-digest` | `digest:<date>` when all three reports are in, `digest:<date>:partial` when not (see below) |
+| 09:00 | `manager-review` | `review:daily:<date>`: the HQ Manager's quiet daily review (`queueDailyReview`, docs/manager.md; merge wave 1) |
 
 - It only queues (idempotent by key); the claim loops do the work. A receipt `scheduler.enqueue` records each job queued,
   failed or waiting. A job that fails is tried again at the next minute.
@@ -260,8 +261,9 @@ shows). A division head's `STATUS` is unchanged: "Open items for your assistant:
   a worker started in the evening does not send the morning's briefs.
 - `FAHQ_SCHEDULE=off` turns the clock off; briefs and the digest are then only asked for by text. The clock runs only in the
   worker's normal mode, not with `--once`.
-- The job table is the exported `SCHEDULE` array. Another lane adds its own job there (the HQ Manager's daily review, say):
-  `{ name, at: 'HH:MM', enqueue(deps, date) }`, where `enqueue` queues a task whose key names the day.
+- The job table is the exported `SCHEDULE` array (the HQ Manager's daily review is its third job). A job is
+  `{ name, at: 'HH:MM', enqueue(deps, date) }`, where `enqueue` queues a task whose key names the day; it may answer
+  `{ waiting }`, and one that answers nothing is marked queued for the day.
 
 ## Everything is keyed
 

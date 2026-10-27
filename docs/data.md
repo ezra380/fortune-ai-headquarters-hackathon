@@ -305,7 +305,9 @@ The worker refuses a `FINANCE_PERIOD` the data does not serve and logs why. With
 - **Ids are not amounts** (design 4e): bare digits that end a row id are part of the id: a synthetic row's
   (`demo-rt-01234`, `demo-s-3`) or a supplier number (`SUP-2201`). Anything with a `$`, a unit, a comma or a
   decimal point is still read, and so is any other word before the hyphen: "a sub-$5,000 test", "mid-30%",
-  "ROAS-9.5x", "the top-100 buyers". A minus sign or a range still reads (`-$3,000`, `10-20%`).
+  "ROAS-9.5x", "the top-100 buyers". A minus sign or a range still reads (`-$3,000`, `10-20%`). `isRowId` is exported
+  from `@fahq/contracts` and is the one rule: the worker's number trace (`reports.ts`, which also keeps a name such as
+  `nemotron-3-ultra`) and Code Mode's answer trace (`answer.ts`) skip exactly these digits (merge wave 1).
 - **Small counts** (design 4d): a whole number under 100 is a claim when the words after it (up to four, past
   "of the", up to a joining word such as "about" or "and") name what a cited count metric counts. Each count
   carries phrases in the catalog's `nouns` (`counted()` in `sql.ts`: "late repairs", "open repairs",

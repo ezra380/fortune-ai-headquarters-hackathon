@@ -274,16 +274,11 @@ A session report (`file_work_report` at a door) waits in `session_reports` until
 `queueDailyReview(deps)` (`manager-daily.ts`, exported from `manager.ts`) queues today's review of the last 24 hours
 (and of every outside report nobody has read, up to 30 days back, if the manager can read them) as the same scheduled task `REVIEW` queues, with `quiet: true`, so a day
 with nothing to review sends no text. Its key is the day in New York (`review:daily:2026-10-27`), so calling it again the
-same day, from one process or two, queues nothing more and answers `{ queued: false }`. **The worker's loop does not call
-it** (another part of the build owns the scheduler). To wire it, call it once a day from whatever schedules the worker, e.g.
-a timer in `main.ts` after the claim loops start:
-
-```ts
-import { queueDailyReview } from './manager.ts';
-setInterval(() => { void queueDailyReview(deps).catch((e) => console.error('worker: daily review not queued', e)); }, 60 * 60_000);
-```
-
-(Once an hour is fine: the key is the day. To keep it to the morning, call it only when the hour in New York is 7 or later.)
+same day, from one process or two, queues nothing more and answers `{ queued: false }`. **The worker's daily clock calls
+it** at 09:00 New York time (the `manager-review` job in `scheduler.ts` `SCHEDULE`, after the 08:00 briefs and the 08:30
+digest; merge wave 1). Tests: `digest.test.ts` "holds the HQ Manager's daily review at 09:00 ..." and "queues one quiet review
+task keyed by the New York day ...". `FAHQ_SCHEDULE=off` turns the clock off, and the review is then only asked for by
+`REVIEW`.
 
 ## Lessons: the database is the source
 
