@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
+import { MANAGERS } from '@fahq/contracts';
 import { TABS } from './departments.ts';
+import type { BriefDivision } from './divisions.ts';
+import { BRIEF_DIVISIONS } from './divisions.ts';
 
 // The single page. Static HTML plus one small script that fetches /api/department/:id every 10
 // seconds and draws it. The script builds the page with createElement and textContent only (never
@@ -499,14 +502,16 @@ const tabButtons = TABS.map(
     `<button class="tab" role="tab" type="button" id="tab-${d.id}" data-id="${d.id}" aria-controls="panel" aria-selected="false" tabindex="-1">${escapeHtml(d.name)}</button>`,
 ).join('\n    ');
 
-export const PAGE_HTML = `<!doctype html>
+type PageParts = { title: string; heading: string; sub: string; nav: string; footer: string };
+
+const documentOf = (p: PageParts): string => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <meta name="referrer" content="no-referrer">
-<title>Fortune AI Headquarters · Admin</title>
+<title>${p.title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700&amp;family=Playfair+Display:wght@500;600&amp;display=swap">
@@ -515,18 +520,44 @@ export const PAGE_HTML = `<!doctype html>
 <body>
 <div class="wrap">
   <header>
-    <h1>Fortune AI Headquarters · Admin</h1>
-    <p class="sub">A read-only view of the company's divisions and of every assistant. Nothing here can send, approve or change anything.</p>
+    <h1>${p.heading}</h1>
+    <p class="sub">${p.sub}</p>
   </header>
-  <nav class="tabs" role="tablist" aria-label="Divisions and departments">
-    ${tabButtons}
-  </nav>
-  <main id="panel" role="tabpanel">
+${p.nav}  <main id="panel" role="tabpanel">
     <noscript><p class="loading">This page needs JavaScript to show the assistants' live data.</p></noscript>
   </main>
-  <footer id="foot"><span id="updated" role="status">Loading…</span> · refreshes every 10 seconds</footer>
+  <footer id="foot">${p.footer}</footer>
 </div>
 <script>${SCRIPT}</script>
 </body>
 </html>
 `;
+
+/** The owner's page: the Divisions view and one tab per department. */
+export const PAGE_HTML = documentOf({
+  title: 'Fortune AI Headquarters · Admin',
+  heading: 'Fortune AI Headquarters · Admin',
+  sub: "A read-only view of the company's divisions and of every assistant. Nothing here can send, approve or change anything.",
+  nav: `  <nav class="tabs" role="tablist" aria-label="Divisions and departments">
+    ${tabButtons}
+  </nav>
+`,
+  footer: '<span id="updated" role="status">Loading…</span> · refreshes every 10 seconds',
+});
+
+/**
+ * A head's own page (/?division=finance): the same script and style under the same policy, with no tabs. The script reads the
+ * division from the address and asks the server for that division only, so nothing of the others is ever fetched. In production the
+ * heads' sites go into the Fortune Hub; this page is what they will show there.
+ */
+export function headPageHtml(division: BriefDivision): string {
+  const name = escapeHtml(BRIEF_DIVISIONS.find((d) => d.id === division)?.name ?? division);
+  const m = MANAGERS[division];
+  return documentOf({
+    title: `Fortune AI Headquarters · ${name} division`,
+    heading: `${name} division`,
+    sub: `${escapeHtml(m.manager)}, ${escapeHtml(m.title)}, reports to ${escapeHtml(m.head)}. A read-only view of this division only. Nothing here can send, approve or change anything.`,
+    nav: '',
+    footer: `<span id="updated" role="status">Loading…</span> · refreshes every 10 seconds<br>This is the head's view of the ${name} division only. In production, each head's site is part of the Fortune Hub.`,
+  });
+}

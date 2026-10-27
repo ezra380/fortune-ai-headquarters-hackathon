@@ -11,18 +11,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
+import { MANAGERS } from '@fahq/contracts';
+import { renderWeeklyPacketPdf, renderWorkerReportPdf } from '@fahq/delivery';
 import { DEPARTMENTS } from './departments.ts';
 import type { DepartmentId, RawDepartment } from './departments.ts';
-import type { RawDivisions } from './divisions.ts';
-import { createCloudLoader, createDivisionsLoader } from './loader.ts';
-import { PAGE_CSP, PAGE_HTML } from './page.ts';
+import type { BriefDivision, RawDivisions } from './divisions.ts';
+import { isBriefDivision } from './divisions.ts';
+import { createCloudLoader, createDivisionsLoader, createReportLoader, ReportUnreadable } from './loader.ts';
+import type { LoadedReport } from './loader.ts';
+import { headPageHtml, PAGE_CSP, PAGE_HTML } from './page.ts';
 import { shapeDepartment, shapeDivisions } from './shape.ts';
 
 export type ConsoleDeps = {
   /** Reads one department's data. */
   load: (department: DepartmentId) => Promise<RawDepartment>;
-  /** Reads the Divisions view: the latest briefs, the data requests and the CEO digest. */
-  loadDivisions: () => Promise<RawDivisions>;
+  /** Reads the Divisions view: the latest briefs, the reports, the data requests and the CEO digest. Given a division, it reads that one only (a head's own view). */
+  loadDivisions: (only?: BriefDivision) => Promise<RawDivisions>;
+  /** Reads the stored reports a PDF is made from. Without it, the PDF links answer 404. */
+  loadReport?: (kind: 'weekly' | 'worker', id: string) => Promise<LoadedReport | null>;
   now: () => Date;
   /** Where plain one-line problems go. Defaults to stderr. Never receives data or secrets. */
   log?: (line: string) => void;
@@ -39,8 +45,8 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
 } as const;
 
-function send(req: http.IncomingMessage, res: http.ServerResponse, status: number, type: string, body: string, extra: Record<string, string> = {}) {
-  const bytes = Buffer.from(body, 'utf8');
+function send(req: http.IncomingMessage, res: http.ServerResponse, status: number, type: string, body: string | Uint8Array, extra: Record<string, string> = {}) {
+  const bytes = typeof body === 'string' ? Buffer.from(body, 'utf8') : Buffer.from(body);
   res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': type, 'Content-Length': String(bytes.length), ...extra });
   res.end(req.method === 'HEAD' ? undefined : bytes);
 }
@@ -52,6 +58,18 @@ const hostName = (header: string | undefined): string => {
   const host = (header ?? '').trim().toLowerCase();
   return host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0] ?? '';
 };
+
+
+/** The division a head's own view is for: undefined when none is named, null when what was named is not one of the three (or is named twice). */
+function divisionParam(url: URL): BriefDivision | undefined | null {
+  const named = url.searchParams.getAll('division');
+  if (named.length === 0) return undefined;
+  const [one] = named;
+  return named.length === 1 && isBriefDivision(one) ? one : null;
+}
+
+/** Exactly a report's PDF link: a well-formed id and nothing else. */
+const REPORT_PATH = /^\/report\/(weekly|worker)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.pdf$/;
 
 async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -70,6 +88,37 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 export function createConsoleServer(deps: ConsoleDeps): http.Server {
   const log = deps.log ?? ((line: string) => console.error(line));
 
+  /**
+   * A report as a PDF, made on request from the stored report and sent without being kept. The same pages the head gets by email
+   * and on paper. A head's own link (?division=) opens a report of that division only; another division's is "not found".
+   */
+  async function reportPdf(req: http.IncomingMessage, res: http.ServerResponse, kind: 'weekly' | 'worker', id: string, only: BriefDivision | undefined): Promise<void> {
+    let doc: LoadedReport | null;
+    try {
+      doc = await withTimeout(deps.loadReport!(kind, id), LOAD_TIMEOUT_MS);
+    } catch (error) {
+      const reason = error instanceof ReportUnreadable ? 'unreadable' : error instanceof Error && error.message === 'timed out' ? 'timeout' : 'error';
+      log(`console.load_failed department=report reason=${reason}`);
+      return json(req, res, 502, {
+        error: reason === 'unreadable' ? 'This report is not in the shape the system expects, so it cannot be shown.' : 'The report could not be read right now. Try again in a moment.',
+      });
+    }
+    if (!doc || (only !== undefined && doc.division !== only)) return json(req, res, 404, { error: 'Not found.' });
+
+    const manager = MANAGERS[doc.division];
+    const ctx = { manager: manager.manager, head: manager.head, divisionTitle: manager.title };
+    let pdf: Uint8Array;
+    try {
+      pdf = doc.kind === 'weekly' ? await renderWeeklyPacketPdf(doc.weekly, doc.workers, ctx) : await renderWorkerReportPdf(doc.worker, ctx);
+    } catch {
+      log('console.load_failed department=report reason=render');
+      return json(req, res, 502, { error: 'The report could not be made into a PDF right now.' });
+    }
+    // Both parts of the name are checked values (a division, a worker id, a date), so the name is always plain.
+    const name = doc.kind === 'weekly' ? `${doc.division}-weekly-${doc.weekly.weekOf}.pdf` : `${doc.worker.workerId.replace('.', '-')}-${doc.worker.day}.pdf`;
+    return send(req, res, 200, 'application/pdf', pdf, { 'Content-Disposition': `inline; filename="${name}"`, 'Content-Security-Policy': "default-src 'none'" });
+  }
+
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     if (!LOOPBACK_HOSTS.has(hostName(req.headers.host))) {
       return json(req, res, 421, { error: 'This console only answers on this computer (127.0.0.1).' });
@@ -78,10 +127,14 @@ export function createConsoleServer(deps: ConsoleDeps): http.Server {
       return json(req, res, 405, { error: 'This console is read-only. Only GET and HEAD are allowed.' }, { Allow: 'GET, HEAD' });
     }
 
-    const { pathname } = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const { pathname } = url;
+    // ?division=<finance|online|salon> is a head's own view: that division only. Anything else named there is not found.
+    const only = divisionParam(url);
 
     if (pathname === '/') {
-      return send(req, res, 200, 'text/html; charset=utf-8', PAGE_HTML, { 'Content-Security-Policy': PAGE_CSP });
+      if (only === null) return json(req, res, 404, { error: 'Not found.' });
+      return send(req, res, 200, 'text/html; charset=utf-8', only ? headPageHtml(only) : PAGE_HTML, { 'Content-Security-Policy': PAGE_CSP });
     }
     if (pathname === '/health') {
       return json(req, res, 200, { ok: true, time: deps.now().toISOString() });
@@ -90,14 +143,21 @@ export function createConsoleServer(deps: ConsoleDeps): http.Server {
       return json(req, res, 200, { departments: DEPARTMENTS.map((d) => ({ id: d.id, name: d.name })) });
     }
     if (pathname === '/api/divisions') {
+      if (only === null) return json(req, res, 404, { error: 'Not found.' });
       let raw: RawDivisions;
       try {
-        raw = await withTimeout(deps.loadDivisions(), LOAD_TIMEOUT_MS);
+        raw = await withTimeout(deps.loadDivisions(only), LOAD_TIMEOUT_MS);
       } catch (error) {
         log(`console.load_failed department=divisions reason=${error instanceof Error && error.message === 'timed out' ? 'timeout' : 'error'}`);
         return json(req, res, 502, { error: 'The divisions could not be read right now. Try again in a moment.' });
       }
-      return json(req, res, 200, shapeDivisions(raw, deps.now()));
+      return json(req, res, 200, shapeDivisions(raw, deps.now(), only));
+    }
+
+    const report = REPORT_PATH.exec(pathname);
+    if (report) {
+      if (only === null || !deps.loadReport) return json(req, res, 404, { error: 'Not found.' });
+      return reportPdf(req, res, report[1] as 'weekly' | 'worker', report[2] as string, only);
     }
 
     const match = /^\/api\/department\/([a-z]{1,20})$/.exec(pathname);
@@ -178,9 +238,10 @@ async function main(): Promise<void> {
     },
   });
 
-  const loadDivisions = createDivisionsLoader({ db });
+  const loadDivisions = createDivisionsLoader({ db, now });
+  const loadReport = createReportLoader({ db });
 
-  const running = await startConsoleServer({ load, loadDivisions, now }, port);
+  const running = await startConsoleServer({ load, loadDivisions, loadReport, now }, port);
   console.error(`console: read-only Admin console at ${running.url}`);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
