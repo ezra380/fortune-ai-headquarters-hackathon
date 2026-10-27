@@ -76,6 +76,20 @@ export const EMAIL_NAMES = Object.keys(EMAIL_STEPS);
 export const REVIEW_TOPICS = ['fit', 'color', 'quality', 'shipping', 'service', 'other'] as const;
 /** Who sent the first answer to a customer's message: Emma (the online assistant), the salon, an automatic reply, someone else. */
 export const ANSWERERS = ['emma', 'salon', 'auto', 'other'] as const;
+/** The store site's pages the page days and the crawl cover (invented): each with its type, its share of a day's visits and how fast it usually draws (ms). */
+export const SITE_PAGES = [
+  { page: '/', type: 'home', share: 0.32, lcp: [1600, 2300] },
+  { page: '/collections/mazali', type: 'collection', share: 0.2, lcp: [1900, 2600] },
+  { page: '/collections/tuni', type: 'collection', share: 0.12, lcp: [1800, 2500] },
+  { page: '/collections/accessories', type: 'collection', share: 0.1, lcp: [1500, 2200] },
+  { page: '/products/demo-mazali-feature', type: 'product', share: 0.16, lcp: [2300, 3300] },
+  { page: '/blogs/journal', type: 'blog', share: 0.1, lcp: [2000, 2900] },
+] as const;
+export const PAGE_TYPES = ['home', 'collection', 'product', 'blog'] as const;
+/** Where a site visit came from. */
+export const WEB_SOURCES = ['organic', 'google', 'meta', 'email', 'direct', 'social'] as const;
+/** What a blog post is about, from a fixed list (no health topic). */
+export const BLOG_TOPICS = ['care', 'styling', 'buying_guide', 'salon_news', 'consignment'] as const;
 
 /** Every enumerated column of every source, by column name, with its allowed values (the no-medical guard reads it). */
 export const SOURCE_ENUMS = {
@@ -83,7 +97,8 @@ export const SOURCE_ENUMS = {
   service: SALON_SERVICES, reason: REFUND_REASONS, recovered_via: RECOVERY_CHANNELS, direction: MESSAGE_DIRECTIONS, booked_via: BOOKING_CHANNELS,
   intent: MESSAGE_INTENTS, repair_type: REPAIR_TYPES, status: [...REPAIR_STATUSES, 'completed', 'no_show', 'approved', 'proposed'],
   location: SALON_LOCATIONS, business: INVOICE_BUSINESSES, supplier_id: SUPPLIERS, kind: ['flow', 'campaign'],
-  marketplace: MARKETPLACES, name: EMAIL_NAMES, step: Object.values(EMAIL_STEPS).flat(), topic: REVIEW_TOPICS, answered_by: ANSWERERS,
+  marketplace: MARKETPLACES, name: EMAIL_NAMES, step: Object.values(EMAIL_STEPS).flat(), topic: [...REVIEW_TOPICS, ...BLOG_TOPICS], answered_by: ANSWERERS,
+  page_type: PAGE_TYPES, source: WEB_SOURCES, page: SITE_PAGES.map((p) => p.page),
 } as const;
 
 /**
@@ -199,6 +214,17 @@ export type Channels = {
   emailMessages: EmailMessage[];
   orderLines: OrderLine[];
 };
+/** One page's day for one source of visits: sessions, carts, checkouts and orders (each at most the one before), and how fast it drew. */
+export type PageDay = {
+  page_day_id: string; visit_date: string; page: string; page_type: string; source: (typeof WEB_SOURCES)[number];
+  sessions: number; carts: number; checkouts: number; orders: number; lcp_ms: number;
+};
+/** One link on one page in a weekly crawl of the site, and the HTTP status the crawler got. */
+export type CrawlRow = { crawl_id: string; crawl_date: string; page: string; link: string; http_status: number };
+/** A blog post: when it was published and last updated, its topic and its visits in the last 28 days. No text. */
+export type BlogPost = { post_id: string; published_date: string; last_updated: string; topic: (typeof BLOG_TOPICS)[number]; sessions_28d: number };
+/** The store site wave 2 adds (generateWeb). */
+export type Web = { pageDays: PageDay[]; crawl: CrawlRow[]; blogPosts: BlogPost[] };
 /** The store's customers wave 2 adds (generateCustomers): who placed each order, got each refund and sent each message, and their reviews. */
 export type Customers = { orders: StoreOrder[]; refunds: CustomerRefund[]; messages: InboxMessage[]; reviews: Review[] };
 /** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet, the operations, the channels and the customers. */
@@ -209,6 +235,7 @@ export type SyntheticYear = Omit<SyntheticBusiness, 'salon' | 'online'> & {
   finance: { budgets: BudgetRow[] } & Pick<Operations, 'invoices'>;
   marketing: Pick<Channels, 'emailMessages'>;
   marketplace: Channels['marketplace'];
+  web: Web;
 };
 
 /** mulberry32: tiny, fast, deterministic. */
@@ -975,7 +1002,90 @@ export function generateCustomers(
   return { orders: placed, refunds: refunded, messages: inboxPeople(seed, messages, placed, refunded), reviews: reviews(seed, placed, lines, refunded) };
 }
 
-/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions, generateOperations, generateChannels and generateCustomers add. */
+// ---- The store site (wave 2, for Online) -----------------------------------------------------
+// Each page's day by where its visits came from, the weekly crawl of the site's links, and the blog's posts, each from
+// its own named stream. The page days share out the day's store orders, so they add up to the order count exactly.
+
+/** Each source's usual share of a day's visits, and how likely a visit from it is to end in an order against the average (invented). */
+const VISIT_SOURCES: Record<(typeof WEB_SOURCES)[number], { share: number; buys: number }> = {
+  organic: { share: 0.34, buys: 1 }, google: { share: 0.2, buys: 1.4 }, meta: { share: 0.14, buys: 0.8 },
+  email: { share: 0.1, buys: 1.6 }, direct: { share: 0.16, buys: 1.3 }, social: { share: 0.06, buys: 0.5 },
+};
+
+/**
+ * About six hundred visits a day at the store's season, shared over the pages and sources; each of the day's sales is
+ * placed on one page and source by its chance of selling; carts and checkouts follow, never fewer than the orders. The
+ * bad row has more carts than visits.
+ */
+function pageDays(seed: number, orders: readonly OnlineOrder[]): PageDay[] {
+  const { r, between } = drawer(streamSeed(seed, 'page_days'));
+  const sold = new Map<string, number>();
+  for (const o of orders.filter(isSale)) sold.set(o.order_date, (sold.get(o.order_date) ?? 0) + 1);
+  const out: PageDay[] = [];
+  for (const day of YEAR_DAYS()) {
+    const visits = between(520, 680) * seasonOf(day).online;
+    const cells = SITE_PAGES.flatMap((p) => WEB_SOURCES.map((source) => {
+      const sessions = Math.max(1, Math.round(visits * p.share * VISIT_SOURCES[source].share * between(0.7, 1.3)));
+      return { p, source, sessions, weight: sessions * VISIT_SOURCES[source].buys * (p.type === 'blog' ? 0.3 : 1) };
+    }));
+    const placed = cells.map(() => 0);
+    const at = cells.map((_, i) => i);
+    for (let k = sold.get(day) ?? 0; k > 0; k--) placed[pick(r(), at, cells.map((c) => c.weight))]! += 1;
+    cells.forEach((c, i) => {
+      const [cartShare, checkShare, lcp] = [between(0.04, 0.09), between(0.35, 0.6), between(c.p.lcp[0], c.p.lcp[1])];
+      const checkouts = Math.max(placed[i]!, Math.round(c.sessions * cartShare * checkShare));
+      const carts = Math.max(checkouts, Math.round(c.sessions * cartShare));
+      out.push({
+        page_day_id: seq('demo-pd-d', out.length + 1), visit_date: day, page: c.p.page, page_type: c.p.type, source: c.source,
+        sessions: Math.max(c.sessions, carts), carts, checkouts, orders: placed[i]!, lcp_ms: Math.round(lcp),
+      });
+    });
+  }
+  out.push({ page_day_id: 'demo-pd-bad-carts', visit_date: '2026-04-14', page: '/', page_type: 'home', source: 'social', sessions: 3, carts: 9, checkouts: 0, orders: 0, lcp_ms: 1900 });
+  return out;
+}
+
+/** Six links on each page, crawled every Monday from 2025-10-06: now and then one breaks (mostly a 404) and stays broken a few weeks. */
+function siteCrawl(seed: number): CrawlRow[] {
+  const { r } = drawer(streamSeed(seed, 'crawl'));
+  const links = SITE_PAGES.flatMap((p) => Array.from({ length: 6 }, (_, i) => ({ page: p.page, link: `${p.page === '/' ? '' : p.page}/demo-link-${i + 1}` })));
+  const brokenUntil = new Map<string, string>();
+  const out: CrawlRow[] = [];
+  for (let day = '2025-10-06'; day <= AS_OF; day = addDays(day, 7)) {
+    for (const l of links) {
+      const [u, weeks, kind] = [r(), r(), r()];
+      if (brokenUntil.has(l.link) && day >= brokenUntil.get(l.link)!) brokenUntil.delete(l.link);
+      if (!brokenUntil.has(l.link) && u < 0.02) brokenUntil.set(l.link, addDays(day, 7 * (1 + Math.floor(weeks * 6))));
+      const http_status = brokenUntil.has(l.link) ? (kind < 0.8 ? 404 : 503) : kind < 0.08 ? 301 : 200;
+      out.push({ crawl_id: seq('demo-cr-c', out.length + 1), crawl_date: day, page: l.page, link: l.link, http_status });
+    }
+  }
+  out.push({ crawl_id: 'demo-cr-bad-status', crawl_date: '2026-05-04', page: '/', link: '/demo-link-1', http_status: 0 });
+  return out;
+}
+
+/** A post every six to fourteen days since January 2024; about a third are updated later. The bad row was updated before it was published. */
+function blogPosts(seed: number): BlogPost[] {
+  const { r, between } = drawer(streamSeed(seed, 'blog_posts'));
+  const out: BlogPost[] = [];
+  for (let day = '2024-01-03'; day <= AS_OF; day = addDays(day, Math.round(between(6, 14)))) {
+    const [tu, uu, gap, visits] = [r(), r(), Math.round(between(20, 400)), between(40, 900)];
+    const updated = addDays(day, gap);
+    out.push({
+      post_id: seq('demo-bp-p', out.length + 1), published_date: day, last_updated: uu < 0.35 && updated <= AS_OF ? updated : day,
+      topic: pick(tu, BLOG_TOPICS, [0.3, 0.3, 0.2, 0.1, 0.1]), sessions_28d: Math.round(visits),
+    });
+  }
+  out.push({ post_id: 'demo-bp-bad-dates', published_date: '2026-03-18', last_updated: '2026-03-02', topic: 'care', sessions_28d: 120 });
+  return out;
+}
+
+/** The store site, each source from its own stream. `orders` are only read: the page days share out each day's sales. */
+export function generateWeb(orders: readonly OnlineOrder[], seed = DIVISIONS_SEED): Web {
+  return { pageDays: pageDays(seed, orders), crawl: siteCrawl(seed), blogPosts: blogPosts(seed) };
+}
+
+/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions, generateOperations, generateChannels, generateCustomers and generateWeb add. */
 export function generateYear(): SyntheticYear {
   const today = generateBusiness();
   const history = generateHistory();
@@ -997,5 +1107,6 @@ export function generateYear(): SyntheticYear {
     support: { messages: people.messages },
     finance: { budgets: added.budgets, invoices: ops.invoices },
     marketplace: channels.marketplace,
+    web: generateWeb(plain),
   };
 }

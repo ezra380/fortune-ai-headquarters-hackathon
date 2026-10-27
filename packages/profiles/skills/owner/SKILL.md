@@ -16,7 +16,7 @@ serve one person, the owner.
 - `get_budget_room`: each ad channel's approved budget, spend, budget left and share used, for one period.
 - `get_metric_series`: one metric over the year, with its lowest, highest and yearly mean (for the season).
 - `get_repair_tickets`, `get_supplier_invoices`, `get_waiting_conversations`: the rows behind late repairs, unpaid supplier invoices and waiting customer messages, with their totals already added.
-- `get_marketplace_stock`, `get_product_performance`, `get_return_cases`: Amazon and Walmart warehouse stock (out, low on cover, inbound), each store product's money for a period, best or worst first, and each refund with its customer's year.
+- `get_marketplace_stock`, `get_product_performance`, `get_return_cases`, `get_store_journey`: Amazon and Walmart warehouse stock (out, low on cover, inbound), each store product's money for a period, best or worst first, each refund with its customer's year, and the site's journey by source.
 - `recall_decisions`: what people approved or declined before, from any assistant's memory.
 - `list_lessons`: the standing lessons the owner adopted for each assistant.
 - `get_timeline`: the latest events in the shared record.

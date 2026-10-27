@@ -160,6 +160,10 @@ export const ATTENTION: readonly AttentionRule[] = [
   { metrics: /^m:online\.returns\.repeat_customers\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Some customers have sent orders back again and again this year.' },
   { metrics: /^m:online\.service\.duplicate\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Customers wrote again on another channel before their first message was answered.' },
   { metrics: /^m:online\.reviews\.low_rating\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Customers left low product ratings.' },
+  // Wave 2: the store site.
+  { metrics: /^m:online\.web\.broken_links\.count$/, when: (v) => v > 0, level: 'act', rule: 'Links on the store site are broken.' },
+  { metrics: /^m:online\.web\.slow_pages\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Some store pages draw slowly.' },
+  { metrics: /^m:online\.blog\.stale\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Some blog posts have not been updated in half a year.' },
 ];
 
 /** The rules that fire on these metrics, in metric order. Only metrics present can fire; nothing is computed. */

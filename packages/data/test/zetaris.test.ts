@@ -123,12 +123,12 @@ describe('finance view', () => {
     expect(() => financeQuery('2026-08')).toThrow('unknown period'); // version 1 serves two periods
   });
 
-  it('version 2 lives in its own container: thirteen periods, eighteen sources, every metric once', () => {
+  it('version 2 lives in its own container: thirteen periods, twenty-one sources, every metric once', () => {
     const v2 = financeViewBody(2);
     expect(v2).not.toContain('fortune_hq.');
     for (const m of METRICS) expect(v2.split(`'${m.id}'`).length - 1).toBe(1);
-    expect(VERSIONS[2].sources).toHaveLength(18);
-    for (const v of ['online_orders', 'salon_appointments', 'marketing_ads', 'marketing_email', 'finance_budgets', 'support_messages', 'salon_repairs', 'finance_invoices', 'online_reviews']) {
+    expect(VERSIONS[2].sources).toHaveLength(21);
+    for (const v of ['online_orders', 'salon_appointments', 'marketing_ads', 'marketing_email', 'finance_budgets', 'support_messages', 'salon_repairs', 'finance_invoices', 'online_reviews', 'web_page_days', 'web_crawl', 'web_blog_posts']) {
       expect(v2.split(`fortune_hq_v2.${v} `).length - 1).toBe(1);
     }
     expect(v2).toContain("month_start BETWEEN '2025-10-01' AND '2026-10-26'");

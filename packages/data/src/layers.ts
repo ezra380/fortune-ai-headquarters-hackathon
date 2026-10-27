@@ -5,6 +5,7 @@ import {
 } from './finance-sql.ts';
 import { CHANNEL_STANDING } from './channels.ts';
 import { CUSTOMER_STANDING } from './customers.ts';
+import { WEB_STANDING } from './web.ts';
 import { OPS_STANDING } from './operations.ts';
 import { AD_CHANNELS, AS_OF, LAST_WEEK } from './synthetic.ts';
 
@@ -109,6 +110,8 @@ export const STANDING_METRICS: MetricDef[] = [
   ...CHANNEL_STANDING,
   // The customers (wave 2): the repeat returners over the year to the data date.
   ...CUSTOMER_STANDING,
+  // The store site (wave 2): the latest crawl's broken links, the stale blog posts.
+  ...WEB_STANDING,
 ];
 
 // ---- SQL ----------------------------------------------------------------------------------

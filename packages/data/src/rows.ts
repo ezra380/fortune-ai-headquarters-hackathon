@@ -310,6 +310,47 @@ function returnCases(read: Extract<RowRead, { table: 'return_cases' }>): RowQuer
   };
 }
 
+// ---- The store site (wave 2) ------------------------------------------------------------------
+
+const PAGE_DAYS = `${CONTAINER_V2}.web_page_days`;
+const rate = (part: number, whole: number) => (whole ? round(part / whole, 4) : null);
+
+/**
+ * The store journey of one period, by where the visits came from, most visits first: sessions, carts, checkouts,
+ * orders, the share of visits that added to the cart and that ended in an order. One statement over the period's valid
+ * page days, added up per source; the port adds the sources up (counts, so they add) and works out the overall rates.
+ */
+function journey(read: Extract<RowRead, { table: 'journey' }>): RowQuery {
+  const { from, to } = PERIODS[read.period];
+  const s = specOf('page_days', 2);
+  const cols: Col[] = [
+    text('source', 'source'), column('sessions', 'sessions'), column('carts', 'carts'), column('checkouts', 'checkouts'), column('orders', 'orders'),
+    { ...column('cartRate', 'cart_rate'), nullable: true }, { ...column('conversionRate', 'conversion_rate'), nullable: true },
+  ];
+  const sql = 'SELECT source AS c0, SUM(sessions) AS c1, SUM(carts) AS c2, SUM(checkouts) AS c3, SUM(orders) AS c4, '
+    + 'ROUND(SUM(carts) / NULLIF(SUM(sessions), 0), 4) AS c5, ROUND(SUM(orders) / NULLIF(SUM(sessions), 0), 4) AS c6 '
+    + `FROM ${PAGE_DAYS} WHERE (${s.validSql}) AND visit_date BETWEEN '${from}' AND '${to}' GROUP BY source ORDER BY c1 DESC, c0`;
+  const rows = (b: SourceRows): Out[] => {
+    const bySource = new Map<string, Row[]>();
+    for (const d of sourceRows(b).page_days.filter((r) => s.valid(r) && str(r, 'visit_date') >= from && str(r, 'visit_date') <= to)) {
+      bySource.set(str(d, 'source'), [...(bySource.get(str(d, 'source')) ?? []), d]);
+    }
+    return [...bySource].map(([source, mine]) => {
+      const add = (k: string) => mine.reduce((t, r) => t + num(r, k), 0);
+      return { source, sessions: add('sessions'), carts: add('carts'), checkouts: add('checkouts'), orders: add('orders'), cartRate: rate(add('carts'), add('sessions')), conversionRate: rate(add('orders'), add('sessions')) };
+    });
+  };
+  return {
+    source: 'page_days', view: 'web_page_days', cols, where: cond('TRUE', () => true), order: ['-sessions', 'source'],
+    grouped: { sql, views: ['web_page_days'], rows },
+    totals: (rows) => {
+      const add = (k: string) => rows.reduce((t, r) => t + Number(r[k]), 0);
+      const [sessions, carts, orders] = [add('sessions'), add('carts'), add('orders')];
+      return { count: rows.length, sessions, carts, checkouts: add('checkouts'), orders, cartRate: rate(carts, sessions) ?? 0, conversionRate: rate(orders, sessions) ?? 0 };
+    },
+  };
+}
+
 // ---- Checking a read, its SQL, its rows ------------------------------------------------------
 
 const REPAIR_STATUSES = Object.keys(REPAIR_WHERE);
@@ -340,8 +381,9 @@ export function checkRowRead(input: RowRead): RowRead {
       if (!['best', 'worst'].includes(input.sort)) throw new Error(`${where}: sort must be best or worst`);
       return { table: 'products', period: input.period, sort: input.sort };
     case 'return_cases':
+    case 'journey':
       if (!PERIOD_KEYS.includes(input.period)) throw new Error(`${where}: period must be one of ${PERIOD_KEYS.join(', ')}`);
-      return { table: 'return_cases', period: input.period };
+      return { table: input.table, period: input.period };
     default:
       throw new Error(`${where}: there is no such row table`);
   }
@@ -356,6 +398,7 @@ export function rowQuery(read: RowRead): RowQuery {
     case 'marketplace_stock': return marketplaceStock(read);
     case 'products': return products(read);
     case 'return_cases': return returnCases(read);
+    case 'journey': return journey(read);
   }
 }
 

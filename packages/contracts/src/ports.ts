@@ -28,6 +28,7 @@ export type DivisionData = {
  * - products: each store product's units, money, refunds and views for a period, by profit, best or worst first
  * - return_cases: each refund issued in a period, with the customer's (a synthetic id) refunds in the last year, reviews
  *   and messages; never a name or a message's text
+ * - journey: the store site's visits, carts, checkouts and orders for a period, by where the visits came from, with the rates
  */
 export type RowRead =
   | { table: 'repairs'; status: 'open' | 'late' | 'done' }
@@ -36,7 +37,8 @@ export type RowRead =
   | { table: 'low_stock' }
   | { table: 'marketplace_stock'; status: 'all' | 'low'; marketplace?: 'amazon' | 'walmart' }
   | { table: 'products'; period: Period; sort: 'best' | 'worst' }
-  | { table: 'return_cases'; period: Period };
+  | { table: 'return_cases'; period: Period }
+  | { table: 'journey'; period: Period };
 
 /**
  * The rows of one RowRead (every matching row; the port refuses a read too large to return whole) and their

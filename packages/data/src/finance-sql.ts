@@ -1,6 +1,7 @@
 import { DEFAULT_PERIODS, PERIOD_KEYS, type Division, type Period } from '@fahq/contracts';
 import { CHANNEL_METRICS, CHANNEL_SOURCES, CHANNEL_SOURCE_NAMES, losingGroups, type ChannelSource } from './channels.ts';
 import { CUSTOMER_METRICS, CUSTOMER_SOURCES, CUSTOMER_SOURCE_NAMES, median, repeatGroups, withPrevious, type CustomerSource } from './customers.ts';
+import { WEB_METRICS, WEB_SOURCES_SPEC, WEB_SOURCE_NAMES, groupsAbove, type WebSource } from './web.ts';
 import { OPS_METRICS, OPS_SOURCES, OPS_SOURCE_NAMES, type OpsSource } from './operations.ts';
 import { ONE, counted, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
 import {
@@ -43,13 +44,14 @@ export { quoted, type Row };
 
 export type DataVersion = 1 | 2;
 /** Version 1's four sources, the budget sheet, the day-to-day systems of operations.ts, the channels of channels.ts and the customers of customers.ts (version 2). */
-export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets' | OpsSource | ChannelSource | CustomerSource;
+export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets' | OpsSource | ChannelSource | CustomerSource | WebSource;
 
 /** Each source: its row view's name (in each version's container), its date column and its data-quality rule. */
 export const SOURCES: Record<Source, SourceSpec> = {
   ...OPS_SOURCES,
   ...CHANNEL_SOURCES,
   ...CUSTOMER_SOURCES,
+  ...WEB_SOURCES_SPEC,
   orders: {
     table: 'online_orders',
     date: 'order_date',
@@ -115,7 +117,9 @@ type Agg =
   /** The middle value of a field (Spark's exact percentile at one half), to a tenth; rows where it is NULL are left out. */
   | { kind: 'median'; field: Field }
   /** How many groups (by a column, e.g. customers) have at least `atLeast` matching rows. */
-  | { kind: 'repeat'; by: string; atLeast: number };
+  | { kind: 'repeat'; by: string; atLeast: number }
+  /** How many groups (by a column, e.g. site pages) whose field averages above `over` over the period's rows. */
+  | { kind: 'above'; by: string; field: Field; over: number };
 
 /** What every metric says about itself, whichever layer computes it. */
 export type MetricAbout = {
@@ -247,6 +251,8 @@ export const METRICS: MetricDef[] = [
   ...CHANNEL_METRICS,
   // The customers (wave 2): reviews, Emma's reply speed and the duplicated messages.
   ...CUSTOMER_METRICS,
+  // The store site (wave 2): visits, the journey's rates, slow pages and the blog.
+  ...WEB_METRICS,
 ];
 
 export const METRIC_BY_ID = new Map(METRICS.map((m) => [m.id, m]));
@@ -259,7 +265,7 @@ export const VERSIONS: Record<DataVersion, { periods: readonly Period[]; contain
   },
   2: {
     periods: PERIOD_KEYS, container: CONTAINER_V2, view: PERIOD_VIEW_V2,
-    sources: ['orders', 'appointments', 'ads', 'email', 'budgets', ...OPS_SOURCE_NAMES, ...CHANNEL_SOURCE_NAMES, ...CUSTOMER_SOURCE_NAMES], metrics: METRICS.filter((m) => m.layer === 'period'),
+    sources: ['orders', 'appointments', 'ads', 'email', 'budgets', ...OPS_SOURCE_NAMES, ...CHANNEL_SOURCE_NAMES, ...CUSTOMER_SOURCE_NAMES, ...WEB_SOURCE_NAMES], metrics: METRICS.filter((m) => m.layer === 'period'),
   },
 };
 
@@ -301,7 +307,8 @@ export function aggSql(d: MetricDef, s: SourceSpec): string {
     case 'rejected': return `COUNT(CASE WHEN ${cond} AND NOT COALESCE(${validSql}, FALSE) THEN 1 END)`;
     case 'median': return `ROUND(percentile(${when(agg.field)}, 0.5), 1)`;
     case 'losing':
-    case 'repeat': throw new Error(`${d.id}: a per-group count is computed by groupedSelect, never inline`);
+    case 'repeat':
+    case 'above': throw new Error(`${d.id}: a per-group count is computed by groupedSelect, never inline`);
   }
 }
 
@@ -320,6 +327,7 @@ export function groupedParts(d: MetricDef, s: SourceSpec, i: number): { inner: s
     case 'ratio': return { inner: [`${when(agg.num)} AS p${i}`, `${when(agg.den)} AS q${i}`], outer: `ROUND(SUM(p${i}) / SUM(q${i}), 4)` };
     case 'losing': return { inner: [`${when(agg.field)} AS p${i}`], outer: `COUNT(CASE WHEN ROUND(p${i}, 2) < 0 THEN 1 END)` };
     case 'repeat': return { inner: [`COUNT(CASE WHEN ${cond} THEN 1 END) AS p${i}`], outer: `COUNT(CASE WHEN p${i} >= ${agg.atLeast} THEN 1 END)` };
+    case 'above': return { inner: [`${when(agg.field)} AS p${i}`, `COUNT(CASE WHEN ${cond} THEN 1 END) AS q${i}`], outer: `COUNT(CASE WHEN p${i} / q${i} > ${agg.over} THEN 1 END)` };
     case 'avg':
     case 'median': throw new Error(`${d.id}: an average or a median is not computed per group`);
   }
@@ -334,8 +342,8 @@ function sourceSelect(source: Source, version: DataVersion): string {
   const [first, last] = [PERIODS[periods[0]!].from, PERIODS[periods[periods.length - 1]!].to];
   const table = `${container}.${s.table}`;
   const rows = `FROM ${version === 2 && s.from ? s.from(table) : table} WHERE ${s.date} BETWEEN '${first}' AND '${last}'`;
-  const grouped = defs.find((d) => d.agg.kind === 'losing')?.agg;
-  if (grouped?.kind === 'losing') {
+  const grouped = defs.find((d) => d.agg.kind === 'losing' || d.agg.kind === 'above')?.agg;
+  if (grouped?.kind === 'losing' || grouped?.kind === 'above') {
     const parts = defs.map((d, i) => groupedParts(d, s, i));
     const inner = `SELECT ${period} AS period, ${parts.flatMap((p) => p.inner).join(', ')} ${rows} GROUP BY ${period}, ${grouped.by}`;
     return unpivot(defs, `SELECT period, ${parts.map((p, i) => `CAST(${p.outer} AS DOUBLE) AS m${i}`).join(', ')} FROM (${inner}) g_${source} GROUP BY period`, source);
@@ -391,6 +399,7 @@ export function sourceRows(b: SourceRows): Record<Source, readonly Row[]> {
     email_messages: y?.marketing.emailMessages ?? [], order_lines: y?.online.orderLines ?? [],
     // The inbox as the period view reads it: each message with the customer's previous one (the view's window).
     messages: withPrevious(y?.support.messages ?? []), reviews: y?.online.reviews ?? [],
+    page_days: y?.web.pageDays ?? [], crawl: y?.web.crawl ?? [], blog_posts: y?.web.blogPosts ?? [],
   };
 }
 
@@ -418,6 +427,7 @@ export function aggregate(d: MetricDef, rows: readonly Row[], version: DataVersi
     : a.kind === 'losing' ? losingGroups(matching, a.by, a.field)
     : a.kind === 'median' ? median(matching.map(fieldJs(a.field)))
     : a.kind === 'repeat' ? repeatGroups(matching, a.by, a.atLeast)
+    : a.kind === 'above' ? groupsAbove(matching, a.by, a.field, a.over)
     : matching.filter((r) => !s.valid(r)).length;
 }
 

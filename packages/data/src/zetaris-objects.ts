@@ -18,6 +18,7 @@ export const V2_DATABASES = [
   { db: 'FORTUNE_DEMO_FINANCE', about: 'Fortune demo finance owner budget sheet, synthetic' },
   { db: 'FORTUNE_DEMO_SUPPORT', about: 'Fortune demo support inbox, message times and topics only, synthetic' },
   { db: 'FORTUNE_DEMO_MARKETPLACE', about: 'Fortune demo Amazon and Walmart sales, ads and warehouse stock, synthetic' },
+  { db: 'FORTUNE_DEMO_WEB', about: 'Fortune demo store site pages, link crawl and blog posts, synthetic' },
 ] as const;
 
 export const V2_TABLES = [
@@ -96,6 +97,19 @@ export const V2_TABLES = [
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'reviews', path: '/v2/online/reviews', view: 'online_reviews',
     cols: ['review_id', 'review_date', 'order_id', 'customer_id', 'sku', 'rating', 'topic'],
+  },
+  // The store site (wave 2): its own system and database.
+  {
+    db: 'FORTUNE_DEMO_WEB', table: 'page_days', path: '/v2/web/page_days', view: 'web_page_days',
+    cols: ['page_day_id', 'visit_date', 'page', 'page_type', 'source', 'sessions', 'carts', 'checkouts', 'orders', 'lcp_ms'],
+  },
+  {
+    db: 'FORTUNE_DEMO_WEB', table: 'crawl', path: '/v2/web/crawl', view: 'web_crawl',
+    cols: ['crawl_id', 'crawl_date', 'page', 'link', 'http_status'],
+  },
+  {
+    db: 'FORTUNE_DEMO_WEB', table: 'blog_posts', path: '/v2/web/blog_posts', view: 'web_blog_posts',
+    cols: ['post_id', 'published_date', 'last_updated', 'topic', 'sessions_28d'],
   },
 ] as const;
 

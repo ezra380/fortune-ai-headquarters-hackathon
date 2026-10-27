@@ -14,6 +14,7 @@ const NAMES = [
   'get_timeline', 'list_work_reports', 'list_session_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
   'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
   'get_waiting_conversations', 'get_low_stock_interest', 'get_marketplace_stock', 'get_product_performance', 'get_return_cases',
+  'get_store_journey',
 ];
 
 const FINAL_ID = 'abcdef12-3456-4789-8abc-def012345678';
@@ -525,12 +526,13 @@ describe('division read tools (data version 2)', () => {
     await tools.get_product_performance!.run({ period: '2026-09' });
     await tools.get_product_performance!.run({ period: '2026-10-mtd', sort: 'worst', limit: 5 });
     await tools.get_return_cases!.run({ period: '2026-09' });
+    await tools.get_store_journey!.run({ period: '2026-10-mtd', limit: 3 });
     expect(asked).toEqual([
       { table: 'repairs', status: 'late' }, { table: 'repairs', status: 'open' }, { table: 'invoices', status: 'overdue', business: 'online' },
       { table: 'invoices', status: 'due_30d' }, { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' },
       { table: 'marketplace_stock', status: 'all' }, { table: 'marketplace_stock', status: 'low', marketplace: 'walmart' },
       { table: 'products', period: '2026-09', sort: 'best' }, { table: 'products', period: '2026-10-mtd', sort: 'worst' },
-      { table: 'return_cases', period: '2026-09' },
+      { table: 'return_cases', period: '2026-09' }, { table: 'journey', period: '2026-10-mtd' },
     ]);
     // The periods offered are exactly the ones the data serves.
     expect(tools.get_product_performance!.signature).toContain('"2025-10" | ');
@@ -549,6 +551,7 @@ describe('division read tools (data version 2)', () => {
     await expect(tools.get_product_performance!.run({ period: '2026-09', sort: 'top' })).rejects.toThrow(/argument "sort"/);
     await expect(tools.get_return_cases!.run({ period: '2026-09', customer: 'demo-cu-c00001' })).rejects.toThrow(/does not take/);
     await expect(tools.get_return_cases!.run({})).rejects.toThrow(/argument "period"/);
+    await expect(tools.get_store_journey!.run({ period: '2026-09', source: 'google' })).rejects.toThrow(/does not take/);
     expect(asked).toEqual([]);
     await expect(createReadTools(setup().ctx, 'owner').get_repair_tickets!.run({ status: 'open' })).rejects.toThrow('This data source has no row reads (they need data version 2).');
   });

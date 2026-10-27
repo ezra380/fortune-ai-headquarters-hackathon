@@ -299,6 +299,13 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
       run: ({ period, limit }) => rows({ table: 'return_cases', period }, limit),
     }),
     tool({
+      name: 'get_store_journey',
+      description: 'The store site\'s journey for one period, through Zetaris, by where the visits came from (organic, google, meta, email, direct, social), most visits first: sessions, carts, checkouts, orders, cart rate and conversion rate. Totals: every source added up, with the overall rates.',
+      signature: `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')}; limit?: number }) => Promise<${RowsOf('{ source: "organic" | "google" | "meta" | "email" | "direct" | "social"; sessions: number; carts: number; checkouts: number; orders: number; cartRate: number | null; conversionRate: number | null }', '{ count: number; sessions: number; carts: number; checkouts: number; orders: number; cartRate: number; conversionRate: number }')}>`,
+      schema: z.object({ period: PeriodArg, limit: Limit }).strict(),
+      run: ({ period, limit }) => rows({ table: 'journey', period }, limit),
+    }),
+    tool({
       name: 'recall_my_decisions',
       description: "Decisions people approved or declined that are in YOUR OWN memory, most relevant first (never another assistant's).",
       signature: '(args: { query: string; limit?: number }) => Promise<{ decisions: { id: string; text: string; relevance: number }[] }>',

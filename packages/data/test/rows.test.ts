@@ -25,6 +25,7 @@ const READS: RowRead[] = [
   { table: 'marketplace_stock', status: 'all' }, { table: 'marketplace_stock', status: 'low', marketplace: 'walmart' },
   { table: 'products', period: '2026-09', sort: 'best' }, { table: 'products', period: '2026-10-mtd', sort: 'worst' },
   { table: 'return_cases', period: '2026-09' }, { table: 'return_cases', period: '2026-10-mtd' },
+  { table: 'journey', period: '2026-09' }, { table: 'journey', period: '2026-10-mtd' },
 ];
 
 /** Zetaris's answer to a read: the oracle's rows (before any after-read filter) as strings in column order, '' for NULL. */
@@ -104,6 +105,26 @@ describe('row reads: the rows behind the standing numbers', () => {
     }
   });
 
+  it('give the store journey of a period by source, adding up to the site numbers, most visits first', () => {
+    for (const period of ['2026-09', '2026-10-mtd', '2025-12'] as const) {
+      const at = (id: string) => layers.period.get(period)!.get(id)!;
+      const { rows, totals } = oracleRows(year, { table: 'journey', period });
+      const t = totals as Record<string, number>;
+      expect(rows.map((r) => r.source).sort()).toEqual(['direct', 'email', 'google', 'meta', 'organic', 'social']);
+      expect(t.sessions).toBe(at('m:online.web.sessions'));
+      expect(t.orders).toBe(at('m:online.orders.count'));
+      expect(t.cartRate).toBe(at('m:online.web.cart_rate'));
+      expect(t.conversionRate).toBe(at('m:online.web.conversion_rate'));
+      const sessions = rows.map((r) => Number(r.sessions));
+      expect(sessions).toEqual([...sessions].sort((a, b) => b - a));
+      for (const r of rows) {
+        expect(Number(r.orders)).toBeLessThanOrEqual(Number(r.checkouts));
+        expect(Number(r.checkouts)).toBeLessThanOrEqual(Number(r.carts));
+        expect(r.conversionRate).toBe(Math.round((Number(r.orders) / Number(r.sessions)) * 10_000) / 10_000);
+      }
+    }
+  });
+
   it("list each refund of the period with its customer's year, reviews and messages, adding up to the refund numbers", () => {
     let repeatSeen = 0;
     for (const period of ['2026-09', '2026-10-mtd', '2026-03'] as const) {
@@ -178,6 +199,8 @@ describe('row reads: the rows behind the standing numbers', () => {
     expect(bad({ table: 'products', period: "2026-09' OR '1'='1", sort: 'best' })).toThrow('period must be one of');
     expect(bad({ table: 'products', period: '2026-09', sort: 'top' })).toThrow('sort must be best or worst');
     expect(bad({ table: 'return_cases', period: "2026-09' --" })).toThrow('period must be one of');
+    expect(bad({ table: 'journey', period: '2026' })).toThrow('period must be one of');
+    expect(rowSql(rowQuery({ table: 'journey', period: '2026-09' }))).toMatch(/visit_date BETWEEN '2026-09-01' AND '2026-09-30' GROUP BY source ORDER BY c1 DESC, c0$/);
     expect(rowSql(rowQuery({ table: 'return_cases', period: '2026-09' }))).toMatch(/refund_date BETWEEN '2026-09-01' AND '2026-09-30'.* refund_date BETWEEN '2025-10-27' AND '2026-10-26'.* ORDER BY c6, c0$/);
     // The products read takes its period from the fixed list, and its order is one of two.
     expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'worst' }))).toMatch(/order_date BETWEEN '2026-09-01' AND '2026-09-30'.* snapshot_date = '2026-09-30'.* ORDER BY c6, c0$/);

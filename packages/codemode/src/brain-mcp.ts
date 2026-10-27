@@ -76,6 +76,8 @@ function describeReads(profile: AssistantProfile): Partial<Record<ReadToolName, 
       'Amazon and Walmart warehouse stock on the data date, through Zetaris (read-only): each listing on hand, inbound, sold in the last 28 days and its days of cover; all, or only those out of stock or under three weeks of cover; with the totals.',
     get_product_performance:
       "Each store product's units, revenue, cost, refunds, profit, views and rating for one period, through Zetaris (read-only), best or worst profit first, with the totals and how many lost money.",
+    get_store_journey:
+      "The store site's visits, carts, checkouts and orders for one period, through Zetaris (read-only), by where the visits came from, with the cart and conversion rates and the totals.",
     get_return_cases:
       "Each refund of one period, through Zetaris (read-only): reason, amount, days after the sale, and the customer's (a synthetic id) refunds this year, reviews and message topics; never a name or a message's text; totals by reason.",
     recall_decisions: "What people approved or declined before, from one assistant's memory. Returns decisions only, never unapproved ideas.",
@@ -166,6 +168,7 @@ const DOOR_READS: readonly ReadToolName[] = [
   // The division data: these need only the data port.
   'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
   'get_waiting_conversations', 'get_low_stock_interest', 'get_marketplace_stock', 'get_product_performance', 'get_return_cases',
+  'get_store_journey',
 ];
 
 /** What a profile's door offers: its reads, limited to what the door can serve. Empty for the salon placeholder. */
@@ -324,6 +327,8 @@ function registerDivisionReads(server: McpServer, deps: BrainMcpDeps, profile: A
     readRows(deps, { table: 'products', period: p, sort: sort ?? 'best' }, limit));
   tool('get_return_cases', { period, limit: rowLimit }, ({ period: p, limit }) =>
     readRows(deps, { table: 'return_cases', period: p }, limit));
+  tool('get_store_journey', { period, limit: rowLimit }, ({ period: p, limit }) =>
+    readRows(deps, { table: 'journey', period: p }, limit));
 }
 
 // ---- The one write: the end-of-work report -----------------------------------------------------------

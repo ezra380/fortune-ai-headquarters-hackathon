@@ -16,7 +16,7 @@ const routes = Object.entries(SOURCE_ROUTES).map(([path, rows]) => [path, rows(s
 
 describe('no medical or hair-loss data anywhere', () => {
   it('in any column or string value of any source, version 1 and version 2, planted bad rows included', () => {
-    expect(routes.length).toBe(22);
+    expect(routes.length).toBe(25);
     for (const [path, rows] of routes) {
       expect(rows.length, path).toBeGreaterThan(0);
       for (const row of rows) {

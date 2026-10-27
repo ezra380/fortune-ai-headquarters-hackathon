@@ -31,6 +31,9 @@ export const SOURCE_ROUTES = {
   '/v2/marketing/email_messages': (d: Served) => d.v2.marketing.emailMessages,
   '/v2/online/order_lines': (d: Served) => d.v2.online.orderLines,
   '/v2/online/reviews': (d: Served) => d.v2.online.reviews,
+  '/v2/web/page_days': (d: Served) => d.v2.web.pageDays,
+  '/v2/web/crawl': (d: Served) => d.v2.web.crawl,
+  '/v2/web/blog_posts': (d: Served) => d.v2.web.blogPosts,
 } as const;
 
 export function createSourceServer(business: SyntheticBusiness = generateBusiness(), year: SyntheticYear = generateYear()): http.Server {
