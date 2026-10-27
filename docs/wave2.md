@@ -151,3 +151,20 @@ Anything outside its own files a lane changes as little as it can, and says so i
   - `docs/delivery.md`.
 
 **The shared local database:** any test run that touches the database must run under `flock ~/.fahq-db-test.lock`. Use `flock ~/.fahq-db-test.lock npm test`, and the same for any single DB-backed test file. The worker's DB tests cancel every queued task, so two runners at once break each other.
+
+## Status at the merge (2026-10-27, `hq/divisions-merge`)
+
+All five wave 2 lanes are merged (data, workers, delivery, manager, legal); the record is `docs/lanes/merge-wave2.md`.
+
+- **Built:** items 1 to 6 of "New synthetic sources and metrics" (marketplaces, the email split, order lines, the site
+  journey and speed, returns and reviews, the blog), every worker but the two below, the weekly reports, the PDFs, email
+  and print, the console's division tabs, the HQ Manager's own applies, and the Legal Team.
+- **NOT BUILT (a known gap, not hidden): items 7 and 8**, the salon's client segments, the salon's product sales and
+  personalization. No metric `m:salon.clients.*`, `m:salon.products.*` or `m:salon.personalization.*` exists and the row
+  tools `get_salon_clients` and `get_personalization` do not exist. `apps/worker/src/workers.ts` keeps those prefixes in
+  `PENDING_DATA_PREFIXES` and those tools in `PENDING_ROW_TOOLS`, so the `salon.clients` worker (and the personalization
+  read of `salon.turnaround`) stops plainly and its receipt says the data is not connected yet; it never guesses. Finance's
+  ask to Cindy for client segments has no data behind it until item 7 is built. `packages/data/test/channels.test.ts`
+  holds an `it.fails` wall test that turns red the day those metrics land, so whoever builds them turns it into `it`.
+- **The CEO assistant is Joey** (Ezra, 2026-10-27): assistant id `owner`, head Ezra (`CEO_ASSISTANT` in
+  `packages/contracts/src/reports.ts`).

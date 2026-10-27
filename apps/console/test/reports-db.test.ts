@@ -28,7 +28,8 @@ const MONDAY = (() => {
 })();
 const TODAY = addDays(MONDAY, 2);
 const CLOCK = () => new Date(`${TODAY}T16:00:00Z`);
-const TAG = randomBytes(3).toString('hex');
+// Letters only: the console masks any run of six digits as a code (redactCodes), so an all-digit tag (783407) failed the merge run once.
+const TAG = randomBytes(3).toString('hex').replace(/[0-9]/g, (d) => 'ghijklmnop'[Number(d)]!);
 
 describe.skipIf(!api)('the wave-2 reads on the real local database', () => {
   const messages: string[] = [];

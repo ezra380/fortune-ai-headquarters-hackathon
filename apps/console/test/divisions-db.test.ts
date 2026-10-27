@@ -20,7 +20,8 @@ afterAll(async () => pool.end());
 
 const DAY = new Date(Date.UTC(8000, 0, 1) + randomInt(0, 365_000) * 86_400_000).toISOString().slice(0, 10);
 const LATER = '9000-01-01T00:00:00Z';
-const FACT_MARKER = `FACT-${randomBytes(4).toString('hex')}`;
+// Letters only, so the console's code mask (any six digits) can never hide the marker and pass the absence checks vacuously.
+const FACT_MARKER = `FACT-${randomBytes(4).toString('hex').replace(/[0-9]/g, (d) => 'ghijklmnop'[Number(d)]!)}`;
 
 const briefOf = (division: string) => ({
   headline: `${division} headline`,
