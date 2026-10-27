@@ -77,3 +77,65 @@ lanes' tables and concurrent runs), not from this branch. `departments` and `man
   until the worker runs with `FAHQ_DATA_VERSION=2`; rollback is unsetting it.
 - Zetaris now holds version 2's objects (listed in `docs/data.md`) and an empty container
   `fortune_demo_probe` (no SQL can drop a container). Version 1's objects were never named or touched.
+
+## Slice 2 of 4: divisions in Zetaris (2026-10-27, 08:04–08:35 ET)
+
+### What works (with the tests that prove it)
+
+- **Season, derived and standing layers** (`packages/data/src/layers.ts`, `layers.test.ts`, 11 tests): the
+  derived view `fortune_hq_v2.derived_metrics` reads the period view once and makes budget left and share
+  used per channel, total ad spend, revenue per ad dollar (`m:online.mer`), and the season index per
+  business (month against the twelve-month average by `AVG() OVER ()`; same month last year by
+  `LAG(…, 12)` in its own select). The standing view `fortune_hq_v2.standing_metrics` (as of 2026-10-26,
+  period `standing`): last seven days of salon and online revenue, proposed budget changes waiting (1).
+  The oracle `computeLayers()` is checked against the rows directly ("budget left is the approved cap
+  minus spend…", "averages the twelve whole months' season index to one…", "counts the proposed October
+  Google raise…"). The live v2 period view was not rebuilt: its body's sha256 is pinned
+  (`frozen-v1.test.ts` "keeps version 2's period view as it was built live…").
+- **Divisions in Zetaris** (`packages/data/src/divisions.ts`, `divisions.test.ts`, 12 tests): twelve filter
+  views from the catalog's `divisions`, four marts `fortune_demo_v2_{salon,finance,online,hq}_mart`
+  (tables `period_metrics`, `derived_metrics`, `standing_metrics`), the queries and hash text of a
+  division read, `divisionSlice()` (the oracle's answer per division), and `ATTENTION` + `attentionFor()`
+  ("has a level and a plain sentence without numbers…", "only picks out values it is given…", "fires on the
+  synthetic year where the data says so…").
+- **DataPort** (`zetaris.test.ts`, "division reads (version 2)", 3 tests, plus the updated version tests):
+  `getDivisionMetrics({ division, period, asOf })` exists only under `FAHQ_DATA_VERSION=2`, reads the
+  division's mart in three statements, returns `{ division, metrics, attention, queryHash, view }`, refuses
+  a row outside the division, a duplicate, an unknown division or period and an empty answer. Version 2's
+  `getFinanceMetrics` reads the three layer views unsliced (54 metrics a period). Version 1's read and its
+  hash formula are unchanged (pinned by a test). `MetricInfo.layer` (optional) is new; `catalog` lists every
+  layer under version 2.
+- **Setup** (`scripts/zetaris-setup.ts --v2`): builds what is missing including the marts, proves every
+  layer view, every mart table for all periods and the DataPort's reads for every division, and checks
+  version 1's mart listing before and after. **Live run 08:19–08:25 ET: all created, 145 comparisons all
+  matched, 0 mismatches, version 1's mart listed exactly as before.** Division reads take 1.5–3.1 s live.
+- Catalog invariants now run over all three layers (`catalog.test.ts`); object-safety checks cover the marts
+  and drop order (`zetaris-objects.test.ts`, 5 tests).
+
+Test counts: `npm run typecheck` green; `packages/data` 75 tests in 9 files green. Full `npx vitest run`:
+580 passed, 2 failed, both in `supabase/tests/db.test.ts` (the two RLS tests slice 1's tier-0 run showed
+failing on bb29578's own code against the shared local database).
+
+### Not done (next slices)
+
+- The worker does not call `getDivisionMetrics` yet: `rounds.ts` and the read tools still read
+  `getFinanceMetrics` and slice by business; `sliceFor` by divisions, the new read tools
+  (`get_budget_room`, `get_metric_series`, `get_company_overview`…), the SKILL.md "You can read" lists,
+  `READ_TOOL_NAMES`/`SHAPES`, `DOOR_READS` and the `PLAN_SYSTEM` rules ("period standing means as of the
+  data date", seasonal budget = cap × last-year index).
+- `getFinanceMetrics` under version 2 is not an alias of `getDivisionMetrics('finance')` (the design said
+  alias): it stays the unsliced read so the rounds and read tools, which slice it by business, keep every
+  department's numbers. Make it the finance slice once the worker reads divisions.
+- The other new sources (repairs, invoices, messages, checkouts, inventory, …), their standing counts and
+  attention rules; contribution and refund rate.
+
+### What the merge must know
+
+- **Outside packages/data:** `packages/contracts/src/ports.ts` (`MetricInfo.layer?`, additive);
+  `scripts/zetaris-setup.ts` (the v2 proof). Nothing in the worker, profiles or door changed this slice.
+- Under version 2 a metric's `period` may be `standing` and its `source.view` names the layer view or mart
+  table it came from (not the top-level `view`).
+- Zetaris now also holds `fortune_hq_v2.{derived,standing}_metrics`, the twelve
+  `fortune_hq_v2.<division>_<layer>_metrics` views and the four `fortune_demo_v2_*_mart` marts. Mart table
+  names are per mart (four `period_metrics` coexist). Nothing of version 1 was named or changed.
+- Env: unchanged (`FAHQ_DATA_VERSION`, `FAHQ_SOURCE_PORT_V2`). No migration.

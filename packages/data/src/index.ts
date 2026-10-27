@@ -68,6 +68,20 @@ export function createZetarisDataPort(
   const ids = (layer: LayerQuery['layer'], division?: Division) =>
     new Set(division ? divisionIds(division, layer) : CATALOG_V2.filter((m) => m.layer === layer).map((m) => m.id));
 
+  /**
+   * The unsliced read's statements and hash. Version 1: one statement on its view, hashed exactly as at
+   * bb29578 (a plan's provenance does not move). Version 2: the three layer views, one hash over their
+   * bodies and the three queries.
+   */
+  function financeRead(p: Period): { queries: Ask[]; queryHash: string } {
+    if (version === 1) {
+      const sql = financeQuery(p, 1);
+      return { queries: [{ sql, table: view, period: p, allowed: new Set(served.keys()) }], queryHash: sha256(`${financeViewBody(1)}\n--\n${sql}`) };
+    }
+    const layered = layerQueries(p);
+    return { queries: layered.map((q) => ({ ...q, allowed: ids(q.layer) })), queryHash: sha256(layerHashText(layered)) };
+  }
+
   const base: DataPort = {
     catalog: defs.map(({ id, label, unit, business, divisions, layer }): MetricInfo => ({ id, label, unit, business, divisions, layer })),
     periods,
@@ -83,13 +97,7 @@ export function createZetarisDataPort(
     },
 
     async getFinanceMetrics({ asOf, period }) {
-      const p = servedPeriod(period);
-      // Version 1: one statement on its view, hashed exactly as before (a plan's provenance does not move).
-      // Version 2: the three layer views, unsliced, one hash over their bodies and the three queries.
-      const queries = version === 1
-        ? [{ sql: financeQuery(p, 1), table: view, period: p, allowed: new Set(served.keys()) }]
-        : layerQueries(p).map((q) => ({ ...q, allowed: ids(q.layer) }));
-      const queryHash = sha256(version === 1 ? `${financeViewBody(1)}\n--\n${queries[0]!.sql}` : layerHashText(layerQueries(p)));
+      const { queries, queryHash } = financeRead(servedPeriod(period));
       const metrics = await read(queries, asOf, queryHash);
       if (metrics.length === 0) throw new Error(`Zetaris returned no finance metrics for ${period}`);
       return { metrics, queryHash, view };
