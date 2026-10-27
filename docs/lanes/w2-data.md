@@ -189,4 +189,81 @@ All three items were built (4 and 5 first, then 6) and proved live in one rebuil
   **Failed:** the online division read and the online mart's derived table alone (dropped connection after five minutes).
   Not run in the time box: the other nine periods of the period view, the full `zetaris-setup.ts` comparison.
 - Not run: the full `flock ~/.fahq-db-test.lock npm test` (it would have competed with the live proof for the machine
-  and the source port 18121); run it at the merge.
+  and the source port 18121); run it at the merge. (Slice 3 ran it on slice 2's last commit: see slice 3, "Proof".)
+
+## Slice 3 of 3: the salon sources (items 7 and 8), 2026-10-27 14:23 ET onward
+
+The slice started at 14:23 ET, 22 minutes before the 14:45 stop. **Items 7 and 8 are not built.** Any new source
+changes the version 2 period view body, which `frozen-v1.test.ts` pins as the body last built live (`8e8feb1f…`, the
+plan's provenance hash). In slice 2 the live proof of a new body took 12:19–14:08 ET and the derived layer still fails
+(the BLOCKER above), so a new source could not be proved live before the stop, and moving the pin without a live build
+would make it false. The slice therefore kept the branch green and proved it: typecheck and the full suite under the
+lock on slice 2's last commit (slice 2 had not run the suite), and wrote the build plan below. No code changed.
+
+### Not done (all of the slice)
+
+- Item 7: `client_id` (`demo-sc-…`) on version 2 appointments, `fortune_demo_salon.product_sales` (with Mazali),
+  `fortune_demo_salon.sale_events`, the five segments that partition the active clients, their metrics, row read
+  `clients`, read tool `get_salon_clients` (owner, salon).
+- Item 8: `fortune_demo_salon.personalization` with its stage dates, its metrics, `m:salon.personalization.avg_days`
+  and `m:salon.repairs.avg_days` (unit `days`, `planUse: false`), the act rule "personalization open over 21 days",
+  row read `personalization`, read tool `get_personalization_tickets` (owner, salon).
+- The door (`DOOR_READS`), `SHAPES`/`READ_TOOL_NAMES`, the salon and owner SKILL.md "You can read" lines, the ask-wall
+  test over the new ids, `docs/data.md`, the live proof.
+
+### Build plan for items 7 and 8 (what the next builder needs)
+
+Follow slice 2's pattern (`web.ts` and `customers.ts`, their tests `web.test.ts` and `customers.test.ts`). Item 8 first:
+it is one source and carries the only act rule.
+
+1. **Personalization (item 8).** A new `packages/data/src/salon.ts` with `SALON_SOURCE_NAMES` and one source
+   definition each (`validSql` and `valid` saying the same thing, one planted row each, as `operations.ts` does for
+   `repairs`). Rows from their own seeded stream in `synthetic.ts`; a route in `source-server.ts`; the REST table and
+   row view in `zetaris-objects.ts` under the existing database `FORTUNE_DEMO_SALON` (it already holds
+   `appointments_v2`); the sources joined to the period view's list in `finance-sql.ts` (the version 2 layer's
+   `sources`). Stage dates must be ordered (received ≤ priced ≤ paid ≤ started ≤ video sent ≤ approved ≤ shipped,
+   NULL from the first stage not reached); that is the data-quality rule.
+   - Metrics: `received.count`, `revenue` (fee on paid tickets), `within_21d.share` (shipped within 21 days of
+     arrival, over shipped), `online_intake.share`; standing `open.count`, `open_over_21d.count` (in `layers.ts`, beside
+     the repairs' standing pair).
+   - **Spec gap to decide:** the spec says "average days per stage" but names one id each,
+     `m:salon.personalization.avg_days` and `m:salon.repairs.avg_days`. The repairs source has only `received_date`
+     and `completed_date`, so its average can only be arrival to completion. Proposed: both ids mean arrival to
+     completion (shipped for personalization), and the days of each stage appear only in the `personalization` row read.
+   - Attention: "Personalization has been open longer than three weeks." (act), in `divisions.ts` beside the repairs rule.
+2. **Salon clients and product sales (item 7).** `client_id` on version 2 appointments from a stream that only reads the
+   rows (as slice 2's `customers` stream does for orders), so the base-values hash (the 1,224 values of `16449bf`)
+   still holds. Product sales and sale events with their own streams. Segments standing over the 365 days to the data
+   date, in the spec's order; the test must show every active client in exactly one segment (segment counts add up to
+   `m:salon.clients.active.count`, segment revenue adds up to the clients' 365-day spend). Salon product money is never
+   added to online money.
+   - The ask wall: `m:salon.clients.*` to salon and hq only (never finance), `m:salon.products.{revenue,mazali.revenue}`
+     to salon and finance, `sale_share` to salon only, and online reads no `m:salon.*`. Extend `channels.test.ts`,
+     "the asks of docs/wave2.md", to every new id.
+3. **Reads and doors.** `RowRead` gains `clients` and `personalization` (`ports.ts`); `rows.ts` as for `repairs`;
+   tools in `apps/worker/src/read-tools.ts`, `DOOR_READS` in `packages/codemode/src/brain-mcp.ts`, `SHAPES` and
+   `READ_TOOL_NAMES` in `packages/profiles/src/index.ts`; the hard-coded tool lists in the profile, door, read-tool and
+   departments tests. **Skill line budget:** the salon SKILL.md body is at 47 lines, so the two new reads must share one
+   line (or merge two existing lines); owner is at 46.
+4. **Proof.** Typecheck; `npx vitest run packages/data packages/contracts` and the touched tests; the full suite under
+   the lock; then the live rebuild (`npx tsx scripts/zetaris-setup.ts --v2`) and the new pin. The derived layer's
+   five-minute failure (slice 2's BLOCKER) must be fixed first, or the standing salon metrics cannot be proved live
+   through the derived mart.
+5. **`docs/data.md`:** every new source, metric, rule and read, as slices 1 and 2 did.
+
+### What the merge must know
+
+- Nothing changed in code, contracts, the migration, Zetaris or the shared database in this slice; the branch head
+  before the notes was `7fba53e`.
+- Everything slices 1 and 2 said still stands, the BLOCKER above first.
+- The salon worker rows `salon.clients` and `salon.turnaround` (W1's registry) have no data behind
+  `m:salon.clients.*`, `m:salon.products.*` or `m:salon.personalization.*` yet; the turnaround worker can read the
+  existing `m:salon.repairs.*` metrics and the `repairs` row read today.
+
+### Proof
+
+- `npm run typecheck` clean on `7fba53e` (14:26 ET).
+- `npx vitest run packages/data packages/contracts apps/worker/test/read-tools.test.ts packages/profiles
+  packages/codemode/test/doors.test.ts` on `7fba53e` (14:28–14:30 ET, no database): 29 files, 482 tests, all passed.
+- Full `flock ~/.fahq-db-test.lock npm test` on `7fba53e`: queued at 14:26 ET behind the legal and manager lanes'
+  suites (result below when it ran).
