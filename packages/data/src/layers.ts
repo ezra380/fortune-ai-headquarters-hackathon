@@ -3,6 +3,7 @@ import {
   CHANNEL_LABEL, CONTAINER_V2, PERIOD_VIEW_V2, aggSql, aggregate, computeAll, quoted, round, sourceRows, specOf, unpivot,
   type MetricAbout, type MetricDef, type Source, type SourceRows,
 } from './finance-sql.ts';
+import { CHANNEL_STANDING } from './channels.ts';
 import { OPS_STANDING } from './operations.ts';
 import { AD_CHANNELS, AS_OF, LAST_WEEK } from './synthetic.ts';
 
@@ -103,6 +104,8 @@ export const STANDING_METRICS: MetricDef[] = [
   },
   // The day-to-day systems: the inbox's waiting messages, open and late repairs, what is owed to suppliers.
   ...OPS_STANDING,
+  // The channels (wave 2): each marketplace warehouse's stock on the data date.
+  ...CHANNEL_STANDING,
 ];
 
 // ---- SQL ----------------------------------------------------------------------------------

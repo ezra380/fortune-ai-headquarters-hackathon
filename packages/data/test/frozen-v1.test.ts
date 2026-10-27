@@ -65,10 +65,11 @@ describe('version 1 is frozen at bb29578', () => {
 describe('version 2 leaves those numbers where they were', () => {
   const year = generateYear();
 
-  // Rebuilt live in slice 3 (2026-10-27, from 08:56 ET) with the day-to-day systems and the appointments' new
-  // columns; slice 1's body (574bd04, 07:58 ET) was 2747af1d…. A change here needs `zetaris-setup.ts --v2 --recreate`.
+  // Rebuilt live in wave 2, slice 1 (2026-10-27, from 11:24 ET) with the channels (marketplaces, email split, order
+  // lines); slice 3's body was e8198a3c…, slice 1's (574bd04, 07:58 ET) 2747af1d…. A change here needs
+  // `zetaris-setup.ts --v2 --recreate`.
   it("keeps version 2's period view as it was last built live in Zetaris, so the layers built on it read the same view", () => {
-    expect(sha(financeViewBody(2))).toBe('e8198a3cc4b9230d2bb1849e5acef25fe91c1f5f5e7d57d4c1b3a88d0398a7e3');
+    expect(sha(financeViewBody(2))).toBe('f34a4637e0982b29b346a530e25be2e784e58c11abdca6b1292076eda2dcf9e7');
   });
 
   it("carries version 1's rows unchanged among its own: every version 1 column and value (version 2 may add columns)", () => {

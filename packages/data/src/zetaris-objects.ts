@@ -17,6 +17,7 @@ export const V2_DATABASES = [
   // Created live in slice 1 with this description; it also holds the supplier invoices now.
   { db: 'FORTUNE_DEMO_FINANCE', about: 'Fortune demo finance owner budget sheet, synthetic' },
   { db: 'FORTUNE_DEMO_SUPPORT', about: 'Fortune demo support inbox, message times and topics only, synthetic' },
+  { db: 'FORTUNE_DEMO_MARKETPLACE', about: 'Fortune demo Amazon and Walmart sales, ads and warehouse stock, synthetic' },
 ] as const;
 
 export const V2_TABLES = [
@@ -69,6 +70,27 @@ export const V2_TABLES = [
   {
     db: 'FORTUNE_DEMO_FINANCE', table: 'invoices', path: '/v2/finance/invoices', view: 'finance_invoices',
     cols: ['invoice_id', 'supplier_id', 'business', 'product_line', 'invoice_date', 'due_date', 'paid_date', 'amount_usd'],
+  },
+  // The channels (wave 2): the marketplaces (their own system and database), the email split, the order lines.
+  {
+    db: 'FORTUNE_DEMO_MARKETPLACE', table: 'sales', path: '/v2/marketplace/sales', view: 'marketplace_sales',
+    cols: ['sale_id', 'sale_date', 'marketplace', 'sku', 'product_line', 'units', 'revenue_usd', 'fees_usd'],
+  },
+  {
+    db: 'FORTUNE_DEMO_MARKETPLACE', table: 'ads', path: '/v2/marketplace/ads', view: 'marketplace_ads',
+    cols: ['ad_id', 'ad_date', 'channel', 'keyword', 'spend_usd', 'clicks', 'conversions', 'revenue_usd'],
+  },
+  {
+    db: 'FORTUNE_DEMO_MARKETPLACE', table: 'stock', path: '/v2/marketplace/stock', view: 'marketplace_stock',
+    cols: ['stock_id', 'snapshot_date', 'marketplace', 'sku', 'product_line', 'on_hand', 'inbound', 'units_28d'],
+  },
+  {
+    db: 'FORTUNE_DEMO_MARKETING', table: 'email_messages', path: '/v2/marketing/email_messages', view: 'marketing_email_messages',
+    cols: ['message_id', 'email_id', 'send_date', 'kind', 'name', 'step', 'sends', 'revenue_usd', 'unsubscribes'],
+  },
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'order_lines', path: '/v2/online/order_lines', view: 'online_order_lines',
+    cols: ['line_id', 'order_id', 'order_date', 'sku', 'product_line', 'units', 'price_usd', 'unit_cost_usd', 'refunded_usd'],
   },
 ] as const;
 

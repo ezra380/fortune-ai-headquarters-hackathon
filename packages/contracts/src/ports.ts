@@ -23,12 +23,17 @@ export type DivisionData = {
  * - invoices: unpaid supplier invoices: all open, overdue, or due in the next 30 days; one business or both
  * - waiting: customer messages from the last week still waiting for a first answer, older than N hours
  * - low_stock: products at or below their reorder point on the data date, most viewed first
+ * - marketplace_stock: each Amazon and Walmart warehouse listing on the data date (all, or only those out of stock or
+ *   under three weeks of cover), one marketplace or both
+ * - products: each store product's units, money, refunds and views for a period, by profit, best or worst first
  */
 export type RowRead =
   | { table: 'repairs'; status: 'open' | 'late' | 'done' }
   | { table: 'invoices'; status: 'open' | 'overdue' | 'due_30d'; business?: 'salon' | 'online' }
   | { table: 'waiting'; olderThanHours: number }
-  | { table: 'low_stock' };
+  | { table: 'low_stock' }
+  | { table: 'marketplace_stock'; status: 'all' | 'low'; marketplace?: 'amazon' | 'walmart' }
+  | { table: 'products'; period: Period; sort: 'best' | 'worst' };
 
 /**
  * The rows of one RowRead (every matching row; the port refuses a read too large to return whole) and their

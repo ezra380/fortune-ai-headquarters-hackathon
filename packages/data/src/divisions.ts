@@ -153,6 +153,9 @@ export const ATTENTION: readonly AttentionRule[] = [
   { metrics: /^m:online\.inventory\.wanted_low_stock\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Products customers are looking at are low on stock.' },
   { metrics: /^m:salon\.repairs\.open_over_14d\.count$/, when: (v) => v > 0, level: 'act', rule: 'Repairs have been open longer than two weeks.' },
   { metrics: /^m:(salon|online)\.ap\.overdue\.count$/, when: (v) => v > 0, level: 'act', rule: 'Supplier invoices are past their due date and unpaid.' },
+  // Wave 2: the marketplace warehouses.
+  { metrics: /^m:online\.(amazon|walmart)\.stock\.out\.count$/, when: (v) => v > 0, level: 'act', rule: 'Products are out of stock at a marketplace warehouse.' },
+  { metrics: /^m:online\.(amazon|walmart)\.stock\.low_cover\.count$/, when: (v) => v > 0, level: 'watch', rule: 'Products at a marketplace warehouse have less than three weeks of stock left.' },
 ];
 
 /** The rules that fire on these metrics, in metric order. Only metrics present can fire; nothing is computed. */

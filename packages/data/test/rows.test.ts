@@ -22,6 +22,8 @@ const READS: RowRead[] = [
   { table: 'repairs', status: 'open' }, { table: 'repairs', status: 'late' }, { table: 'repairs', status: 'done' },
   { table: 'invoices', status: 'open' }, { table: 'invoices', status: 'overdue', business: 'online' }, { table: 'invoices', status: 'due_30d' },
   { table: 'waiting', olderThanHours: 0 }, { table: 'low_stock' },
+  { table: 'marketplace_stock', status: 'all' }, { table: 'marketplace_stock', status: 'low', marketplace: 'walmart' },
+  { table: 'products', period: '2026-09', sort: 'best' }, { table: 'products', period: '2026-10-mtd', sort: 'worst' },
 ];
 
 /** Zetaris's answer to a read: the oracle's rows (before any after-read filter) as strings in column order, '' for NULL. */
@@ -60,6 +62,42 @@ describe('row reads: the rows behind the standing numbers', () => {
     });
   });
 
+  it("count the marketplace warehouses' stock as the standing numbers do: out of stock, low on cover, inbound", () => {
+    const totals = (read: RowRead) => oracleRows(year, read).totals as Record<string, number>;
+    const all = totals({ table: 'marketplace_stock', status: 'all' });
+    expect(all.outOfStock).toBe(standing('m:online.amazon.stock.out.count') + standing('m:online.walmart.stock.out.count'));
+    expect(all.lowCover).toBe(standing('m:online.amazon.stock.low_cover.count') + standing('m:online.walmart.stock.low_cover.count'));
+    expect(all.inboundUnits).toBe(standing('m:online.marketplace.inbound_units'));
+    for (const m of ['amazon', 'walmart'] as const) {
+      const low = oracleRows(year, { table: 'marketplace_stock', status: 'low', marketplace: m });
+      expect(low.totals).toMatchObject({ count: standing(`m:online.${m}.stock.out.count`) + standing(`m:online.${m}.stock.low_cover.count`), outOfStock: standing(`m:online.${m}.stock.out.count`), lowCover: standing(`m:online.${m}.stock.low_cover.count`) });
+      expect(low.rows.every((r) => r.marketplace === m && r.status !== 'ok')).toBe(true);
+    }
+    const out = oracleRows(year, { table: 'marketplace_stock', status: 'low' }).rows.find((r) => r.status === 'out')!;
+    expect(out).toMatchObject({ onHand: 0, daysOfCover: Number(out.units28d) > 0 ? 0 : null });
+  });
+
+  it("add each product's money up to the period's numbers, best or worst first", () => {
+    for (const period of ['2026-09', '2026-10-mtd'] as const) {
+      const at = (id: string) => layers.period.get(period)!.get(id)!;
+      const best = oracleRows(year, { table: 'products', period, sort: 'best' });
+      const t = best.totals as Record<string, number>;
+      expect(t.revenueUsd).toBeCloseTo(at('m:online.revenue.total'), 2);
+      expect(t.costUsd).toBeCloseTo(at('m:online.products.cogs'), 2);
+      expect(t.losing).toBe(at('m:online.products.negative_margin.count'));
+      expect(t.units).toBe(year.online.orderLines.filter((l) => l.units > 0 && l.order_date.slice(0, 7) === period.slice(0, 7)).reduce((s, l) => s + l.units, 0));
+      const profits = best.rows.map((r) => Number(r.profitUsd));
+      expect(profits).toEqual([...profits].sort((a, b) => b - a));
+      const worst = oracleRows(year, { table: 'products', period, sort: 'worst' });
+      expect(worst.rows.map((r) => r.sku)).toEqual(best.rows.map((r) => r.sku).reverse());
+      expect(worst.totals).toEqual(best.totals);
+      for (const r of best.rows) {
+        expect(Number(r.profitUsd)).toBeCloseTo(Number(r.revenueUsd) - Number(r.refundsUsd) - Number(r.costUsd), 2);
+        expect(r.views7d).toEqual(expect.any(Number));
+      }
+    }
+  });
+
   it('keep money per business: an invoice read for one business has only its total, a read for both has two', () => {
     const one = oracleRows(year, { table: 'invoices', status: 'open', business: 'salon' });
     expect(Object.keys(one.totals)).toEqual(['salon']);
@@ -93,6 +131,13 @@ describe('row reads: the rows behind the standing numbers', () => {
     expect(bad({ table: 'waiting', olderThanHours: -1 })).toThrow('olderThanHours must be from 0 to 720');
     expect(bad({ table: 'waiting', olderThanHours: Number.NaN })).toThrow('olderThanHours');
     expect(bad({ table: 'customers' })).toThrow('row read "customers": there is no such row table');
+    expect(bad({ table: 'marketplace_stock', status: 'some' })).toThrow('status must be one of all, low');
+    expect(bad({ table: 'marketplace_stock', status: 'all', marketplace: 'ebay' })).toThrow('marketplace must be amazon or walmart');
+    expect(bad({ table: 'products', period: "2026-09' OR '1'='1", sort: 'best' })).toThrow('period must be one of');
+    expect(bad({ table: 'products', period: '2026-09', sort: 'top' })).toThrow('sort must be best or worst');
+    // The products read takes its period from the fixed list, and its order is one of two.
+    expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'worst' }))).toMatch(/order_date BETWEEN '2026-09-01' AND '2026-09-30'.* snapshot_date = '2026-09-30'.* ORDER BY c6, c0$/);
+    expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'best' }))).toMatch(/ORDER BY c6 DESC, c0$/);
     expect(checkRowRead({ table: 'invoices', status: 'open', extra: 'x' } as never)).toEqual({ table: 'invoices', status: 'open' });
   });
 });

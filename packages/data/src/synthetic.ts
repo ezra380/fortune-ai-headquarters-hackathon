@@ -8,7 +8,9 @@ import type { Period } from '@fahq/contracts';
 // history before it (generateHistory), Meta as a third ad channel and the finance owner's monthly budget
 // sheet (generateDivisions), and the day-to-day systems each division runs on (generateOperations): order
 // fees and shipping labels, refunds, abandoned checkouts, inventory with product interest, the support
-// inbox, salon repair tickets and supplier invoices.
+// inbox, salon repair tickets and supplier invoices. Wave 2 adds the channels (generateChannels): Amazon's and
+// Walmart's sales, Walmart's ads and both warehouses' stock, the email rows split into their messages, and each
+// store order split into its lines.
 // No source has a medical or hair-loss field or value (Fortune rule 6), and the support inbox has no body.
 
 export type { Period };
@@ -59,13 +61,25 @@ export const BOOKING_CHANNELS = ['online', 'phone', 'walk_in'] as const;
 /** The two businesses a supplier invoice can belong to; an invoice is never split between them. */
 export const INVOICE_BUSINESSES = ['salon', 'online'] as const;
 export const SUPPLIERS = ['demo-sup-s1', 'demo-sup-s2', 'demo-sup-s3', 'demo-sup-s4'] as const;
+/** The marketplaces the store also sells on, each from its own warehouse (Amazon FBA, Walmart WFS). */
+export const MARKETPLACES = ['amazon', 'walmart'] as const;
+export type Marketplace = (typeof MARKETPLACES)[number];
+/** Each email flow's messages in order, and the weekly campaign: the fixed list of names an email row may carry. */
+export const EMAIL_STEPS: Record<string, readonly string[]> = {
+  'Welcome (demo)': ['Welcome: hello (demo)', 'Welcome: the three lines (demo)', 'Welcome: meet the salon (demo)'],
+  'Checkout recovery (demo)': ['Checkout recovery: reminder (demo)', 'Checkout recovery: questions answered (demo)'],
+  'Post-purchase care (demo)': ['Care: first wash (demo)', 'Care: styling at home (demo)'],
+  'Weekly edit (demo)': ['Weekly edit (demo)'],
+};
+export const EMAIL_NAMES = Object.keys(EMAIL_STEPS);
 
 /** Every enumerated column of every source, by column name, with its allowed values (the no-medical guard reads it). */
 export const SOURCE_ENUMS = {
-  product_line: PRODUCT_LINES, channel: [...ONLINE_CHANNELS, ...AD_CHANNELS, ...MESSAGE_CHANNELS, ...REPAIR_CHANNELS],
+  product_line: PRODUCT_LINES, channel: [...ONLINE_CHANNELS, ...AD_CHANNELS, ...MESSAGE_CHANNELS, ...REPAIR_CHANNELS, 'walmart'],
   service: SALON_SERVICES, reason: REFUND_REASONS, recovered_via: RECOVERY_CHANNELS, direction: MESSAGE_DIRECTIONS, booked_via: BOOKING_CHANNELS,
   intent: MESSAGE_INTENTS, repair_type: REPAIR_TYPES, status: [...REPAIR_STATUSES, 'completed', 'no_show', 'approved', 'proposed'],
   location: SALON_LOCATIONS, business: INVOICE_BUSINESSES, supplier_id: SUPPLIERS, kind: ['flow', 'campaign'],
+  marketplace: MARKETPLACES, name: EMAIL_NAMES, step: Object.values(EMAIL_STEPS).flat(),
 } as const;
 
 /**
@@ -133,6 +147,27 @@ export type SupplierInvoice = {
   invoice_id: string; supplier_id: string; business: (typeof INVOICE_BUSINESSES)[number]; product_line: string;
   invoice_date: string; due_date: string; paid_date: string | null; amount_usd: number;
 };
+/** One marketplace order of one listing, sold and shipped from the marketplace's warehouse: what it brought in and the marketplace's fees. */
+export type MarketplaceSale = {
+  sale_id: string; sale_date: string; marketplace: Marketplace; sku: string; product_line: string; units: number; revenue_usd: number; fees_usd: number;
+};
+/** A day of one Walmart ad keyword (the marketplace's own ads; Amazon's are among the marketing ads since version 1). */
+export type MarketplaceAdDay = Omit<AdDay, 'channel'> & { channel: 'walmart' };
+/** A listing's stock in the marketplace's warehouse on a snapshot date: on hand, on its way in, and units sold in the 28 days to it. */
+export type MarketplaceStock = {
+  stock_id: string; snapshot_date: string; marketplace: Marketplace; sku: string; product_line: string; on_hand: number; inbound: number; units_28d: number;
+};
+/** One message of a flow, or a campaign, sent on one day: its part of that day's email row, and the unsubscribes it caused. */
+export type EmailMessage = {
+  message_id: string; email_id: string; send_date: string; kind: 'flow' | 'campaign'; name: string; step: string; sends: number; revenue_usd: number; unsubscribes: number;
+};
+/**
+ * One unit of one product in a store order: what it sold for (its part of the order's revenue after the discount),
+ * its cost, and what has been refunded on it by the data date. An order of three accessories is three lines.
+ */
+export type OrderLine = {
+  line_id: string; order_id: string; order_date: string; sku: string; product_line: string; units: number; price_usd: number; unit_cost_usd: number; refunded_usd: number;
+};
 export type SyntheticBusiness = {
   generatedFor: string; seed: number;
   online: { orders: OnlineOrder[] };
@@ -144,12 +179,20 @@ export type Operations = {
   orderCosts: OrderCost[]; refunds: Refund[]; checkouts: Checkout[]; inventory: InventorySnapshot[];
   messages: SupportMessage[]; repairs: RepairTicket[]; invoices: SupplierInvoice[];
 };
-/** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet and the operations. */
+/** The selling and marketing sources wave 2 adds for Finance (generateChannels). */
+export type Channels = {
+  marketplace: { sales: MarketplaceSale[]; ads: MarketplaceAdDay[]; stock: MarketplaceStock[] };
+  emailMessages: EmailMessage[];
+  orderLines: OrderLine[];
+};
+/** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet, the operations and the channels. */
 export type SyntheticYear = Omit<SyntheticBusiness, 'salon'> & {
-  online: Pick<Operations, 'orderCosts' | 'refunds' | 'checkouts' | 'inventory'>;
+  online: Pick<Operations, 'orderCosts' | 'refunds' | 'checkouts' | 'inventory'> & Pick<Channels, 'orderLines'>;
   salon: { appointments: SalonVisit[] } & Pick<Operations, 'repairs'>;
   support: Pick<Operations, 'messages'>;
   finance: { budgets: BudgetRow[] } & Pick<Operations, 'invoices'>;
+  marketing: Pick<Channels, 'emailMessages'>;
+  marketplace: Channels['marketplace'];
 };
 
 /** mulberry32: tiny, fast, deterministic. */
@@ -629,20 +672,201 @@ export function generateOperations(orders: readonly OnlineOrder[], seed = DIVISI
   };
 }
 
-/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions and generateOperations add. */
+// ---- The channels (wave 2, for Finance) ---------------------------------------------------
+// Amazon and Walmart sell some of the store's products from their own warehouses; the email rows split into the
+// flows' messages and the campaign; each store order splits into its lines. Each source draws from its own named
+// stream. The email split and the order lines only re-divide rows that already exist, so they add up to them to
+// the cent; every source has exactly one planted bad row (ids demo-*-bad-*).
+
+/** A store product's id, as the inventory names it: the line's first letter and a two-digit number. */
+const skuOf = (line: (typeof PRODUCT_LINES)[number], i: number) => `demo-sku-${line[0]}${String(i + 1).padStart(2, '0')}`;
+const lineOfSku = (sku: string) => PRODUCT_LINES.find((l) => sku.startsWith(`demo-sku-${l[0]}`))!;
+const skusOf = (line: (typeof PRODUCT_LINES)[number], n: number) => Array.from({ length: n }, (_, i) => skuOf(line, i));
+const isPlanted = (id: string) => id.includes('-bad-');
+
+/** What each marketplace lists (invented): the accessories on both, four Tuni pieces on Amazon too. */
+export const LISTINGS: Record<Marketplace, readonly string[]> = {
+  amazon: [...skusOf('accessories', 16), ...skusOf('tuni', 4)],
+  walmart: skusOf('accessories', 10),
+};
+
+/** Splits a whole number by weights (the last part takes what is left), so the parts add up to it exactly. */
+function split(total: number, weights: readonly number[]): number[] {
+  const all = weights.reduce((t, w) => t + w, 0);
+  const parts = weights.map((w) => Math.floor((total * w) / all));
+  parts[parts.length - 1]! += total - parts.reduce((t, p) => t + p, 0);
+  return parts;
+}
+
+/** Spreads a whole number over parts in proportion to their caps, never above a cap (the total is at most the caps' sum). */
+function spread(total: number, caps: readonly number[]): number[] {
+  const all = caps.reduce((t, c) => t + c, 0);
+  if (total > all) throw new Error('spread: more than the parts can hold');
+  const out = caps.map((c) => (all === 0 ? 0 : Math.floor((total * c) / all)));
+  let left = total - out.reduce((t, x) => t + x, 0);
+  for (let i = 0; left > 0; i = (i + 1) % caps.length) if (out[i]! < caps[i]!) { out[i]! += 1; left -= 1; }
+  return out;
+}
+
+const toCents = (usd: number) => Math.round(usd * 100);
+
+/**
+ * Each listing's orders at the store's season: its usual units a day, price and warehouse fee per unit are drawn
+ * once (invented); the marketplace keeps a referral fee of 15% plus the fee per unit. The bad row is a fee
+ * reversal exported as a negative fee.
+ */
+function marketplaceSales(seed: number): MarketplaceSale[] {
+  const { r, between, count } = drawer(streamSeed(seed, 'marketplace_sales'));
+  const listings = MARKETPLACES.flatMap((marketplace) => LISTINGS[marketplace].map((sku) => {
+    const line = lineOfSku(sku);
+    const piece = line !== 'accessories';
+    const rate = piece ? between(0.03, 0.08) : marketplace === 'amazon' ? between(0.15, 0.6) : between(0.05, 0.3);
+    return { marketplace, sku, line, rate, price: cents(between(LINE[line].price[0], LINE[line].price[1])), perUnit: piece ? between(7, 9.5) : between(3.8, 6.2) };
+  }));
+  const out: MarketplaceSale[] = [];
+  for (const day of YEAR_DAYS()) {
+    for (const l of listings) {
+      for (let i = count(l.rate * seasonOf(day).online); i > 0; i--) {
+        const units = l.line === 'accessories' && r() < 0.2 ? 2 : 1;
+        const revenue = cents(l.price * units);
+        out.push({
+          sale_id: seq('demo-mk-s', out.length + 1), sale_date: day, marketplace: l.marketplace, sku: l.sku, product_line: l.line, units,
+          revenue_usd: revenue, fees_usd: cents(revenue * 0.15 + units * l.perUnit),
+        });
+      }
+    }
+  }
+  out.push({ sale_id: 'demo-mk-bad-fees', sale_date: '2026-06-09', marketplace: 'walmart', sku: 'demo-sku-a02', product_line: 'accessories', units: 1, revenue_usd: 34.5, fees_usd: -9.9 });
+  return out;
+}
+
+/** Walmart's own ads, two keywords a day at the store's season (invented); the bad row is a negative spend. */
+function walmartAds(seed: number): MarketplaceAdDay[] {
+  const { r, between } = drawer(streamSeed(seed, 'walmart_ads'));
+  const out: MarketplaceAdDay[] = [];
+  for (const day of YEAR_DAYS()) {
+    for (const keyword of ['demo wig care kit', 'demo wig stand']) {
+      const spend = cents(between(1.5, 6) * seasonOf(day).online);
+      const clicks = Math.max(1, Math.round(spend / between(0.4, 1.1)));
+      const conversions = r() < 0.22 ? 1 : 0;
+      out.push({ ad_id: seq('demo-wa-w', out.length + 1), ad_date: day, channel: 'walmart', keyword, spend_usd: spend, clicks, conversions, revenue_usd: conversions ? cents(between(20, 75)) : 0 });
+    }
+  }
+  out.push({ ad_id: 'demo-wa-bad-negative', ad_date: '2026-01-21', channel: 'walmart', keyword: 'demo wig stand', spend_usd: -14.2, clicks: 3, conversions: 0, revenue_usd: 0 });
+  return out;
+}
+
+/**
+ * Each listing's warehouse stock on every period's last day (the month so far: the data date), as the marketplace's
+ * inventory report gives it: units sold in the 28 days to that day (from the sales, the planted row left out), on
+ * hand (sometimes none) and, when it runs low, a shipment on its way in.
+ */
+function marketplaceStock(seed: number, sales: readonly MarketplaceSale[]): MarketplaceStock[] {
+  const { r, between } = drawer(streamSeed(seed, 'marketplace_stock'));
+  const sold = sales.filter((s) => !isPlanted(s.sale_id));
+  const out: MarketplaceStock[] = [];
+  for (const { to: day } of Object.values(PERIODS)) {
+    const from = addDays(day, -27);
+    for (const marketplace of MARKETPLACES) {
+      for (const sku of LISTINGS[marketplace]) {
+        const units_28d = sold.filter((s) => s.marketplace === marketplace && s.sku === sku && s.sale_date >= from && s.sale_date <= day).reduce((t, s) => t + s.units, 0);
+        const [outDraw, cover, shipDraw, shipDays, idle] = [r(), between(4, 75), r(), between(20, 45), between(1, 8)];
+        const daily = units_28d / 28;
+        const on_hand = outDraw < 0.07 ? 0 : daily === 0 ? Math.round(idle) : Math.max(1, Math.round(daily * cover));
+        const inbound = (on_hand === 0 || on_hand < daily * 25) && shipDraw < 0.55 ? Math.round(daily * shipDays) + 2 : 0;
+        out.push({ stock_id: seq('demo-ms-k', out.length + 1), snapshot_date: day, marketplace, sku, product_line: lineOfSku(sku), on_hand, inbound, units_28d });
+      }
+    }
+  }
+  out.push({ stock_id: 'demo-ms-bad-negative', snapshot_date: '2026-05-31', marketplace: 'amazon', sku: 'demo-sku-a03', product_line: 'accessories', on_hand: -4, inbound: 0, units_28d: 9 });
+  return out;
+}
+
+/**
+ * Each email row split into the messages that made it (a flow's steps; a campaign is one message): its sends and
+ * revenue to the cent, and the unsubscribes each message caused (invented rates). The bad row has negative sends.
+ */
+function emailMessages(seed: number, email: readonly EmailDay[]): EmailMessage[] {
+  const { between } = drawer(streamSeed(seed, 'email_messages'));
+  const out: EmailMessage[] = [];
+  for (const e of email) {
+    const steps = EMAIL_STEPS[e.name]!;
+    const weights = steps.map(() => between(0.5, 1.5));
+    const [sends, revenue] = [split(e.sends, weights), split(toCents(e.revenue_usd), weights)];
+    const [lo, hi] = e.kind === 'campaign' ? [0.001, 0.004] : [0.002, 0.008];
+    steps.forEach((step, i) => {
+      const unsubscribes = Math.min(sends[i]!, Math.round(sends[i]! * between(lo, hi)));
+      out.push({ message_id: seq('demo-ems-e', out.length + 1), email_id: e.email_id, send_date: e.send_date, kind: e.kind, name: e.name, step, sends: sends[i]!, revenue_usd: revenue[i]! / 100, unsubscribes });
+    });
+  }
+  const march = email.find((e) => e.send_date >= '2026-03-10' && e.name === 'Welcome (demo)')!;
+  out.push({ message_id: 'demo-ems-bad-negative', email_id: march.email_id, send_date: march.send_date, kind: 'flow', name: march.name, step: EMAIL_STEPS[march.name]![0]!, sends: -40, revenue_usd: 0, unsubscribes: 0 });
+  return out;
+}
+
+/**
+ * Each sale's lines, one per unit (distinct products of its line), with the order's revenue, cost and refunds (as
+ * of the data date) shared out by weight to the cent, so a line never carries more refund than it sold for. The bad
+ * row is a line of no units.
+ */
+function orderLines(seed: number, orders: readonly OnlineOrder[], refunded: readonly Refund[]): OrderLine[] {
+  const { r, between } = drawer(streamSeed(seed, 'order_lines'));
+  const back = new Map<string, number>();
+  for (const f of refunded) if (!isPlanted(f.refund_id) && f.amount_usd > 0) back.set(f.order_id, (back.get(f.order_id) ?? 0) + toCents(f.amount_usd));
+  const out: OrderLine[] = [];
+  for (const o of orders.filter(isSale)) {
+    const line = o.product_line as (typeof PRODUCT_LINES)[number];
+    const size = CATALOG[line].n;
+    const picked: number[] = [];
+    for (let u = 0; u < o.units; u++) {
+      let i = Math.floor(r() * size);
+      while (picked.includes(i)) i = (i + 1) % size;
+      picked.push(i);
+    }
+    const weights = picked.map(() => between(0.6, 1.4));
+    const price = split(toCents(o.net_usd), weights);
+    const cost = split(toCents(o.cost_usd), weights);
+    const refund = spread(back.get(o.order_id) ?? 0, price);
+    picked.forEach((i, n) => out.push({
+      line_id: seq('demo-ol-l', out.length + 1), order_id: o.order_id, order_date: o.order_date, sku: skuOf(line, i), product_line: line, units: 1,
+      price_usd: price[n]! / 100, unit_cost_usd: cost[n]! / 100, refunded_usd: refund[n]! / 100,
+    }));
+  }
+  const august = orders.find((o) => isSale(o) && o.order_date >= '2026-08-12')!;
+  out.push({
+    line_id: 'demo-ol-bad-units', order_id: august.order_id, order_date: august.order_date, sku: skuOf(august.product_line as (typeof PRODUCT_LINES)[number], 0),
+    product_line: august.product_line, units: 0, price_usd: 120, unit_cost_usd: 60, refunded_usd: 0,
+  });
+  return out;
+}
+
+/** The channels, each from its own stream. `orders`, `email` and `refunds` are only read: the lines and messages re-divide them. */
+export function generateChannels(orders: readonly OnlineOrder[], email: readonly EmailDay[], refunded: readonly Refund[], seed = DIVISIONS_SEED): Channels {
+  const sales = marketplaceSales(seed);
+  return {
+    marketplace: { sales, ads: walmartAds(seed), stock: marketplaceStock(seed, sales) },
+    emailMessages: emailMessages(seed, email),
+    orderLines: orderLines(seed, orders, refunded),
+  };
+}
+
+/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions, generateOperations and generateChannels add. */
 export function generateYear(): SyntheticYear {
   const today = generateBusiness();
   const history = generateHistory();
   const added = generateDivisions();
   const orders = [...history.online.orders, ...today.online.orders];
+  const email = [...history.marketing.email, ...today.marketing.email];
   const ops = generateOperations(orders);
+  const channels = generateChannels(orders, email, ops.refunds);
   return {
     generatedFor: GENERATED_FOR,
     seed: today.seed,
-    online: { orders, orderCosts: ops.orderCosts, refunds: ops.refunds, checkouts: ops.checkouts, inventory: ops.inventory },
+    online: { orders, orderCosts: ops.orderCosts, refunds: ops.refunds, checkouts: ops.checkouts, inventory: ops.inventory, orderLines: channels.orderLines },
     salon: { appointments: salonVisits(DIVISIONS_SEED, [...history.salon.appointments, ...today.salon.appointments]), repairs: ops.repairs },
-    marketing: { ads: [...history.marketing.ads, ...today.marketing.ads, ...added.metaAds], email: [...history.marketing.email, ...today.marketing.email] },
+    marketing: { ads: [...history.marketing.ads, ...today.marketing.ads, ...added.metaAds], email, emailMessages: channels.emailMessages },
     support: { messages: ops.messages },
     finance: { budgets: added.budgets, invoices: ops.invoices },
+    marketplace: channels.marketplace,
   };
 }

@@ -218,11 +218,15 @@ const ROW_READS: RowRead[] = [
   { table: 'repairs', status: 'open' }, { table: 'repairs', status: 'late' }, { table: 'repairs', status: 'done' },
   { table: 'invoices', status: 'open' }, { table: 'invoices', status: 'overdue' }, { table: 'invoices', status: 'due_30d', business: 'salon' },
   { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' },
+  // Wave 2, the channels.
+  { table: 'marketplace_stock', status: 'all' }, { table: 'marketplace_stock', status: 'low', marketplace: 'amazon' },
+  { table: 'products', period: '2026-10-mtd', sort: 'worst' }, { table: 'products', period: '2026-09', sort: 'best' },
 ];
 const SERIES: { division: Division; id: string }[] = [
   { division: 'finance', id: 'm:online.revenue.total' }, { division: 'finance', id: 'm:online.budget.google.room' },
   { division: 'salon', id: 'm:salon.no_show_rate' }, { division: 'online', id: 'm:online.service.replied_24h.share' },
   { division: 'hq', id: 'm:salon.season.month_index' },
+  { division: 'finance', id: 'm:online.amazon.revenue' }, { division: 'online', id: 'm:online.products.negative_margin.count' },
 ];
 
 /** Equal as data: the same keys, strings exactly, numbers within a cent (or a hundredth of an hour). */
