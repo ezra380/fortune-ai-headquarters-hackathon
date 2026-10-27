@@ -339,6 +339,17 @@ describe('numberTrace', () => {
     expect(trace('Finance used 1,500 tokens in and 3000 out.', 'That is 1.5k tokens in.', 'Average 112.4 s, so about 112 s.', 'One step took 75 s.', 'About 40% of runs.')).toEqual([]);
   });
 
+  // Live run 2026-10-27: Nemotron wrote ROAS 7.1225 and a rate 0.002 for data values with more decimals, and 11 of 14
+  // worker reports fell back to the rules. A value rounded to 3 or 4 decimals is still that value; anything else is not.
+  it('passes a value rounded to 3 or 4 decimals, and still refuses a value the data does not hold', () => {
+    const data = { roas: 7.122497, unsubscribe: 0.002137 };
+    const t = (text: string) => numberTrace([['t', text]], data);
+    expect(t('ROAS was 7.1225, or about 7.12.')).toEqual([]);
+    expect(t('Unsubscribes ran at 0.002, or 0.21%.')).toEqual([]);
+    expect(t('ROAS was 7.1226.')).toEqual(['t: "7.1226" is not a number in the data']);
+    expect(t('Unsubscribes ran at 0.003.')).toEqual(['t: "0.003" is not a number in the data']);
+  });
+
   it('ignores ids, dates, periods and model names, which are names and not claims', () => {
     expect(trace('See m:online.ads.google.roas on 2026-10-26 (period 2026-10-mtd) with nemotron-3-ultra.')).toEqual([]);
   });

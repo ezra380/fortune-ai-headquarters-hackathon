@@ -210,7 +210,7 @@ real figure sits in the right sentence. The tests are in `units.test.ts` ("numbe
   sides of `7/40` and `7:40` are checked. Letters stuck to digits are a unit and hide nothing (`48h`, `95sec`,
   `4000tokens`).
 - **Refused:** larger number words (four ... billion, dozen). The objection says to write digits.
-- **Matched:** the given number rounded to 0, 1 or 2 decimals; a percentage may match the given number times 100. A
+- **Matched:** the given number rounded to 0 to 4 decimals (since 2026-10-27; the briefs and the Code Mode answer trace still use 0 to 2); a percentage may match the given number times 100. A
   number written with a minus sign (`-1500`) must match a negative number in the data. One written without may
   describe a drop ("fell by 1500" for -1500). Only digits in the data count, never number words inside its strings.
 - **Not counted:** dates, periods and metric ids, and digits that belong to a name: straight after letters (`gpt4`),

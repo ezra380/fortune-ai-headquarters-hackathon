@@ -216,7 +216,7 @@ export function summarizeUsage(rows: readonly UsageRow[], since: Date): { since:
 //    after a word and a hyphen only when they sit inside a name (nemotron-3-ultra, lightning-30b) or close a
 //    row id (SUP-2201, demo-rt-01234; isRowId in @fahq/contracts, the plan checker's rule). "high-35%",
 //    "ROAS-9.5x" and "the top-100 buyers" are read. The row id itself must be in a string of the data (any case).
-//  - What matches: a given number rounded to 0, 1 or 2 decimals equals the written one (112.4 may be written
+//  - What matches: a given number rounded to 0 to 4 decimals equals the written one (112.4 may be written
 //    112); a percentage may also match the given number times 100 (0.0512 as 5.12%). A number written with
 //    a minus sign must match a negative number in the data. One written without may describe a drop
 //    ("fell by 1500" for -1500). In the data only digits count, never number words inside its strings.
@@ -306,7 +306,8 @@ function rowIdsGiven(source: unknown): Set<string> {
 }
 
 const roundTo = (x: number, k: number) => Math.round(x * 10 ** k) / 10 ** k;
-const same = (given: number, written: number) => [0, 1, 2].some((k) => Math.abs(roundTo(given, k) - written) < 1e-9);
+// Up to 4 decimals: the live run of 2026-10-27 showed Nemotron writing ratios such as ROAS 7.1225 and a rate 0.002.
+const same = (given: number, written: number) => [0, 1, 2, 3, 4].some((k) => Math.abs(roundTo(given, k) - written) < 1e-9);
 
 /** A written number with a minus sign must match a negative given number; one without may match either sign. */
 function inData(given: readonly number[], n: TracedNumber): boolean {
