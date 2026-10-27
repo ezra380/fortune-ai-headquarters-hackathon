@@ -1,11 +1,13 @@
-import { checkPlans, type DataPort, type Metric, type ModelPort, type ProfitPlans } from '@fahq/contracts';
+import { checkPlans, type DataPort, type Metric, type ModelPort, type Plan, type ProfitPlans } from '@fahq/contracts';
 import type { AssistantMemory } from '@fahq/brain';
 import { parseJsonObject, positiveInt } from '@fahq/models';
+import { DEPARTMENT_LABEL, departmentLine, sliceFor, type Department, type Origin } from './departments.ts';
 
 // The finance assistant's thinking step. Numbers come only from Zetaris; past decisions come only
 // from the assistant's approved memory; the model writes plans; the validator decides whether
 // they may be shown. One correction round with the validator's exact objections, then a plain
-// failure. No fallback model.
+// failure. No fallback model. When the owner asks for plans, each department writes its own with this
+// same code (writePlans with a `department`), from its own slice of the metrics only.
 
 export const PLAN_SYSTEM = `You are the finance assistant for a family business with TWO SEPARATE businesses: a salon and an online wig store.
 Write exactly three profit plans answering the owner's request, ranked 1 (most aggressive) to 3 (safest). Think like a careful growth CFO: arithmetic first, a cheap test, a stop-loss.
@@ -23,7 +25,11 @@ Return ONLY one JSON object, exactly this shape:
 {"plans":[{"rank":1,"title":"...","summary":"...","actions":["..."],"evidence":[{"metricId":"m:...","value":0}],"projections":[{"label":"...","baseMetricId":"m:...","factor":1.2,"result":0,"assumption":"..."}],"levers":[{"label":"...","value":0,"unit":"usd|percent|count|ratio|days|hours"}],"test":"...","stopLoss":"...","businesses":["online"],"risks":["..."]}],"memoryConflicts":[]}`;
 
 export class PlanError extends Error {
-  constructor(readonly objections: string[]) {
+  constructor(
+    readonly objections: string[],
+    /** What the failed attempts cost, so the receipt of a failed step still carries its tokens. */
+    readonly usage: { inputTokens: number; outputTokens: number } = { inputTokens: 0, outputTokens: 0 },
+  ) {
     super(`plans failed validation: ${objections.slice(0, 3).join('; ')}`);
     this.name = 'PlanError';
   }
@@ -49,7 +55,12 @@ export type PlanResult = {
 export async function writePlans(deps: {
   model: ModelPort;
   planModel: string;
-  data: DataPort;
+  /** Where the metrics are read when `source` is not given. */
+  data?: DataPort;
+  /** A department of a round: it plans from its own slice of the metrics, under its own name. */
+  department?: Department;
+  /** Metrics already read (once for a whole round), so every department plans from the same view and hash. */
+  source?: { metrics: readonly Metric[]; queryHash: string; view: string };
   memory: AssistantMemory;
   now: Date;
   request: string;
@@ -57,8 +68,12 @@ export async function writePlans(deps: {
   /** Lessons the owner adopted for this assistant (AssistantMemory.lessons), newest first. */
   lessons?: readonly string[];
 }): Promise<PlanResult> {
-  const { metrics, queryHash, view } = await deps.data.getFinanceMetrics({ asOf: deps.now.toISOString(), period: deps.period });
-  if (metrics.length === 0) throw new PlanError(['the data source returned no metrics']);
+  const read = deps.source ?? (await readMetrics(deps));
+  const metrics = deps.department ? sliceFor(deps.department, read.metrics) : [...read.metrics];
+  const { queryHash, view } = read;
+  const purpose = `${deps.department ?? 'finance'}.plans`;
+  if (metrics.length === 0) throw new PlanError([deps.department ? `the data source returned no metrics for the ${DEPARTMENT_LABEL[deps.department]} department` : 'the data source returned no metrics']);
+  const system = deps.department ? `${PLAN_SYSTEM}\n${departmentLine(deps.department)}` : PLAN_SYSTEM;
   const pastDecisions = deps.memory
     .recallDecisions(`${deps.request} price discount marketing ads plan`, 8)
     .map((d) => ({ memoryId: d.memory.id, text: d.memory.content }));
@@ -70,9 +85,9 @@ export async function writePlans(deps: {
   let model = deps.planModel;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const r = await deps.model.chat({
-      purpose: 'finance.plans',
+      purpose,
       model: deps.planModel,
-      system: PLAN_SYSTEM,
+      system,
       user: JSON.stringify({
         request: deps.request.slice(0, 1600),
         period: deps.period,
@@ -111,24 +126,32 @@ export async function writePlans(deps: {
       inputTokens, outputTokens, tokens: inputTokens + outputTokens, firstObjections, declinedEchoes,
     };
   }
-  throw new PlanError(objections);
+  throw new PlanError(objections, { inputTokens, outputTokens });
+}
+
+async function readMetrics(deps: { data?: DataPort; now: Date; period: '2026-09' | '2026-10-mtd' }) {
+  if (!deps.data) throw new Error('business data is not connected');
+  return deps.data.getFinanceMetrics({ asOf: deps.now.toISOString(), period: deps.period });
 }
 
 /**
  * The text summary of three plans, sized for one SMS thread. The lead projection's result is shown in
- * its base metric's unit ($, %, x), so 0.051 never prints as "0" and a ROAS of 3.6 never as "4".
+ * its base metric's unit ($, %, x), so 0.051 never prints as "0" and a ROAS of 3.6 never as "4". When
+ * the plans came from several departments, each line names its department: "1. [Online] Title (...)".
  */
-export function planDigest(plans: ProfitPlans, metrics: readonly Metric[] = []): string {
-  const unitOf = new Map(metrics.map((m) => [m.id, m.unit]));
+export function planDigest(plans: ProfitPlans, metrics: readonly Metric[] = [], origins: readonly Origin[] = []): string {
   return plans.plans
     .slice()
     .sort((a, b) => a.rank - b.rank)
-    .map((p) => {
-      const lead = p.projections[0];
-      const impact = lead ? ` (${lead.label}: ${formatValue(lead.result, unitOf.get(lead.baseMetricId))})` : '';
-      return `${p.rank}. ${p.title}${impact}`;
-    })
+    .map((p) => planLine(p, metrics, origins.find((o) => o.rank === p.rank)))
     .join('\n');
+}
+
+export function planLine(p: Plan, metrics: readonly Metric[], origin?: Origin): string {
+  const unitOf = new Map(metrics.map((m) => [m.id, m.unit]));
+  const lead = p.projections[0];
+  const impact = lead ? ` (${lead.label}: ${formatValue(lead.result, unitOf.get(lead.baseMetricId))})` : '';
+  return `${p.rank}. ${origin ? `[${DEPARTMENT_LABEL[origin.department]}] ` : ''}${p.title}${impact}`;
 }
 
 export function formatValue(value: number, unit: Metric['unit'] | undefined): string {

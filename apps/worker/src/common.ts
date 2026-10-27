@@ -11,6 +11,8 @@ export type WorkerDeps = {
   store: Store;
   brain: Brain;
   models: { nvidia: ModelPort; planModel: string; routerModel: string };
+  /** The safety model every free text is screened by before anything starts; null = the screen is off. */
+  guard: { model: string } | null;
   data: DataPort | null;
   delivery: DeliveryPort | null;
   /** Cloudflare Code Mode in the worker; null = not wired, and the steps that need it fail plainly. */
@@ -36,6 +38,8 @@ export type WorkerDeps = {
 export type Outcome = { status: 'done' | 'failed'; error?: string };
 
 export const newCode = () => String(randomInt(100000, 1000000));
+/** A thrown error's own sentence, or the fallback when it has none. */
+export const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 export const done: Outcome = { status: 'done' };
 export const fail = (error: string): Outcome => ({ status: 'failed', error });
 

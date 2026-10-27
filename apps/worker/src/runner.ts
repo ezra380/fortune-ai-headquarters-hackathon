@@ -55,3 +55,28 @@ export async function runUntilIdle(deps: WorkerDeps, maxCycles = 50): Promise<nu
   while (cycles < maxCycles && (await runOnce(deps))) cycles += 1;
   return cycles;
 }
+
+/**
+ * `loops` claim loops in this process at once. Each takes its own task (claim_task never hands one task to
+ * two loops), so work for different assistants, or one assistant's backlog, goes through in parallel.
+ * A loop that finds nothing waits (or, with `untilIdle`, ends); a failed cycle is logged and the loop goes on.
+ * Returns the number of cycles that did work, over all loops.
+ */
+export async function runConcurrently(
+  deps: WorkerDeps, loops: number, stopping: () => boolean, opts: { untilIdle: boolean; idleMs?: number },
+): Promise<number> {
+  let cycles = 0;
+  const loop = async () => {
+    while (!stopping()) {
+      const busy = await runOnce(deps).catch((error: unknown) => {
+        console.error(`worker.loop_error: ${error instanceof Error ? error.message : 'unknown'}`);
+        return false;
+      });
+      if (busy) cycles += 1;
+      else if (opts.untilIdle) return;
+      else await new Promise((resolve) => setTimeout(resolve, opts.idleMs ?? 2000));
+    }
+  };
+  await Promise.all(Array.from({ length: loops }, loop));
+  return cycles;
+}

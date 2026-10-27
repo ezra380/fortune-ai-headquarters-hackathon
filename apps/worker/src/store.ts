@@ -334,7 +334,7 @@ export function createStore(url: string, serviceKey: string) {
     /** Every approval on a proposal (the send, and the decisions on what was sent). Never a code or its hash. */
     async approvalsOf(proposalId: string): Promise<ApprovalSummary[]> {
       const forwards = must(await db.from('assistant_messages').select('id, body').eq('kind', 'request').eq('reply_to', proposalId), 'forwards') as { id: string; body: { planRank?: unknown } }[];
-      const rows = must(await db.from('approvals').select('message_id, action, status, expires_at, decided_at').in('message_id', [proposalId, ...forwards.map((f) => f.id)]).order('created_at'), 'approvals') as
+      const rows = must(await db.from('approvals').select('message_id, action, status, expires_at, decided_at').in('message_id', [proposalId, ...forwards.map((f) => f.id)]).order('created_at').order('action', { ascending: false }), 'approvals') as
         { message_id: string; action: ApprovalAction; status: ApprovalSummary['status']; expires_at: string; decided_at: string | null }[];
       return rows.map((r) => {
         const rank = Number(forwards.find((f) => f.id === r.message_id)?.body.planRank);

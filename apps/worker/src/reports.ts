@@ -9,6 +9,8 @@ import { WorkReport, type AssistantId, type Receipt, type Suggestion, type WorkS
 //    writes must be a number it was given.
 
 const SLOW_STEP_MS = 60_000;
+/** A department's plan writer: finance.plans, salon.plans, online.plans. */
+const PLAN_STEP = /^(finance|salon|online)\.plans$/;
 const ORDER: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
 
 function clip(text: string, max: number): string {
@@ -18,9 +20,14 @@ function clip(text: string, max: number): string {
 
 // ---- Receipt details that later steps read back ------------------------------------------------
 
-/** The detail a Code Mode step writes on its receipt: parsed back by buildWorkReport. */
-export function codeModeDetail(r: { attempts: number; toolCalls: number; resultChars: number; error?: string | null }): string {
-  return `code mode: attempts ${r.attempts}, toolCalls ${r.toolCalls}, resultChars ${r.resultChars}${r.error ? `; error: ${clip(r.error, 200)}` : ''}`;
+/**
+ * The detail a Code Mode step writes on its receipt: parsed back by buildWorkReport. `untraced` is how many
+ * numbers of the script's result no tool returned (a script may legitimately add things up): it is reported,
+ * never a reason to refuse the result.
+ */
+export function codeModeDetail(r: { attempts: number; toolCalls: number; resultChars: number; untraced?: number; error?: string | null }): string {
+  const untraced = r.untraced === undefined ? '' : `, untraced ${r.untraced}`;
+  return `code mode: attempts ${r.attempts}, toolCalls ${r.toolCalls}, resultChars ${r.resultChars}${untraced}${r.error ? `; error: ${clip(r.error, 200)}` : ''}`;
 }
 
 function parseCodeMode(detail: string): { attempts: number; toolCalls: number; resultChars: number; error: string | null } | null {
@@ -90,7 +97,7 @@ function summarize(task: ReportTask, outcome: 'done' | 'failed' | 'retrying', er
   const seconds = Math.round((endedAt.getTime() - startedAt.getTime()) / 1000);
   const word = outcome === 'retrying' ? 'will retry' : outcome;
   const parts = steps.map((s) => {
-    const planAttempt = s.step === 'finance.plans' || s.step === 'manager.review' ? /\battempts (\d+)\b/.exec(s.detail ?? '')?.[1] : undefined;
+    const planAttempt = PLAN_STEP.test(s.step) || s.step === 'manager.review' ? /\battempts (\d+)\b/.exec(s.detail ?? '')?.[1] : undefined;
     return `${s.step} ${s.outcome}${planAttempt ? ` (attempt ${planAttempt} of 2)` : ''}`;
   });
   const shown = parts.length > 6 ? [...parts.slice(0, 6), `and ${parts.length - 6} more`] : parts;
@@ -119,15 +126,18 @@ function suggest(task: ReportTask, outcome: 'done' | 'failed' | 'retrying', erro
     } else if (r.outcome === 'refused') {
       if (budget) add('cost', about, `${r.step} was refused by the model budget: ${detail}`);
       else if (r.step === 'front-door') add('prompt', about, `The front door's answer did not validate, so the text stayed with ${about}: ${detail || 'no detail was recorded'}`);
+      else if (r.step === 'front-door.screen') stepFailed = true; // turning an unsafe text away is the screen working: no suggestion, and the step already explains why the task failed
       else if (r.model !== null) add('prompt', about, `${r.step} was refused: ${detail || 'no detail was recorded'}`);
     }
 
-    // The two steps that get one correction round with the checker's exact objections.
-    if ((r.step === 'finance.plans' || r.step === 'manager.review') && r.outcome === 'ok') {
+    // The steps that get one correction round with the checker's exact objections.
+    const planner = PLAN_STEP.exec(r.step)?.[1] as AssistantId | undefined;
+    if ((planner || r.step === 'manager.review' || r.step === 'owner.synthesis') && r.outcome === 'ok') {
       const attempts = Number(/\battempts (\d+)\b/.exec(detail)?.[1] ?? 1);
       if (attempts >= 2) {
         const first = /first objection: (.*)$/.exec(detail)?.[1] ?? 'not recorded';
-        if (r.step === 'finance.plans') add('prompt', 'finance', `The plan writer needed a correction round. First objection: ${first}`);
+        if (planner) add('prompt', planner, `The plan writer needed a correction round. First objection: ${first}`);
+        else if (r.step === 'owner.synthesis') add('prompt', 'owner', `The plan picker needed a correction round. First objection: ${first}`);
         else add('prompt', 'manager', `The review writer needed a correction round. First objection: ${first}`);
       }
     }
