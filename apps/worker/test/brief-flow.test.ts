@@ -71,6 +71,10 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
   const attention: Record<string, Attention[]> = {};
   const numbers: Record<string, string | null> = { finance: '+12125550123', online: '+12125550124', salon: null };
   const mine = { tasks: new Set<string>(), briefs: new Set<string>() };
+  // The texts as they were queued, and the codes issued. The database blanks a code once a text is handled, and a
+  // test of another lane that flushes the outbox can do that at any moment, so the tests read these instead.
+  const sent = new Map<string, string>();
+  const issued: { key: string; code: string; created: boolean }[] = [];
   let deps: WorkerDeps;
   let model: ReturnType<typeof scriptedModel>;
   let codeMode: ReturnType<typeof fakeCodeMode>;
@@ -85,7 +89,17 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
       }),
     };
     deps = {
-      store: { ...real, assistantNumber: async (a) => numbers[a] ?? null },
+      store: {
+        ...real,
+        assistantNumber: async (a) => numbers[a] ?? null,
+        addOutbox: async (o) => { if (!sent.has(o.dedupeKey)) sent.set(o.dedupeKey, o.body); return real.addOutbox(o); },
+        issueApproval: async (a) => {
+          const result = await real.issueApproval(a);
+          issued.push({ key: a.smsDedupeKey, code: a.code, created: result.created });
+          if (result.created) sent.set(a.smsDedupeKey, a.smsBody);
+          return result;
+        },
+      },
       brain: await openBrain({ meterlessDir, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-brief-')), actor: 'brief-test' }),
       models: { nvidia: undefined as unknown as ModelPort, planModel: 'MOCK/plans', routerModel: 'MOCK/router' },
       guard: null,
@@ -149,7 +163,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     `select a.action, a.status, a.approver_person_id, extract(epoch from (a.expires_at - a.created_at))::int as ttl
        from public.approvals a join public.assistant_messages m on m.id = a.message_id where m.dedupe_key = $1`, [`briefdoc:${key}`]);
   const stepsOf = (taskId: string) => rows('select step, outcome, assistant_id, model, data_source, detail from public.receipts where task_id = $1 order by id', [taskId]);
-  const codeIn = (body: string) => /APPROVE <1-3> (\d{6})/.exec(body)?.[1] ?? '';
+  const codeIn = (body: string | undefined) => /APPROVE <1-3> (\d{6})/.exec(body ?? '')?.[1] ?? '';
 
   it('writes the finance head a brief: numbers → no questions → a checked brief → a text with a code, a printout and a line for the CEO', async () => {
     attention.finance = [{ metricId: 'm:online.ads.google.roas', level: 'watch', rule: 'return below target' }];
@@ -173,11 +187,11 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect(codeMode.calls).toHaveLength(0);
 
     // The head's text: status, headline, findings, actions, and one code that lasts 12 hours.
-    const sms = await outbox(`brief-sms:${row.id}`);
-    expect(sms).toMatchObject({ channel: 'sms', to_person_id: HEAD.finance, from_assistant: 'finance', status: 'pending' });
-    const code = codeIn(sms.body);
+    const sms = sent.get(`brief-sms:${row.id}`);
+    expect(await outbox(`brief-sms:${row.id}`)).toMatchObject({ channel: 'sms', to_person_id: HEAD.finance, from_assistant: 'finance' });
+    const code = codeIn(sms);
     expect(code).toMatch(/^\d{6}$/);
-    expect(sms.body).toBe([
+    expect(sms).toBe([
       `Finance brief for ${row.day} (status WATCH)`, financeBrief.headline,
       'Findings:', `- ${financeBrief.findings[0]!.text}`, `- ${financeBrief.findings[1]!.text}`,
       'Actions:', `Action 1: Hold Google spend - ${financeBrief.actions[0]!.why}`,
@@ -286,9 +300,9 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect(row.brief.findings[0]).toEqual({ text: 'Google ad return is 2.40x. Rule that fired (act): return below target', cites: ['m:online.ads.google.roas'] });
     expect(row.brief.actions[0]).toMatchObject({ rank: 1, title: 'Look at Google ad return' });
     expect(row.ceo_line).toBe('Finance needs a decision from its head.');
-    const sms = await outbox(`brief-sms:${row.id}`);
-    expect(sms.body).toContain('(status ACT) - written by rules: the usual write-up did not pass its number check');
-    expect(codeIn(sms.body)).toMatch(/^\d{6}$/);
+    const sms = sent.get(`brief-sms:${row.id}`);
+    expect(sms).toContain('(status ACT) - written by rules: the usual write-up did not pass its number check');
+    expect(codeIn(sms)).toMatch(/^\d{6}$/);
     const write = (await stepsOf(task.id)).find((s) => s.step === 'brief.write')!;
     expect(write).toMatchObject({ outcome: 'refused', model: 'MOCK/MOCK/plans' });
     expect(write.detail).toBe('attempts 2; rule-written brief used; headline: "9,999" is not a number in the data');
@@ -318,7 +332,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     model.script('finance.needs', asks('salon'));
     model.script('finance.brief', JSON.stringify(financeBrief));
     const first = await run('finance');
-    const sms = await outbox(`brief-sms:${first.row.id}`);
+    const firstCode = codeIn(sent.get(`brief-sms:${first.row.id}`));
     const before = { calls: model.calls.length, code: codeMode.calls.length };
     expect(before).toEqual({ calls: 2, code: 1 });
 
@@ -329,9 +343,14 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     expect({ calls: model.calls.length, code: codeMode.calls.length }).toEqual(before);
     expect(await rows('select id from public.division_briefs where brief_key = $1', [first.key])).toHaveLength(1);
     expect(await approvalsOf(first.key)).toHaveLength(1);
-    expect((await outbox(`brief-sms:${first.row.id}`)).body).toBe(sms.body); // the same text, with the same code
+    // Each run tried to issue a code; only the first was created, and it is the one that still works.
+    expect(issued.filter((i) => i.key === `brief-sms:${first.row.id}`).map((i) => i.created)).toEqual([true, false, false]);
     expect(await rows(`select id from public.outbox where dedupe_key in ($1, $2)`, [`brief-sms:${first.row.id}`, `brief-print:${first.row.id}`])).toHaveLength(2);
     expect(await rows(`select id from public.assistant_messages where dedupe_key in ($1, $2, $3, $4)`, [`status:${first.key}`, `briefdoc:${first.key}`, `needs:${first.key}`, `datareq:${first.key}:salon`])).toHaveLength(4);
+    // The code the later runs made up was never valid; the first one is.
+    const lateCode = issued.find((i) => i.key === `brief-sms:${first.row.id}` && !i.created)!.code;
+    expect((await text(HEAD.finance, `APPROVE 1 ${lateCode}`)).reply).toBe("That code didn't work or has expired. Nothing was recorded.");
+    expect((await text(HEAD.finance, `APPROVE 1 ${firstCode}`)).reply).toContain('Recorded: you approved action 1');
   });
 
   it('resumes where it stopped: a failure while sending the code is retried without asking the models again', async () => {
@@ -352,7 +371,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
       expect(await handleTask(task, deps)).toEqual({ status: 'done' });
       expect(model.calls.map((c) => c.purpose)).toEqual(['finance.needs', 'finance.brief']); // still only the first run's calls
       expect(await approvalsOf(key)).toHaveLength(1);
-      expect(codeIn((await outbox(`brief-sms:${stored.id}`)).body)).toMatch(/^\d{6}$/);
+      expect(codeIn(sent.get(`brief-sms:${stored.id}`))).toMatch(/^\d{6}$/);
     } finally {
       deps.store = store;
     }
@@ -410,9 +429,9 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     model.script('salon.needs', none);
     model.script('salon.brief', JSON.stringify(salonBrief));
     const { key, row } = await run('salon');
-    const sms = await outbox(`brief-sms:${row.id}`);
-    expect(sms.body.endsWith('\nNothing needs your approval today.')).toBe(true);
-    expect(sms.body).not.toMatch(/\b\d{6}\b/);
+    const sms = sent.get(`brief-sms:${row.id}`)!;
+    expect(sms.endsWith('\nNothing needs your approval today.')).toBe(true);
+    expect(sms).not.toMatch(/\b\d{6}\b/);
     expect(await approvalsOf(key)).toEqual([]);
   });
 
@@ -485,7 +504,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     const phone = (await rows('select phone, assistant_id from public.people where id = $1', [person]))[0];
     const task = await taskOf(phone.assistant_id, 'inbound_text', { personId: person, from: phone.phone, body });
     const outcome = await handleTask(task, deps);
-    const reply = (await outbox(`reply:${task.id}`))?.body as string | undefined;
+    const reply = sent.get(`reply:${task.id}`);
     return { task, outcome, reply };
   };
   const finished = async () => {
@@ -493,7 +512,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     model.script('finance.needs', none);
     model.script('finance.brief', JSON.stringify(financeBrief));
     const made = await run('finance');
-    return { ...made, code: codeIn((await outbox(`brief-sms:${made.row.id}`)).body) };
+    return { ...made, code: codeIn(sent.get(`brief-sms:${made.row.id}`)) };
   };
 
   it('APPROVE <rank> <code> records the head\'s decision once; the same code again does nothing', async () => {
