@@ -222,6 +222,21 @@ export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fet
         timeoutMs,
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
       });
+  // The safety screen's client. Through Nightshift it can call NVIDIA directly (GUARD_PROVIDER=nvidia): the runtime
+  // serves only the models enabled in it, and on 2026-10-27 the content-safety model was not one ("model_not_found"),
+  // which would fail every screen closed. By default the screen goes wherever every other call goes.
+  const guardProvider = env.GUARD_PROVIDER ?? provider;
+  if (guardProvider !== 'nvidia' && guardProvider !== 'meterless') throw new Error('GUARD_PROVIDER must be nvidia or meterless');
+  const guardClient = guardProvider === provider
+    ? nvidia
+    : createModelClient({
+        provider: 'nvidia',
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+        apiKey: env.NEMOTRON_API_KEY ?? '',
+        budget,
+        timeoutMs,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      });
   const xai = env.XAI_API_KEY
     ? createModelClient({
         provider: 'xai',
@@ -242,6 +257,7 @@ export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fet
     // Nemotron 3.5 Content Safety answered in 0.3–4.9 s on 2026-10-26; the Llama-based safety guard
     // stopped answering that evening (it can be chosen with GUARD_MODEL).
     guardModel: env.GUARD_MODEL ?? 'nvidia/nemotron-3.5-content-safety',
+    guardClient,
     guard: env.GUARD !== 'off',
   };
 }

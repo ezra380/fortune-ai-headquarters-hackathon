@@ -55,7 +55,7 @@ const deps: WorkerDeps = {
   brain,
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
   // The safety screen in front of every free text; GUARD=off turns it off.
-  guard: models.guard ? { model: models.guardModel } : null,
+  guard: models.guard ? { model: models.guardModel, client: models.guardClient } : null,
   data,
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
   // Each assistant's read-only profile (its row in the database, else its file): skill text, model for each job, read tools.

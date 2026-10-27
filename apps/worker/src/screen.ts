@@ -15,7 +15,7 @@ export type Screened = { off: true } | { off: false; result: ScreenResult };
 export function startScreen(deps: WorkerDeps, body: string): Promise<Screened> {
   const guard = deps.guard;
   if (!guard) return Promise.resolve({ off: true });
-  return screenText({ model: deps.models.nvidia, guardModel: guard.model, text: body }).then(
+  return screenText({ model: guard.client ?? deps.models.nvidia, guardModel: guard.model, text: body }).then(
     (result): Screened => ({ off: false, result }),
     (): Screened => ({
       off: false,

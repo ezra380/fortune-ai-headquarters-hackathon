@@ -11,8 +11,11 @@ export type WorkerDeps = {
   store: Store;
   brain: Brain;
   models: { nvidia: ModelPort; planModel: string; routerModel: string };
-  /** The safety model every free text is screened by before anything starts; null = the screen is off. */
-  guard: { model: string } | null;
+  /**
+   * The safety model every free text is screened by before anything starts; null = the screen is off. `client` is
+   * the client that asks it (GUARD_PROVIDER); absent = the models' own client.
+   */
+  guard: { model: string; client?: ModelPort } | null;
   data: DataPort | null;
   delivery: DeliveryPort | null;
   /** Cloudflare Code Mode in the worker; null = not wired, and the steps that need it fail plainly. */

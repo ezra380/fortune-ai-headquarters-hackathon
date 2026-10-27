@@ -100,6 +100,21 @@ describe('Nightshift (the Meterless Runtime) as the provider', () => {
     expect(JSON.parse(String(seen[1]!.body)).chat_template_kwargs).toBeUndefined();
   });
 
+  it('screens through NVIDIA directly when GUARD_PROVIDER=nvidia, because the runtime may not serve the safety model', async () => {
+    const seen: { url: string; init: RequestInit }[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => { seen.push({ url, init }); return okResponse('ok'); }) as unknown as typeof fetch;
+    const env = { MODEL_PROVIDER: 'meterless', METERLESS_BASE_URL: '172.23.224.1:8088', METERLESS_TOKEN: 'tok-test', NEMOTRON_API_KEY: 'nv-test' };
+    const split = modelsFromEnv({ ...env, GUARD_PROVIDER: 'nvidia' }, { fetch: fetchImpl });
+    await split.nvidia.chat({ ...ask, model: 'nvidia/nemotron-3.5-lightning-30b-a3b' });
+    await split.guardClient.chat({ ...ask, model: split.guardModel });
+    expect(seen.map((s) => s.url)).toEqual(['http://172.23.224.1:8088/v1/chat/completions', 'https://integrate.api.nvidia.com/v1/chat/completions']);
+    expect((seen[1]!.init.headers as Record<string, string>).Authorization).toBe('Bearer nv-test');
+    // By default the screen goes wherever every other call goes.
+    const one = modelsFromEnv(env, { fetch: fetchImpl });
+    expect(one.guardClient).toBe(one.nvidia);
+    expect(() => modelsFromEnv({ ...env, GUARD_PROVIDER: 'openai' })).toThrow(/GUARD_PROVIDER/);
+  });
+
   it('refuses the rt-local placeholder token and an unknown provider', () => {
     expect(() => modelsFromEnv({ MODEL_PROVIDER: 'meterless', METERLESS_TOKEN: 'rt-local' })).toThrow(/rt-local/);
     expect(() => modelsFromEnv({ MODEL_PROVIDER: 'openai' })).toThrow(/MODEL_PROVIDER/);

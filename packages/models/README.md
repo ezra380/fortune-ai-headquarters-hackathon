@@ -19,8 +19,24 @@ whitespace is not sent, and a text of only whitespace is safe without a call.
 It **fails closed**: an HTTP error, a timeout (default 8 s per call), a refused budget, an unreadable reply, or a "safe" reply that
 also names harm categories all come back as `safe: false` with the reason "the safety check could not run". It never throws.
 
-Settings: `GUARD_MODEL` (default `nvidia/nemotron-3.5-content-safety`), `GUARD=off` turns the screen off.
-It is not wired into the worker yet.
+Settings: `GUARD_MODEL` (default `nvidia/nemotron-3.5-content-safety`), `GUARD=off` turns the screen off,
+`GUARD_PROVIDER` (`nvidia` or `meterless`; default: the same as `MODEL_PROVIDER`) chooses who serves the safety model.
+The worker screens every free text with it (`apps/worker/src/screen.ts`).
+
+## Through Nightshift (`MODEL_PROVIDER=meterless`)
+
+Every call goes to the Meterless Runtime that Nightshift serves, which calls NVIDIA with the key set up inside it:
+`METERLESS_BASE_URL` (default `127.0.0.1:8088`) and `METERLESS_TOKEN` or `METERLESS_TOKEN_FILE` (the runtime's
+`proxy-token`). Live check 2026-10-27, from WSL: the router and plan models answered through it
+(`nvidia/nemotron-3.5-lightning-30b-a3b` about 2 s, `nvidia/nemotron-3-ultra-550b-a55b` about 5 s); a wrong token gets 401.
+
+- **The safety model is not served by it** (`model_not_found`: it serves only the models enabled in it), and the screen
+  fails closed, so set `GUARD_PROVIDER=nvidia` (needs `NEMOTRON_API_KEY`): the screen then asks NVIDIA directly and every
+  other call still goes through Nightshift. Measured the same day: safe and flagged samples read correctly in 1 to 1.6 s.
+- **WSL cannot reach Windows loopback**, and Nightshift's hotspot mode opens only its phone desk (port 8089), not the API.
+  `scripts/nightshift-bridge.mjs`, run with Windows' node, relays the WSL-facing adapter (`172.23.224.1:18088`) to
+  `127.0.0.1:8088`; it binds that adapter only, never `0.0.0.0`, and the runtime's token is still required. Then
+  `METERLESS_BASE_URL=172.23.224.1:18088`. Check with `npx tsx scripts/check-nightshift.ts`.
 
 Live check on this key, 2026-10-26 evening: `nvidia/nemotron-3.5-content-safety` answered `User Safety: safe` / `unsafe` in
 0.3 to 4.9 s and was read correctly (the unsafe sample came back without categories). `nvidia/llama-3.1-nemotron-safety-guard-8b-v3`
