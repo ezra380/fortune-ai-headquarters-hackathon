@@ -69,9 +69,12 @@ credentials, are ever used here.
   department head asks only her own assistant, on her own data. A decision in someone's field needs that
   person's code: a plan for Finance is confirmed by the finance owner, not the owner.
 - **The HQ Manager** ([`manager.md`](manager.md)). Every finished task leaves a work report (steps, models,
-  tokens, rule-based suggestions). `REVIEW` asks the manager to read them through Code Mode and recommend at
-  most three changes; `ADOPT <n> <code>` makes one a standing lesson in that assistant's memory, which its
-  plan writer then receives. The manager recommends; only the owner's code changes anything.
+  tokens, rule-based suggestions), and the reports outside AI tools file at a door are read too. `REVIEW` (and a
+  daily job) asks the manager to read them through Code Mode and recommend at most three typed changes. By kind, a
+  program decides who applies each: the manager applies a lesson or a skill note itself, as a new version of the
+  assistant's profile in Supabase (reversible from the history); a change to what an assistant may read, or to
+  the model it uses, waits for the owner, who approves it with `ADOPT <n> <code>`. The database is the source of
+  the lessons; H-MEM is a cache of them.
 
 ## 4. Components
 
