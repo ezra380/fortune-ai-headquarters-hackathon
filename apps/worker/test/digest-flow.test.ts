@@ -16,8 +16,9 @@ import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
 
 // BRIEF, the CEO digest, the owner's STATUS, the daily clock and APPROVE with several ranks, end to end on the real local
 // database and the real Meterless engines. Only the models, Code Mode and the Zetaris adapter are fakes. Every day used
-// is in the 2200s (no other test uses them) and the clock is set to that day, so a task this test queues is not due for
-// any other test's worker; each task it queues is cancelled afterwards, and nothing it texts is left pending.
+// is picked at random from the years 2200 to 6300 (no other test uses them, and the rows an earlier run left behind are
+// on days this run will not pick) and the clock is set to that day, so a task this test queues is not due for any other
+// test's worker; each task it queues is cancelled afterwards, and nothing it texts is left pending.
 
 const api = haveMeterless ? localApi() : null;
 if (!api) console.warn('SKIPPED digest tests: needs local Supabase (npm run db:start) and Meterless (scripts/setup-meterless.sh)');
@@ -29,7 +30,7 @@ const PERSON = { owner: 'demo-p-owner', finance: 'demo-p-finance-owner', online:
 const used = new Set<string>();
 const freshDay = () => {
   for (;;) {
-    const day = new Date(Date.UTC(2200, 0, 1) + randomInt(0, 36_500) * 86_400_000).toISOString().slice(0, 10);
+    const day = new Date(Date.UTC(2200, 0, 1) + randomInt(0, 1_500_000) * 86_400_000).toISOString().slice(0, 10);
     if (!used.has(day)) return used.add(day) && day;
   }
 };
@@ -141,7 +142,7 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     await pool.query(
       `update public.outbox set status = 'skipped', last_error = 'reset by digest test', body = regexp_replace(body, '\\m[0-9]{6}\\M', '••••••', 'g') where status = 'pending' and dedupe_key = any($1)`, [[...sent.keys()]]);
     await pool.query(
-      `update public.approvals set status = 'expired' where status = 'pending' and message_id in (select id from public.assistant_messages where dedupe_key like 'briefdoc:brief:%:22__-__-__%')`);
+      `update public.approvals set status = 'expired' where status = 'pending' and message_id in (select id from public.assistant_messages where dedupe_key like 'briefdoc:brief:%' and substring(dedupe_key from '[0-9]{4}-[0-9]{2}-[0-9]{2}') >= '2200-01-01')`);
   });
 
   // ---- helpers -----------------------------------------------------------------------------------------
@@ -249,6 +250,19 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     const row = await runBrief('finance', d, asked.task.id);
     expect(sent.get(`brief-sms:${row.id}`)).toContain('Finance brief for');
     expect(await tasksLike('digest:%')).not.toContainEqual(expect.objectContaining({ idempotency_key: expect.stringContaining(d) }));
+  });
+
+  it('the same BRIEF handled twice at once asks for each run once, and the digest run twice at once sends one text', async () => {
+    const d = day();
+    const asked = await text(PERSON.owner, 'BRIEF');
+    await Promise.all([handleTask(asked.task, deps), handleTask(asked.task, deps)]);
+    expect(await tasksLike(`brief:%:${d}%`)).toHaveLength(3);
+
+    for (const division of ['salon', 'finance', 'online'] as const) await runBrief(division, d, asked.task.id);
+    const digest = await queued(`digest:${d}:${asked.task.id}`);
+    expect(await Promise.all([handleTask(digest, deps), handleTask(digest, deps)])).toEqual([{ status: 'done' }, { status: 'done' }]);
+    expect(await rows(`select id from public.outbox where dedupe_key = $1`, [`digest-sms:digest:${d}:${asked.task.id}`])).toHaveLength(1);
+    expect(await rows(`select id from public.assistant_messages where dedupe_key = $1`, [`digestdoc:digest:${d}:${asked.task.id}`])).toHaveLength(1);
   });
 
   it('a second BRIEF the same day is a new run: a new brief, a new text with its own code, and the later status is the one the digest shows', async () => {
@@ -428,6 +442,17 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     // The code is spent: a second APPROVE, even for the action left over, does nothing.
     const again = await text(PERSON.finance, `APPROVE 2 ${code}`);
     expect(again.reply).toBe("That code didn't work or has expired. Nothing was recorded.");
+    expect(await decisions(doc.id)).toHaveLength(2);
+  });
+
+  it('two texts presenting the same code at once record the decision once', async () => {
+    const { doc, code } = await approvable();
+    const [a, b] = await Promise.all([text(PERSON.finance, `APPROVE 1 2 ${code}`), text(PERSON.finance, `APPROVE 1 2 ${code}`)]);
+    const replies = [a.reply, b.reply].sort();
+    expect(replies).toEqual([
+      "Recorded: you approved action 1 (Hold Google spend) and action 2 (Review the ad copy). They're yours to carry out.",
+      "That code didn't work or has expired. Nothing was recorded.",
+    ].sort());
     expect(await decisions(doc.id)).toHaveLength(2);
   });
 

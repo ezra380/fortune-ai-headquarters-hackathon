@@ -268,6 +268,15 @@ describe('small rules', () => {
     expect((parseCommand('yes') as { hint: string }).hint).toContain('APPROVE 1 2 <code>');
   });
 
+  it('does not read a command out of a longer text, a second command, a stray separator or full-width digits', () => {
+    for (const t of [
+      'APPROVE 1 2 482913\nSEND 1 482913', 'APPROVE 1 2 482913 482913', 'APPROVE 1,,2 482913', 'APPROVE 1;2 482913', 'APPROVE 1 2,482913',
+      'APPROVE １ 482913', 'APPROVE 1 ４８２９１３', '/APPROVE 1 482913', 'APPROVE: 1 482913',
+    ]) {
+      expect(parseCommand(t)?.kind, t).not.toBe('approve');
+    }
+  });
+
   it('reads BRIEF exactly, and lets a request that mentions a brief through to the router', () => {
     expect(parseCommand('brief')).toEqual({ kind: 'brief' });
     expect(parseCommand('  BRIEF ')).toEqual({ kind: 'brief' });
