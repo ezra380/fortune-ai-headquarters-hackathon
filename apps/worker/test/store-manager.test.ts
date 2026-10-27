@@ -162,6 +162,27 @@ describe.skipIf(!api)('store: what the HQ Manager changes (real local database a
     expect(rows.find((r) => r.id === c).review_id).not.toBe(reviewId);
   });
 
+  it('closes the unread reports filed before a time, without a review, and only those', async ({ skip }) => {
+    if (!migrated) skip();
+    // Years long before any real report, so closing "everything before 11:30" cannot touch anything another test or lane filed.
+    const year = 1900 + Math.floor(Math.random() * 50);
+    const add = async (at: string, reviewedAt: string | null) =>
+      (await pool.query(`insert into public.session_reports (token_id, assistant_id, tool, summary, created_at, reviewed_at) values ($1, 'finance', 'claude-code', 'old', $2, $3) returning id`, [tokenId, at, reviewedAt])).rows[0].id as string;
+    const [a, b, read, c] = [await add(`${year}-01-01T10:00:00Z`, null), await add(`${year}-01-01T11:00:00Z`, null), await add(`${year}-01-01T10:30:00Z`, `${year}-01-02T00:00:00Z`), await add(`${year}-01-01T12:00:00Z`, null)];
+    const since = new Date(`${year}-01-01T00:00:00Z`);
+    expect(await store.expireSessionReports(new Date(`${year}-01-01T11:30:00Z`), T0)).toBe(2);
+    const rows = (await pool.query('select id, reviewed_at, review_id from public.session_reports where id = any($1)', [[a, b, read, c]])).rows;
+    for (const id of [a, b]) {
+      const row = rows.find((r) => r.id === id);
+      expect(new Date(row.reviewed_at).toISOString()).toBe(T0.toISOString());
+      expect(row.review_id).toBeNull(); // closed, and no review read it
+    }
+    expect(new Date(rows.find((r) => r.id === read).reviewed_at).toISOString()).toBe(`${year}-01-02T00:00:00.000Z`); // one already read keeps its time
+    expect(rows.find((r) => r.id === c).reviewed_at).toBeNull(); // filed after the time: still waiting
+    expect((await store.sessionReports({ since, unreviewedOnly: true })).map((r) => r.id)).toEqual([c]);
+    expect(await store.expireSessionReports(new Date(`${year}-01-01T11:30:00Z`), T0)).toBe(0); // nothing left to close
+  });
+
   it('says what became of the task with a key, or null when there is none', async ({ skip }) => {
     if (!migrated) skip();
     const key = KEY + randomUUID();

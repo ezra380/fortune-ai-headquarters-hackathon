@@ -25,9 +25,8 @@ The owner texts Owner HQ: *"Get me three plans to double profit this month."*
    asked, which department proposed it, the metrics it cited, who decided.
 8. Questions to any department run through **Cloudflare Code Mode**: one script over that assistant's
    read-only tools, in a sandbox. The **HQ Manager** reviews every assistant's work and the reports outside AI
-   tools filed (`REVIEW`, and once a day), applies lessons and skill notes itself as new, reversible versions of the
-   assistant's profile in Supabase, and leaves changes to what an assistant may read, or to its model, for the
-   owner's code (`ADOPT`).
+   tools filed (`REVIEW`, and once a day) and recommends at most three changes to an assistant's profile in
+   Supabase. Every one waits for the owner's one-time code (`ADOPT`) and then becomes a new, reversible version.
 
 Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what: [`docs/LANES.md`](docs/LANES.md)
 

@@ -19,7 +19,7 @@ const row = (id: AssistantId, over: Record<string, unknown> = {}) => ({
 
 describe('workerProfiles (scripted store)', () => {
   it('serves a stored profile: its skill with the standing lessons, its model, its reads', async () => {
-    const lesson = { text: 'Ask which month before answering.', source: 'rec-9', adoptedAt: '2026-10-27T09:00:00Z' };
+    const lesson = { text: 'Ask which month before answering.', source: 'rec-9', adoptedAt: '2026-10-27T09:00:00Z', by: 'owner' };
     const log: string[] = [];
     const profiles = await workerProfiles({}, {
       assistantProfiles: async () => [row('finance', {

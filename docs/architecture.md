@@ -70,11 +70,12 @@ credentials, are ever used here.
   person's code: a plan for Finance is confirmed by the finance owner, not the owner.
 - **The HQ Manager** ([`manager.md`](manager.md)). Every finished task leaves a work report (steps, models,
   tokens, rule-based suggestions), and the reports outside AI tools file at a door are read too. `REVIEW` (and a
-  daily job) asks the manager to read them through Code Mode and recommend at most three typed changes. By kind, a
-  program decides who applies each: the manager applies a lesson or a skill note itself, as a new version of the
-  assistant's profile in Supabase (reversible from the history); a change to what an assistant may read, or to
-  the model it uses, waits for the owner, who approves it with `ADOPT <n> <code>`. The database is the source of
-  the lessons; H-MEM is a cache of them.
+  daily job) asks the manager to read them through Code Mode and recommend at most three typed changes (a lesson, a
+  skill note, a change to what an assistant may read, a change of model). Every one waits for the owner, who
+  approves it with `ADOPT <n> <code>`, and then becomes a new version of the assistant's profile in Supabase
+  (reversible from the history). A program table decides who applies each kind; today it names no one but the owner,
+  and the mechanism for the manager applying a lesson or a note by itself stays in the code, off, until Ezra
+  approves it in writing. The database is the source of the lessons; H-MEM is a cache of them.
 
 ## 4. Components
 

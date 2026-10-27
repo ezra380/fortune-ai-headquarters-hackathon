@@ -256,6 +256,55 @@ describe('read tools', () => {
     expect(text).not.toContain('482913');
   });
 
+  it('masks a phone number written any way, and a code written in two groups, in every string a tool returns', async () => {
+    const dirty = sessionRow({
+      summary: 'Rang (718)555-1234, then 718 5551234 and call 718-5551234; also +1 718 555 1234 and 7185551234.',
+      steps: [{ step: 'dialled 718.555.1234' }],
+      suggestions: [{ text: 'Reply ADOPT 1 482-913 or SEND 2 482 913, the code is 123456' }],
+      lessons: [{ text: 'Never keep 1 718 555 1234' }],
+    });
+    const out = (await createReadTools(setup({ sessions: [dirty] }).ctx, 'manager').list_session_reports!.run({ sinceHours: 24 })) as {
+      reports: { summary: string; steps: string[]; suggestions: string[]; lessons: string[] }[];
+    };
+    const text = JSON.stringify(out);
+    expect(text).not.toMatch(/718|555|482|123456/);
+    expect(out.reports[0]!.summary).toBe('Rang [phone], then [phone] and call [phone]; also [phone] and [phone].');
+    expect(out.reports[0]!.steps).toEqual(['dialled [phone]']);
+    expect(out.reports[0]!.suggestions).toEqual(['Reply ADOPT 1 •••••• or SEND 2 ••••••, the code is ••••••']);
+    expect(out.reports[0]!.lessons).toEqual(['Never keep [phone]']);
+  });
+
+  it('leaves an id or a hash alone, even when it holds a long run of digits, so no report or query can be lost to the mask', async () => {
+    const id = '3f2a1b4c-1234-4567-8901-a12345678901'; // its last group is a letter and eleven digits: a phone shape inside an id
+    const out = (await createReadTools(setup({ sessions: [sessionRow({ id })] }).ctx, 'manager').list_session_reports!.run({ sinceHours: 24 })) as { reports: { id: string }[] };
+    expect(out.reports[0]!.id).toBe(id);
+    const hash = `a${'1234567890'}b${'9876543210'}c`.padEnd(64, 'f');
+    const metrics = (await createReadTools(setup().ctx, 'finance').get_finance_metrics!.run({ period: '2026-09' })) as { queryHash: string };
+    expect(metrics.queryHash).toBe('c'.repeat(64));
+    expect(JSON.stringify(await createReadTools(setup({ sessions: [sessionRow({ summary: hash })] }).ctx, 'manager').list_session_reports!.run({ sinceHours: 24 }))).toContain(hash);
+    // A bare ten-digit string with nothing else in it is a phone number, not an id.
+    const bare = (await createReadTools(setup({ sessions: [sessionRow({ summary: '7185551234' })] }).ctx, 'manager').list_session_reports!.run({ sinceHours: 24 })) as { reports: { summary: string }[] };
+    expect(bare.reports[0]!.summary).toBe('[phone]');
+  });
+
+  it('shows a department only the reports filed at its own door, and the manager every door\'s', async () => {
+    const { ctx, calls } = setup();
+    for (const caller of ['salon', 'online', 'finance', 'owner'] as const) {
+      const tool = createReadTools(ctx, caller).list_session_reports!;
+      await tool.run({ sinceHours: 24 });
+      await tool.run({ sinceHours: 24, assistant: caller });
+      await expect(tool.run({ sinceHours: 24, assistant: caller === 'salon' ? 'online' : 'salon' })).rejects.toThrow(`list_session_reports: the ${caller} assistant reads the reports filed at its own door only.`);
+      await expect(tool.run({ sinceHours: 24, assistant: 'manager' })).rejects.toThrow('reads the reports filed at its own door only');
+    }
+    expect(calls.sessions.map((q) => q.assistant)).toEqual(['salon', 'salon', 'online', 'online', 'finance', 'finance', 'owner', 'owner']); // the refused calls never reached the store
+    calls.sessions.length = 0;
+    const manager = createReadTools(ctx, 'manager').list_session_reports!;
+    await manager.run({ sinceHours: 24 });
+    await manager.run({ sinceHours: 24, assistant: 'online' });
+    await manager.run({ sinceHours: 24, onlyNew: true });
+    expect(calls.sessions.map((q) => q.assistant)).toEqual([undefined, 'online', undefined]);
+  });
+
   it('checks the arguments of the session reader with plain sentences', async () => {
     const tool = createReadTools(setup().ctx, 'manager').list_session_reports!;
     await expect(tool.run({})).rejects.toThrow(/argument "sinceHours"/);
