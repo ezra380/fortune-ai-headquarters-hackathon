@@ -112,14 +112,16 @@ async function startRound(
 
 /**
  * A text from anyone but the owner. A request for plans that reaches the finance assistant is one finance
- * assistant's job (the proposal comes back to the sender); everything else is saved for its department.
+ * assistant's job (the proposal comes back to the sender). Anything else is a question for the sender's
+ * OWN assistant, on its own reads: a department head is boss of her field and asks only her assistant.
  */
 async function otherText(
   person: PersonRow, body: string, decision: FrontDoorDecision, task: TaskRow, deps: WorkerDeps, runId: string, started: Date,
 ): Promise<Outcome> {
   const { targetAssistant, intent } = decision;
-  if (targetAssistant !== 'finance' || intent !== 'plans') {
-    await text(deps, person, person.assistant_id, `That sounds like one for the ${targetAssistant} assistant. In this build only the finance assistant runs, so I've saved it.`, `reply:${task.id}`);
+  if (intent !== 'plans') return askQuestion(person, person.assistant_id, body, task, deps, runId);
+  if (targetAssistant !== 'finance') {
+    await text(deps, person, person.assistant_id, 'The owner asks the departments for plans. I can answer questions about your own numbers.', `reply:${task.id}`);
     return done;
   }
   const request = await deps.store.postMessage({

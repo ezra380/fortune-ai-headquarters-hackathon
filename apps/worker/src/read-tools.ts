@@ -85,6 +85,11 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
       metrics: metrics.filter((m) => !only || m.business === only).map((m) => ({ id: m.id, label: m.label, value: m.value, unit: m.unit, business: m.business })),
     };
   };
+  // The exact ids a script can look up, so it never guesses at a label ("Google Ads Spend" matched nothing).
+  const metricIds = (only?: 'online' | 'salon') => {
+    const listed = (ctx.data?.catalog ?? []).filter((m) => !only || m.business === only);
+    return listed.length === 0 ? '' : ` Metric ids: ${listed.map((m) => `${m.id} (${m.label}, ${m.unit})`).join('; ')}.`;
+  };
   const decisions = (assistant: AssistantId, query: string, limit: number | undefined) => ({
     decisions: ctx.brain.memory(assistant).recallDecisions(query, clampRows(limit, 5)).map((d) => ({
       id: d.memory.id, text: d.memory.content, relevance: round(d.relevance, 2),
@@ -95,21 +100,21 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
   const tools: ReadTool[] = [
     tool({
       name: 'get_finance_metrics',
-      description: 'Salon, online and combined business metrics for a period, read from Zetaris. Each metric keeps its business label.',
+      description: `Salon, online and combined business metrics for a period, read from Zetaris. Each metric keeps its business label.${metricIds()}`,
       signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
       schema: z.object({ period: Period }).strict(),
       run: ({ period }) => financeMetrics(period),
     }),
     tool({
       name: 'get_online_metrics',
-      description: 'Only the online store metrics for a period, read from Zetaris.',
+      description: `Only the online store metrics for a period, read from Zetaris.${metricIds('online')}`,
       signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
       schema: z.object({ period: Period }).strict(),
       run: ({ period }) => financeMetrics(period, 'online'),
     }),
     tool({
       name: 'get_salon_metrics',
-      description: "Only the salon metrics for a period, read from Zetaris (synthetic data here, standing in for the head stylist's own backend).",
+      description: `Only the salon metrics for a period, read from Zetaris (synthetic data here, standing in for the head stylist's own backend).${metricIds('salon')}`,
       signature: `(args: { period: "2026-09" | "2026-10-mtd" }) => Promise<${Metrics}>`,
       schema: z.object({ period: Period }).strict(),
       run: ({ period }) => financeMetrics(period, 'salon'),

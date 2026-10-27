@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Metric, type DataPort } from '@fahq/contracts';
-import { FINANCE_VIEW, METRIC_BY_ID, financeQuery, financeViewBody } from './finance-sql.ts';
+import { FINANCE_VIEW, METRICS, METRIC_BY_ID, financeQuery, financeViewBody } from './finance-sql.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from './source-server.ts';
 import { PERIODS, type Period } from './synthetic.ts';
 import { createZetarisClient, zetarisConfigFromEnv, type ZetarisClient } from './zetaris-client.ts';
@@ -26,6 +26,8 @@ export function createZetarisDataPort(
   const ensureSources = deps.ensureSources ?? (() => ensureSourceServer(port));
 
   return {
+    catalog: METRICS.map(({ id, label, unit, business }) => ({ id, label, unit, business })),
+
     async health() {
       try {
         await ensureSources();

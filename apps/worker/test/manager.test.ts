@@ -67,6 +67,7 @@ const reads: Record<string, string[]> = {
   manager: ['list_work_reports', 'usage_summary', 'open_items'],
   finance: ['get_finance_metrics', 'recall_my_decisions', 'my_lessons'],
   owner: ['usage_summary', 'latest_proposal', 'list_lessons'],
+  salon: ['get_salon_metrics', 'recall_my_decisions', 'my_lessons'],
 };
 
 describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and Code Mode scripted)', () => {
@@ -514,11 +515,22 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
       expect(model.of('finance.answer')[0]).toMatchObject({ model: 'MOCK/finance/answer' });
     });
 
-    it('keeps a salon or online sender\'s question out of the owner\'s tools', async () => {
+    it('answers a department head from her own assistant\'s tools, never the owner\'s', async () => {
       const salonPhone = '+15550111003';
+      codeMode.respond(() => okResult({ view: 'fortune_demo_finance_mart', washSet: 6200 }));
       model.script('front-door', router('owner', 'status'));
+      model.script('salon.answer', 'Wash and set brought in 6200 dollars.');
       await textIn(salonPhone, 'How did finance do today?');
-      expect(lastTo(salonPhone)).toBe("That sounds like one for the owner assistant. In this build only the finance assistant runs, so I've saved it.");
+      expect(lastTo(salonPhone)).toBe('Wash and set brought in 6200 dollars.');
+      expect(codeMode.calls[0]).toMatchObject({ purpose: 'salon.lookup', model: 'MOCK/salon/code', skill: 'SKILL(salon)' });
+      expect(codeMode.calls[0]!.tools.map((t) => t.name)).toEqual(reads.salon);
+    });
+
+    it('tells a department head that plans for another department are the owner\'s to ask for', async () => {
+      const salonPhone = '+15550111003';
+      model.script('front-door', router('online', 'plans'));
+      await textIn(salonPhone, 'Get the online team three plans.');
+      expect(lastTo(salonPhone)).toBe('The owner asks the departments for plans. I can answer questions about your own numbers.');
       expect(codeMode.calls).toHaveLength(0);
     });
   });

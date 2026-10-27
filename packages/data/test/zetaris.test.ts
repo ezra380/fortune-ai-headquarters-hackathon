@@ -172,6 +172,9 @@ describe('Zetaris DataPort', () => {
     }
     const again = await port.getFinanceMetrics({ asOf: '2026-10-27T12:00:00.000Z', period: '2026-09' });
     expect(again.queryHash).toBe(r.queryHash);
+    // The catalog a read tool lists is exactly what the view returns, with the same labels.
+    expect(port.catalog!.map((c) => c.id).sort()).toEqual(r.metrics.map((m) => m.id).sort());
+    for (const m of r.metrics) expect(port.catalog!.find((c) => c.id === m.id)).toEqual({ id: m.id, label: m.label, unit: m.unit, business: m.business });
   });
 
   it('fails loudly on unknown metrics, bad values, no rows and unknown periods', async () => {

@@ -147,6 +147,19 @@ describe('read tools', () => {
     await expect(tools.get_salon_metrics!.run({ period: '2026-08' })).rejects.toThrow(/argument "period"/);
   });
 
+  it('names the exact metric ids in each metric tool, only the ones that tool returns', () => {
+    const catalog = mockMetrics.map(({ id, label, unit, business }) => ({ id, label, unit, business }));
+    const tools = createReadTools(setup({ data: { ...dataMock, catalog } }).ctx, 'owner');
+    expect(tools.get_finance_metrics!.description).toContain('Metric ids: m:online.revenue.mazali (Online Mazali revenue, usd); m:online.ads.google.spend (Google ad spend, usd);');
+    expect(tools.get_finance_metrics!.description).toContain('m:salon.appointments.count (Salon appointments, count).');
+    expect(tools.get_online_metrics!.description).toContain('m:online.ads.google.roas (Google ad return, ratio)');
+    expect(tools.get_online_metrics!.description).not.toContain('m:salon.');
+    expect(tools.get_salon_metrics!.description).toContain('m:salon.revenue.wash_set (Salon wash and set revenue, usd)');
+    expect(tools.get_salon_metrics!.description).not.toContain('m:online.');
+    // A port without a catalog keeps the plain description.
+    expect(createReadTools(setup().ctx, 'owner').get_finance_metrics!.description).not.toContain('Metric ids');
+  });
+
   it('says plainly when business data is not connected', async () => {
     const tools = createReadTools(setup({ data: null }).ctx, 'finance');
     await expect(tools.get_finance_metrics!.run({ period: '2026-09' })).rejects.toThrow('Business data is not connected, so there are no metrics to read.');

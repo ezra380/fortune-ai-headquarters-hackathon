@@ -15,7 +15,14 @@ export interface DataPort {
     queryHash: string;
     view: string;
   }>;
+  /**
+   * The metrics this port can return, so a read tool can name the exact ids up front instead of
+   * leaving a script to guess labels. Optional: a port without it just gets a shorter description.
+   */
+  readonly catalog?: readonly MetricInfo[];
 }
+
+export type MetricInfo = Pick<Metric, 'id' | 'label' | 'unit' | 'business'>;
 
 export type PrintResult =
   | { status: 'printed'; jobId: string }
