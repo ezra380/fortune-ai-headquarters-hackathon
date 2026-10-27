@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { AssistantId } from '@fahq/contracts';
+import { AssistantId } from '@fahq/contracts';
 import {
-  KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, READ_TOOL_NAMES, applyProfileChange, changeOf, checkChangeText, checkProfileRow,
-  dataNeverStored, describeChange, loadProfiles, managerNotes, withManagerNotes, type ChangeOptions, type ProfileContent,
+  KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, MONEY_READS, READ_SCOPE, READ_TOOL_NAMES, applyProfileChange, changeOf, checkChangeText,
+  checkProfileRow, dataNeverStored, describeChange, loadProfiles, managerNotes, withManagerNotes, type ChangeOptions, type ProfileContent, type ReadToolName,
 } from '../src/index.ts';
 
 // The changes the HQ Manager may make to a profile: pure functions, so every rule has a case here.
@@ -250,6 +250,36 @@ describe('a change of read tools', () => {
       .toBe('the online assistant may never read "get_finance_metrics"');
     expect(reason(applyProfileChange(content('manager'), { kind: 'reads', add: ['get_finance_metrics'], remove: [] }, options())))
       .toBe('the manager assistant may never read "get_finance_metrics"');
+  });
+
+  // Second-key review of merge wave 1: the wall named three tools and predated the division reads, so a salon profile
+  // could be given the online store's customer rows, and the manager the money by another tool. It now follows each tool's
+  // declared scope (READ_SCOPE), so a new tool cannot skip it.
+  it('walls every division read by its scope: the salon reads no online or shared data, the online store no salon or shared data, the manager no money', () => {
+    expect(reason(applyProfileChange(content('salon'), { kind: 'reads', add: ['get_waiting_conversations'], remove: [] }, options())))
+      .toBe('the salon assistant may never read "get_waiting_conversations"');
+    expect(reason(applyProfileChange(content('online'), { kind: 'reads', add: ['get_repair_tickets'], remove: [] }, options())))
+      .toBe('the online assistant may never read "get_repair_tickets"');
+    expect(reason(applyProfileChange(content('manager'), { kind: 'reads', add: ['get_company_overview'], remove: [] }, options())))
+      .toBe('the manager assistant may never read "get_company_overview"');
+    const walled = (id: AssistantId, name: ReadToolName) =>
+      (id === 'salon' || id === 'online') ? READ_SCOPE[name] !== id && READ_SCOPE[name] !== 'none' : id === 'manager' && MONEY_READS.includes(name);
+    for (const id of AssistantId.options) {
+      for (const name of READ_TOOL_NAMES) {
+        const refusal = checkProfileRow({ assistant_id: id, reads: [...new Set([...files[id].reads, name])], skill: files[id].skill }, READ_TOOL_NAMES);
+        expect(refusal, `${id} ${name}`).toBe(walled(id, name) ? `the ${id} assistant may never read "${name}"` : null);
+      }
+    }
+    // At least the tools the review named.
+    for (const name of ['get_budget_room', 'get_company_overview', 'get_data_quality', 'get_supplier_invoices', 'get_waiting_conversations', 'get_low_stock_interest'] as const) expect(walled('salon', name), name).toBe(true);
+    for (const name of ['get_repair_tickets', 'get_company_overview', 'get_data_quality', 'get_supplier_invoices'] as const) expect(walled('online', name), name).toBe(true);
+    for (const name of ['get_company_overview', 'get_budget_room', 'get_supplier_invoices', 'get_finance_metrics'] as const) expect(walled('manager', name), name).toBe(true);
+  });
+
+  it('declares a scope for every read tool, and for nothing else', () => {
+    expect(Object.keys(READ_SCOPE).sort()).toEqual([...READ_TOOL_NAMES].sort());
+    for (const name of READ_TOOL_NAMES) expect(['salon', 'online', 'both', 'none'], name).toContain(READ_SCOPE[name]);
+    for (const name of MONEY_READS) expect(READ_TOOL_NAMES, name).toContain(name);
   });
 
   it('refuses to leave an assistant with nothing to read', () => {

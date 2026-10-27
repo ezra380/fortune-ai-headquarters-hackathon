@@ -16,7 +16,7 @@ import { seedFromFiles, type Queryable, type SeedResult } from './seed.ts';
 export type ModelJob = 'route' | 'code' | 'answer' | 'plan' | 'review';
 export type ModelSetting = { model: string; thinking: boolean; maxTokens: number; temperature: number };
 
-/** Every function an assistant can ever be given. None of them changes anything. */
+/** Every function an assistant can ever be given. None of them changes anything. Each declares whose data it returns (READ_SCOPE in rows.ts). */
 export const READ_TOOL_NAMES = [
   'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons',
   'list_lessons', 'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
@@ -184,8 +184,8 @@ export function restoreProfileVersion(db: Queryable, assistant: AssistantId, ver
 }
 
 export type { RestoreResult } from './restore.ts';
-export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
-export type { ParsedProfileRows } from './rows.ts';
+export { MONEY_READS, ProfileLesson as ProfileLessonSchema, ProfileRow, READ_SCOPE, checkProfileRow, parseProfileRows } from './rows.ts';
+export type { ParsedProfileRows, ReadScope } from './rows.ts';
 export { DEFAULT_PROFILE_TTL_MS, MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, skillWithLessons } from './source.ts';
 export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, dataNeverStored, describeChange, managerNotes, withManagerNotes } from './changes.ts';
 export type { AppliedChange, ChangeOptions, ProfileChange, ProfileContent } from './changes.ts';
