@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { WeeklyReport, WORKER_IDS, WorkerReport } from '@fahq/contracts';
 import type { AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagerReview, Receipt, Recommendation, RecommendationDetail, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
@@ -26,7 +27,7 @@ export type MessageRow = {
 };
 export type OutboxRow = {
   id: string;
-  channel: 'sms' | 'print';
+  channel: 'sms' | 'print' | 'email';
   to_person_id: string;
   from_assistant: AssistantId;
   body: string;
@@ -245,7 +246,7 @@ export function createStore(url: string, serviceKey: string) {
         { message_id: string; approver_person_id: string }[];
       return rows[0] ?? null;
     },
-    async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
+    async addOutbox(o: { channel: 'sms' | 'print' | 'email'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
       must(await db.from('outbox').upsert(
         { channel: o.channel, to_person_id: o.toPersonId, from_assistant: o.from, body: o.body.slice(0, 1600), attachment_ref: o.attachmentRef, dedupe_key: o.dedupeKey },
         { onConflict: 'dedupe_key', ignoreDuplicates: true },
@@ -521,7 +522,35 @@ export function createStore(url: string, serviceKey: string) {
       const row = must(await db.from('tasks').select('status').eq('idempotency_key', key).maybeSingle(), 'task') as { status: string } | null;
       return row?.status ?? null;
     },
+
+    // ---- delivery reads (W2) -----------------------------------------------------------------
+    // What the outbox needs to print or email a report: the stored report, checked with its schema before it is used.
+
+    /** One weekly report as stored, or null when there is no such row. A row that does not match its schema is an error. */
+    async weeklyReportById(id: string): Promise<{ id: string; report: WeeklyReport } | null> {
+      const row = must(await db.from('weekly_reports').select('id, report').eq('id', id).maybeSingle(), 'weekly report') as { id: string; report: unknown } | null;
+      return row ? { id: row.id, report: parseReport(WeeklyReport, row.report, 'weekly report') } : null;
+    },
+    /** One worker report as stored, or null when there is no such row. */
+    async workerReportById(id: string): Promise<WorkerReport | null> {
+      const row = must(await db.from('worker_reports').select('report').eq('id', id).maybeSingle(), 'worker report') as { report: unknown } | null;
+      return row ? parseReport(WorkerReport, row.report, 'worker report') : null;
+    },
+    /** The worker reports with these ids, in the order of the registry (a packet always reads the same way). Ids with no row are left out. */
+    async workerReportsByIds(ids: readonly string[]): Promise<WorkerReport[]> {
+      if (ids.length === 0) return [];
+      const rows = must(await db.from('worker_reports').select('report').in('id', [...ids]), 'worker reports') as { report: unknown }[];
+      const reports = rows.map((r) => parseReport(WorkerReport, r.report, 'worker report'));
+      return reports.sort((a, b) => WORKER_IDS.indexOf(a.workerId) - WORKER_IDS.indexOf(b.workerId));
+    },
   };
+}
+
+/** Checks a stored report with its schema. The error is a fixed sentence: the stored words never reach a log or an outbox row. */
+function parseReport<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } }, value: unknown, what: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new Error(`the stored ${what} does not match its contract`);
+  return parsed.data;
 }
 
 export type Store = ReturnType<typeof createStore>;

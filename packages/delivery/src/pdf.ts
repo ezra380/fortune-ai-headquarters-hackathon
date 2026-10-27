@@ -62,16 +62,33 @@ class Writer {
   }
 }
 
-function wrap(text: string, font: PDFFont, size: number, width: number): string[] {
+/** A word wider than the line (a long id, a pasted address) is cut into pieces that fit, so it never runs off the page. */
+function breakWord(word: string, font: PDFFont, size: number, width: number): string[] {
+  const pieces: string[] = [];
+  let piece = '';
+  for (const ch of word) {
+    if (piece && font.widthOfTextAtSize(piece + ch, size) > width) {
+      pieces.push(piece);
+      piece = ch;
+    } else piece += ch;
+  }
+  return [...pieces, piece];
+}
+
+export function wrap(text: string, font: PDFFont, size: number, width: number): string[] {
   const rows: string[] = [];
   for (const paragraph of text.split('\n')) {
     let row = '';
     for (const word of paragraph.split(/\s+/).filter(Boolean)) {
       const next = row ? `${row} ${word}` : word;
-      if (font.widthOfTextAtSize(next, size) > width && row) {
-        rows.push(row);
-        row = word;
-      } else row = next;
+      if (font.widthOfTextAtSize(next, size) <= width) {
+        row = next;
+        continue;
+      }
+      if (row) rows.push(row);
+      const pieces = font.widthOfTextAtSize(word, size) > width ? breakWord(word, font, size, width) : [word];
+      rows.push(...pieces.slice(0, -1));
+      row = pieces.at(-1)!;
     }
     rows.push(row);
   }

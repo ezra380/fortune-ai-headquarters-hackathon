@@ -42,6 +42,8 @@ export type WorkerDeps = {
   smsLive: boolean;
   printers: Partial<Record<AssistantId, string>>;
   printDir: string;
+  /** The one address every report email goes to until real data is connected (HQ_REPORT_TO). Absent = report emails are skipped. */
+  reportTo?: string;
   /** Dry-run SMS go here (and to the console) instead of Twilio. */
   smsSink?: (message: { to: string; body: string }) => void;
 };
