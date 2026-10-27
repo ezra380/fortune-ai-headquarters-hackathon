@@ -43,6 +43,8 @@ export interface MemoryRecordLike {
   confidence: number;
   source: string;
   supersededBy?: string;
+  /** When the memory was written (milliseconds); H-MEM sets it. */
+  timestamp?: number;
 }
 
 export interface HmemLike {

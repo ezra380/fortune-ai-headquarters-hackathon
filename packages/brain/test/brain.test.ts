@@ -73,3 +73,79 @@ describe.skipIf(!haveMeterless)('assistant memory (Meterless H-MEM)', () => {
     expect(finance.declinedSimilarTo('Balanced growth via price optimization')).toHaveLength(0);
   });
 });
+
+describe.skipIf(!haveMeterless)('lessons and review notes (Meterless H-MEM)', () => {
+  const lesson = (n: number) => ({
+    recommendationId: `00000000-0000-4000-8000-00000000000${n}`,
+    text: `Ask for a lever on every stop-loss threshold number ${n}`,
+    adoptedBy: 'demo-p-owner',
+    reviewId: '33333333-3333-4333-8333-333333333333',
+    runId: `r${n}`,
+  });
+
+  it('keeps an adopted lesson as long-term memory, once per recommendation, newest first', async () => {
+    const brain = await openBrain({ meterlessDir, dataDir: tmp(), actor: 'test-worker', clock: fixedClock });
+    const finance = brain.memory('finance');
+    const first = finance.rememberLesson(lesson(1));
+    expect(first).toMatchObject({ layer: 'long_term', confidence: 0.9 });
+    expect(first.tags).toEqual(expect.arrayContaining(['lesson', 'adopted', `recommendation:${lesson(1).recommendationId}`]));
+    expect(finance.rememberLesson(lesson(1)).id).toBe(first.id); // a retried task finds the same memory
+
+    const second = finance.rememberLesson({ ...lesson(2), text: 'Never mix salon and online numbers in one sentence about reach' });
+    expect(finance.lessons().map((m) => m.id)).toEqual([second.id, first.id]);
+    expect(finance.lessons(1).map((m) => m.id)).toEqual([second.id]);
+    expect(brain.memory('salon').lessons()).toEqual([]); // each assistant keeps its own
+    expect(brain.memory('manager').lessons()).toEqual([]);
+  });
+
+  it('never returns a lesson from recallDecisions, and still returns a decision', async () => {
+    const brain = await openBrain({ meterlessDir, dataDir: tmp(), actor: 'test-worker', clock: fixedClock });
+    const finance = brain.memory('finance');
+    finance.rememberLesson({ ...lesson(1), text: 'Wash and set prices should wait for a decision from the owner' });
+    expect(finance.recallDecisions('wash and set prices owner decision')).toEqual([]);
+
+    finance.rememberDecision({ proposalId: 'p5', personId: 'demo-p-finance-owner', verdict: 'signed', planRank: 2, planTitle: 'Evening wash and set slots', runId: 'r5' });
+    const decisions = finance.recallDecisions('wash and set prices owner decision evening slots', 10);
+    expect(decisions.length).toBeGreaterThan(0);
+    expect(decisions.every((d) => d.memory.tags.includes('decision') && !d.memory.tags.includes('lesson'))).toBe(true);
+    expect(finance.lessons()).toHaveLength(1); // and the decision is not a lesson
+  });
+
+  it('keeps a review note short-term and unapproved, once per review, out of decisions and lessons', async () => {
+    const brain = await openBrain({ meterlessDir, dataDir: tmp(), actor: 'test-worker', clock: fixedClock });
+    const manager = brain.memory('manager');
+    const note = manager.rememberReviewNote({ reviewId: 'rev1', summary: 'Two tasks, one needed a second round.', runId: 'r1' });
+    expect(note).toMatchObject({ layer: 'short_term', confidence: 0.4 });
+    expect(note.tags).toEqual(expect.arrayContaining(['review', 'unapproved', 'review:rev1']));
+    expect(manager.rememberReviewNote({ reviewId: 'rev1', summary: 'changed words', runId: 'r2' }).id).toBe(note.id);
+    expect(manager.recallDecisions('two tasks second round')).toEqual([]);
+    expect(manager.lessons()).toEqual([]);
+  });
+});
+
+describe.skipIf(!haveMeterless)('shared record: reports, reviews, adoptions', () => {
+  it('records a report, a review and an adoption, persists them, and replays without duplicates', async () => {
+    const dataDir = tmp();
+    const brain = await openBrain({ meterlessDir, dataDir, actor: 'test-worker', clock: fixedClock });
+    const taskId = '44444444-4444-4444-8444-444444444444';
+    const reviewId = '55555555-5555-4555-8555-555555555555';
+    const recommendationId = '66666666-6666-4666-8666-666666666666';
+    const calls = async (b: typeof brain) => {
+      await b.record.report({ taskId, assistant: 'finance', outcome: 'done', summary: 'mailbox task done in 9 s', ...stamp(1) });
+      await b.record.review({ reviewId, recommendationCount: 2, reviewed: ['finance', 'owner'], ...stamp(2) });
+      await b.record.adoption({ recommendationId, reviewId, personId: 'demo-p-owner', personName: 'Demo Owner', assistant: 'finance', ...stamp(3) });
+    };
+    await calls(brain);
+    const events = brain.record.timeline(1000);
+    const relates = events.filter((e) => e.type === 'relate').length;
+    expect(relates).toBeGreaterThanOrEqual(7); // reported, wrote, 2x reviewed, recommended, adopted, guides
+    const summaries = brain.record.audit(1000).map((a) => a.summary).join('\n');
+    for (const verb of ['reported', 'wrote', 'reviewed', 'recommended', 'adopted', 'guides']) expect(summaries).toContain(`-[${verb}]->`);
+
+    await calls(brain); // the same events again: nothing new in the relationships
+    expect(brain.record.timeline(1000).filter((e) => e.type === 'relate').length).toBe(relates);
+
+    const reader = await openBrain({ meterlessDir, dataDir, actor: 'reader', clock: fixedClock });
+    expect(reader.record.timeline(1000).filter((e) => e.type === 'relate').length).toBe(relates);
+  });
+});
