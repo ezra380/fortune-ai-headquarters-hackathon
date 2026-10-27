@@ -7,9 +7,9 @@ import { DEFAULT_PERIODS, type DataPort, type DeliveryPort } from '@fahq/contrac
 import { openBrain } from '@fahq/brain';
 import { createCodeModeRunner } from '@fahq/codemode';
 import { modelsFromEnv, positiveInt } from '@fahq/models';
-import { loadProfiles } from '@fahq/profiles';
 import { financePeriod } from './finance.ts';
 import type { WorkerDeps } from './flows.ts';
+import { workerProfiles } from './profiles.ts';
 import { runConcurrently } from './runner.ts';
 import { scheduleEnabled, startScheduler } from './scheduler.ts';
 import { createStore } from './store.ts';
@@ -37,7 +37,7 @@ if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const models = modelsFromEnv(env);
-const profiles = loadProfiles(env);
+const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 const data = await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)');
 // A period the data does not serve would pass startup and fail every finance read, so it falls back, said plainly.
 const planning = financePeriod(env.FINANCE_PERIOD, data?.periods ?? DEFAULT_PERIODS);
@@ -45,31 +45,25 @@ if (planning.note) console.error(`worker: ${planning.note}`);
 // How many claim loops run in this one process. claim_task skips rows another loop holds, outbox claims are
 // atomic, the World Model queues its writes and H-MEM writes are synchronous, so loops never share a task.
 const concurrency = positiveInt(env, 'WORKER_CONCURRENCY', 2);
+const brain = await openBrain({
+  meterlessDir: path.resolve(root, env.METERLESS_DIR ?? '.local/meterless'),
+  dataDir: path.join(root, '.local/brain'),
+  actor: `worker@${os.hostname()}`,
+});
 const deps: WorkerDeps = {
-  store: createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY),
-  brain: await openBrain({
-    meterlessDir: path.resolve(root, env.METERLESS_DIR ?? '.local/meterless'),
-    dataDir: path.join(root, '.local/brain'),
-    actor: `worker@${os.hostname()}`,
-  }),
+  store,
+  brain,
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
   // The safety screen in front of every free text; GUARD=off turns it off.
   guard: models.guard ? { model: models.guardModel } : null,
   data,
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
-  // Each assistant's read-only profile: its skill text, the model for each job, its read tools.
+  // Each assistant's read-only profile (its row in the database, else its file): skill text, model for each job, read tools.
   // Reasoning on before each script: in live runs it read the right metrics more often, at about 35 s a
   // question instead of 10 (docs/research/codemode-savings-summary-2026-10-27.md). CODE_THINKING=off turns it off.
   codeMode: createCodeModeRunner({ model: models.nvidia, thinking: env.CODE_THINKING !== 'off' }),
-  profiles: {
-    skill: (id) => profiles[id].skill,
-    model: (id, job) => {
-      const setting = profiles[id].models[job];
-      if (!setting) throw new Error(`The ${profiles[id].title} assistant has no model for "${job}".`);
-      return setting.model;
-    },
-    reads: (id) => profiles[id].reads,
-  },
+  // The lessons in these profiles are copied into this machine's H-MEM, which the plan writers read.
+  profiles: await workerProfiles(env, store, () => new Date(), console.error, brain),
   now: () => new Date(),
   worker: `worker@${os.hostname()}:${process.pid}`,
   live: true,

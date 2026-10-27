@@ -295,3 +295,88 @@ export const DivisionBrief = z.object({
   ceoLine: z.string().min(1).max(140),
 });
 export type DivisionBrief = z.infer<typeof DivisionBrief>;
+
+// ---- Reports from outside AI tools ------------------------------------------------------------
+
+/** One list item in a session report. The database (door_file_report) checks the same limits. */
+const ReportStep = z.object({ step: z.string().min(1).max(80) }).strict();
+const ReportNote = z.object({ text: z.string().min(1).max(300) }).strict();
+
+/**
+ * What an outside AI tool (Claude Code, Cursor, Codex, Gemini) files at the end of a session through an
+ * assistant's door. The HQ Manager reads these. `key` makes a retry store once. The database checks the same
+ * limits and masks phone numbers and codes; the `file_work_report` tool checks them first, to say what is wrong.
+ */
+export const SessionReport = z.object({
+  key: z.string().regex(/^[A-Za-z0-9._:-]{8,80}$/).optional(),
+  tool: z.string().min(1).max(60),
+  summary: z.string().min(1).max(2000),
+  steps: z.array(ReportStep).max(30).optional(),
+  suggestions: z.array(ReportNote).max(10).optional(),
+  lessons: z.array(ReportNote).max(10).optional(),
+}).strict();
+export type SessionReport = z.infer<typeof SessionReport>;
+
+/** The most bytes of JSON a door takes for one report (the database allows 32 KB of its own rendering; this leaves room). */
+export const SESSION_REPORT_MAX_BYTES = 30 * 1024;
+
+// ---- Typed changes: what the HQ Manager may change in a profile, and who applies it ----------------------
+
+/**
+ * What a recommendation changes in the assistant's profile:
+ *  - lesson: one standing lesson (the profile's newest ten reach every prompt);
+ *  - skill_note: one line added to the assistant's instructions;
+ *  - reads: the read tools the assistant may use (data access);
+ *  - model: the model that does one of its jobs (cost).
+ * An older recommendation has no kind: it was a lesson.
+ */
+export const ChangeKind = z.enum(['lesson', 'skill_note', 'reads', 'model']);
+export type ChangeKind = z.infer<typeof ChangeKind>;
+
+/**
+ * Who applies a kind, when the HQ Manager is allowed to apply anything by itself. The program reads this table, never
+ * the model. It is all false: nothing changes an assistant's profile without a person's one-time code, so every kind
+ * waits for the owner's ADOPT. (The manager once applied lessons and skill notes at once; the independent review of
+ * 2026-10-27 found that an approval path with no code, fed by outside tools' reports, was a decision only Ezra can make.
+ * The mechanism is still in the worker, tested, and off. To turn it on, Ezra approves it in writing and a person
+ * changes this table; the review lists what must be added first, see docs/manager.md, "Who decides what changes".)
+ */
+export const MANAGER_APPLIES: Record<ChangeKind, boolean> = { lesson: false, skill_note: false, reads: false, model: false };
+
+const ReadToolNames = z.array(z.string().regex(/^[a-z][a-z_]{1,59}$/)).max(5).default([]);
+/** Read tools to add to and remove from an assistant. Whether a name is a real tool is checked against the profile rules. */
+export const ReadsChange = z.object({ add: ReadToolNames, remove: ReadToolNames }).strict();
+export type ReadsChange = z.infer<typeof ReadsChange>;
+
+/** A different model for one of the jobs the worker runs for an assistant. (Planning and routing are not the manager's to change.) */
+export const ModelChange = z.object({ job: z.enum(['code', 'answer', 'review']), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/:-]{0,119}$/) }).strict();
+export type ModelChange = z.infer<typeof ModelChange>;
+
+/** A recommendation with its kind. No kind means a lesson, so a review or a stored row from before kinds still reads. */
+export const TypedRecommendation = Recommendation.extend({
+  kind: ChangeKind.default('lesson'),
+  reads: ReadsChange.optional(),
+  model: ModelChange.optional(),
+}).superRefine((r, ctx) => {
+  const problem = (path: string, message: string) => ctx.addIssue({ code: 'custom', path: [path], message });
+  if (r.kind === 'reads') {
+    if (!r.reads || r.reads.add.length + r.reads.remove.length === 0) problem('reads', 'a reads change needs the tool names to add or remove');
+    else if (r.reads.add.some((name) => r.reads!.remove.includes(name))) problem('reads', 'a tool cannot be both added and removed');
+  } else if (r.reads) problem('reads', `a ${r.kind} recommendation takes no reads`);
+  if (r.kind === 'model') {
+    if (!r.model) problem('model', 'a model change needs the job and the model');
+  } else if (r.model) problem('model', `a ${r.kind} recommendation takes no model`);
+});
+export type TypedRecommendation = z.infer<typeof TypedRecommendation>;
+
+/** The HQ Manager's review with typed recommendations (the model's output, validated before anyone sees it). */
+export const TypedManagerReview = ManagerReview.extend({ recommendations: z.array(TypedRecommendation).max(3) });
+export type TypedManagerReview = z.infer<typeof TypedManagerReview>;
+
+/** The typed part of a stored recommendation (public.recommendations.detail), and why the program did not apply it. */
+export const RecommendationDetail = z.object({
+  reads: ReadsChange.optional(),
+  model: ModelChange.optional(),
+  refused: z.string().min(1).max(300).optional(),
+}).strict();
+export type RecommendationDetail = z.infer<typeof RecommendationDetail>;

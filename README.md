@@ -24,8 +24,9 @@ The owner texts Owner HQ: *"Get me three plans to double profit this month."*
 7. Everything is recorded in the **Meterless World Model**. "Why plan 2?" is answered from that graph: who
    asked, which department proposed it, the metrics it cited, who decided.
 8. Questions to any department run through **Cloudflare Code Mode**: one script over that assistant's
-   read-only tools, in a sandbox. The **HQ Manager** reviews every assistant's work (`REVIEW`), and the owner
-   adopts its recommendations by code (`ADOPT`).
+   read-only tools, in a sandbox. The **HQ Manager** reviews every assistant's work and the reports outside AI
+   tools filed (`REVIEW`, and once a day) and recommends at most three changes to an assistant's profile in
+   Supabase. Every one waits for the owner's one-time code (`ADOPT`) and then becomes a new, reversible version.
 
 Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what: [`docs/LANES.md`](docs/LANES.md)
 
@@ -45,7 +46,7 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what:
 | Departments propose together; Owner HQ picks three; explain why | **Working** with models **mocked** | Round, pick, number checks, retries and the World Model links tested on the real local database and Meterless; not yet run live end to end |
 | Ask any department; department heads ask their own | **Working** | Each answers through Code Mode on its own read tools; the salon is a stand-in on synthetic data |
 | Code Mode savings | **Measured live**, 8 runs | 73–88% fewer tokens than classic tool calling every run; answers less reliable with this small model (clean 5 of 15 reasoning off, 4 of 6 on, against 20 of 21): [summary](docs/research/codemode-savings-summary-2026-10-27.md) |
-| HQ Manager: work reports, `REVIEW`, `ADOPT`, lessons | **Working** with models **mocked** | Review numbers traced to the digest; adopted lessons reach the plan writers |
+| HQ Manager: work reports, `REVIEW`, `ADOPT`, lessons | **Working** with models **mocked** | Review numbers traced to the digest; lessons and skill notes applied by the manager as profile versions, read-tool and model changes by the owner's code; lessons reach the plan writers and every Code Mode answer |
 | Safety screen (Nemotron 3.5 content safety) | **Built**, fails closed | Every free text screened before any model acts; long texts screened in windows |
 | Business numbers through Zetaris | **Working** on local Zetaris | Three source databases federated into one governed view with data-quality rules; `npm run zetaris:setup` proves the live answer equals an independent computation (33 of 33 metrics, both periods) |
 | Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Divisions (digest, briefs, data requests), Owner HQ, Finance, Online Customer Service, the HQ Manager and the Salon stand-in; loopback only, numbers masked, codes redacted |
@@ -74,11 +75,12 @@ npm run zetaris:setup                   # Zetaris sources, views and the proof (
 npx tsx scripts/try-live-plans.ts       # LIVE Nemotron routing + plans on LIVE Zetaris metrics
 npm run console                         # the owner's read-only Admin console (127.0.0.1:5180)
 npm run worker -- --once                # drain the queue once (dry-run SMS without Twilio)
-npx tsx packages/codemode/src/serve.ts  # the brain MCP server behind Code Mode (stdio)
+npx tsx packages/codemode/src/serve.ts --local  # the brain MCP server behind Code Mode (stdio), file profiles
 ```
 
-Connect the brain to Claude Code: `claude mcp add fortune-brain -- npx tsx packages/codemode/src/serve.ts`.
-Cursor, Codex and Gemini CLI use the same command as a stdio MCP server.
+Connect the brain to Claude Code: `claude mcp add fortune-brain -- npx tsx packages/codemode/src/serve.ts --local`.
+Cursor, Codex and Gemini CLI use the same command as a stdio MCP server. To serve an assistant's stored profile and
+let the tool file its end-of-work report, give it a door token instead of `--local` (see `docs/manager.md`).
 
 ## Safety rules (each has a test)
 

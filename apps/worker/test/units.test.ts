@@ -477,6 +477,43 @@ describe('checkReview', () => {
       ],
     });
   });
+
+  it('reads a review from before kinds as lessons, and a typed one with its kind and detail', () => {
+    const old = checkReview(review(), digest, []);
+    expect(old.ok && old.review.recommendations.map((r) => r.kind)).toEqual(['lesson', 'lesson']);
+    const typed = checkReview(review({
+      recommendations: [{ ...rec(1, 'finance', 'Let finance see usage.'), kind: 'reads', reads: { add: ['usage_summary'] } }, { ...rec(2, 'online', 'Quote the return.'), kind: 'skill_note' }],
+    }), digest, []);
+    expect(typed.ok && typed.review.recommendations).toMatchObject([{ kind: 'reads', reads: { add: ['usage_summary'], remove: [] } }, { kind: 'skill_note' }]);
+    // The detail must fit the kind: a reads change with no tools, or a lesson that carries tools, goes back to the writer.
+    const bad = checkReview(review({ recommendations: [{ ...rec(1, 'finance', 'Let finance see usage.'), kind: 'reads' }, { ...rec(2, 'owner', 'Ask which.'), reads: { add: ['usage_summary'] } }] }), digest, []);
+    expect(bad).toEqual({ ok: false, objections: ['recommendations.0.reads: a reads change needs the tool names to add or remove', 'recommendations.1.reads: a lesson recommendation takes no reads'] });
+  });
+
+  it('asks the caller whether each change could be made, and names the recommendation that could not', () => {
+    const wouldApply = (r: { rank: number; assistant: string }) => (r.assistant === 'owner' ? 'the owner assistant has no such tool' : null);
+    expect(checkReview(review(), digest, [], wouldApply)).toEqual({ ok: false, objections: ['recommendation 2 cannot be made: the owner assistant has no such tool'] });
+    expect(checkReview(review({ recommendations: [rec(1, 'finance', 'Give every stop-loss a lever.')] }), digest, [], wouldApply).ok).toBe(true);
+  });
+
+  it('keeps a phone number and anything medical or about hair loss out of the summary, the findings and the recommendations', () => {
+    const check = checkReview(review({
+      summary: 'Finance handled 5 tasks; text +1 555 010 0001 about it.',
+      findings: [{ assistant: 'finance', text: 'Customers with hair loss asked twice.' }],
+      recommendations: [rec(1, 'finance', 'Give every stop-loss a lever.', 'A diagnosis came up in 5 tasks.')],
+    }), digest, []);
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.objections).toEqual(expect.arrayContaining([
+      'summary: it holds a phone number',
+      'finding 1: it touches medical or hair-loss data, which is never stored',
+      'recommendation 1 why: it touches medical or hair-loss data, which is never stored',
+    ]));
+  });
+
+  it('does not take a six-digit token count for a code', () => {
+    const big = { byAssistant: [{ assistant: 'finance', tasks: 5, inputTokens: 150000 }] };
+    expect(checkReview(review({ summary: 'Finance used 150000 tokens in.', findings: [], recommendations: [] }), big, []).ok).toBe(true);
+  });
 });
 
 describe('renderFacts', () => {

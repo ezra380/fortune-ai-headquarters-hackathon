@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AssistantId, type ReadTool } from '@fahq/contracts';
 import { READ_TOOL_NAMES, loadProfiles, pickTools, skillFrontmatter } from '../src/index.ts';
@@ -38,7 +40,7 @@ describe('the read-only profiles', () => {
     expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
     expect(profiles.online.reads).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'recall_my_decisions', 'my_lessons']);
     expect(profiles.salon.reads).toEqual(['get_salon_metrics', 'get_metric_series', 'get_repair_tickets', 'recall_my_decisions', 'my_lessons']);
-    expect(profiles.manager.reads).toEqual(['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality']);
+    expect(profiles.manager.reads).toEqual(['list_work_reports', 'list_session_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality']);
     expect(profiles.owner.writes).toEqual(['propose']);
     expect(profiles.finance.writes).toEqual(['propose', 'report']);
     expect(profiles.online.writes).toEqual(['propose', 'report']);
@@ -172,5 +174,20 @@ describe('pickTools', () => {
   it('does not take a name from the object prototype, and refuses a tool registered under another name', () => {
     expect(() => pickTools({}, { ...profiles.finance, reads: ['toString' as never] })).toThrow(/is not available/);
     expect(() => pickTools({ ...allTools(), my_lessons: fakeTool('propose_task') }, profiles.finance)).toThrow(/registered under the name propose_task/);
+  });
+});
+
+describe('file profiles and the database layer', () => {
+  it('says a file profile comes from the files: no version, no lessons', () => {
+    for (const id of ids) expect(profiles[id]).toMatchObject({ source: 'files', version: null, lessons: [] });
+  });
+
+  it('keeps the database modules free of a runtime import of index.ts, so the package has no import cycle', () => {
+    // index.ts re-exports these files; if one imported index.ts back at run time, load order would decide what exists.
+    for (const name of ['rows', 'source', 'seed', 'tokens', 'door']) {
+      const text = fs.readFileSync(path.join(import.meta.dirname, '..', 'src', `${name}.ts`), 'utf8');
+      const runtimeImports = text.split('\n').filter((line) => /^import (?!type\b).*from '\.\/index\.ts'/.test(line));
+      expect(runtimeImports, name).toEqual([]);
+    }
   });
 });

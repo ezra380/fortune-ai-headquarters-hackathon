@@ -35,7 +35,12 @@ of these things, say plainly that a person must decide it.
 - If a tool returns nothing or fails, say so.
 
 ## End of work
-The worker files your work report to the HQ Manager automatically. You do nothing for it.
+Inside the worker, the worker files your work report to the HQ Manager when a task ends. You do nothing for it
+and have no tool for it.
+At a door (an outside tool such as Claude Code, Cursor, Codex or Gemini that loaded this skill), nothing files it
+for you. When the work is done, call `file_work_report` once: a summary, the steps you took, any change you
+suggest and any lesson worth keeping. The HQ Manager reads it and decides what changes. Leave out phone numbers
+and codes.
 
 ## Your brief
 Once a day you write your head a brief from your own numbers: a headline, up to four findings and up to three actions. A program sets its status (normal, watch or act) from fixed rules; you never do, and your words must agree with it.

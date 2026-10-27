@@ -2,6 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { AssistantId, type ReadTool } from '@fahq/contracts';
+import type { ProfileLesson } from './rows.ts';
+import { buildProfileSource, type ProfileSource, type ProfileSourceOptions } from './source.ts';
+import { doorProfile } from './door.ts';
+import { restoreVersion, type RestoreResult } from './restore.ts';
+import { seedFromFiles, type Queryable, type SeedResult } from './seed.ts';
 
 // The assistants as data. Every assistant is read-only: its reads are a fixed list of tool names, and
 // proposals and work reports are fixed worker code paths that no model can call. A profile also says
@@ -15,6 +20,7 @@ export type ModelSetting = { model: string; thinking: boolean; maxTokens: number
 export const READ_TOOL_NAMES = [
   'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons',
   'list_lessons', 'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
+  'list_session_reports',
   // The division data (version 2): budget room, one metric over the year, the company at a glance, data quality,
   // and the rows behind the standing numbers.
   'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
@@ -38,9 +44,15 @@ export type AssistantProfile = {
   models: Partial<Record<ModelJob, ModelSetting>>;
   /** Its own Meterless H-MEM folder. */
   memory: AssistantId;
+  /** The standing lessons a person adopted for it. Only a stored (database) profile has any. */
+  lessons: readonly ProfileLesson[];
+  /** The stored version this profile was read at; null for a file profile. */
+  version: number | null;
+  /** Where this profile came from: the files under skills/, or its row in public.assistant_profiles. */
+  source: 'files' | 'database';
 };
 
-type Shape = Omit<AssistantProfile, 'skill' | 'models'> & { jobs: readonly ModelJob[] };
+type Shape = Omit<AssistantProfile, 'skill' | 'models' | 'lessons' | 'version' | 'source'> & { jobs: readonly ModelJob[] };
 
 const SHAPES: Record<AssistantId, Shape> = {
   owner: {
@@ -70,7 +82,7 @@ const SHAPES: Record<AssistantId, Shape> = {
   },
   manager: {
     id: 'manager', title: 'HQ Manager', serves: null, status: 'live',
-    reads: ['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality'],
+    reads: ['list_work_reports', 'list_session_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality'],
     writes: ['report'], jobs: ['code', 'answer', 'review'], memory: 'manager',
   },
 };
@@ -130,7 +142,7 @@ export function loadProfiles(env: NodeJS.ProcessEnv): Record<AssistantId, Assist
     const { jobs, ...shape } = SHAPES[id];
     const models: Partial<Record<ModelJob, ModelSetting>> = {};
     for (const job of jobs) models[job] = { ...settings[job] };
-    profiles[id] = { ...shape, reads: [...shape.reads], writes: [...shape.writes], skill: readSkill(id).body, models };
+    profiles[id] = { ...shape, reads: [...shape.reads], writes: [...shape.writes], skill: readSkill(id).body, models, lessons: [], version: null, source: 'files' };
   }
   return profiles;
 }
@@ -147,3 +159,40 @@ export function pickTools(all: Record<string, ReadTool>, profile: AssistantProfi
     return tool;
   });
 }
+
+// ---- Profiles in the database ---------------------------------------------------------------------
+
+/** The worker's profiles: the stored row of each assistant (read about once a minute), the files where there is none. */
+export function createProfileSource(options: Omit<ProfileSourceOptions, 'files' | 'readNames'> & { env: NodeJS.ProcessEnv }): ProfileSource {
+  const { env, ...rest } = options;
+  return buildProfileSource({ ...rest, files: () => loadProfiles(env), readNames: READ_TOOL_NAMES });
+}
+
+/** The profile a door serves, from the answer of `door_profile`: refused in plain words when it breaks a rule the worker applies. */
+export function profileFromDoor(raw: unknown, env: NodeJS.ProcessEnv = {}): AssistantProfile {
+  return doorProfile(raw, loadProfiles(env), READ_TOOL_NAMES);
+}
+
+/** Stores the file profiles that have no row yet (`force`: replaces the others' words and models too). See seed.ts. */
+export function seedProfiles(db: Queryable, env: NodeJS.ProcessEnv, options: { force?: boolean; now?: Date } = {}): Promise<SeedResult[]> {
+  return seedFromFiles(db, loadProfiles(env), options);
+}
+
+/** Puts an earlier version of a profile back as a new version (the history keeps every version). See restore.ts. */
+export function restoreProfileVersion(db: Queryable, assistant: AssistantId, version: number, options: { now?: Date } = {}): Promise<RestoreResult> {
+  return restoreVersion(db, assistant, version, { ...options, readNames: READ_TOOL_NAMES });
+}
+
+export type { RestoreResult } from './restore.ts';
+export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
+export type { ParsedProfileRows } from './rows.ts';
+export { DEFAULT_PROFILE_TTL_MS, MANAGER_LESSONS_HEADING, OWNER_LESSONS_HEADING, skillWithLessons } from './source.ts';
+export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, dataNeverStored, describeChange, managerNotes, withManagerNotes } from './changes.ts';
+export type { AppliedChange, ChangeOptions, ProfileChange, ProfileContent } from './changes.ts';
+export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './source.ts';
+export { canonicalJson, ownerChoices } from './seed.ts';
+export type { OwnerChoices, Queryable, SeedAction, SeedResult } from './seed.ts';
+export { issueDoorToken, newDoorToken, tokenHash, writeTokenFile } from './tokens.ts';
+export { DoorProfile, doorSkill } from './door.ts';
+export type { DoorSkillOptions, DoorTool } from './door.ts';
+export type { ProfileLesson };

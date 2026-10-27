@@ -53,8 +53,11 @@ configured per department).
   Nothing raises spending, publishes, messages a customer or changes an ad on its own.
 - **The manager drafts; the owner adopts.** Every AI tool that uses an assistant profile (Claude, ChatGPT,
   Gemini, staff accounts) sends its session log and suggested lessons to the HQ Manager. The manager files
-  and groups them. A profile changes only after the owner adopts the change with a code, so one bad
-  session can't rewrite an assistant.
+  and groups them. It recommends lessons and skill notes (one short line each, checked by rules) and changes to
+  what an assistant may read or which model it uses; every one needs the owner's code and becomes a new profile
+  version he can put back. So one bad session can't change an assistant, widen its access or raise its cost.
+  (Letting the manager add a lesson or a note by itself is built and switched off; it needs the owner's
+  written approval, and a report from an outside tool must never be able to trigger it.)
 - **The two businesses stay separate.** Zetaris analyzes salon and online data side by side without
   merging their databases. Joining salon customers with online customers needs a rule both businesses'
   owners agree on first.
@@ -65,7 +68,8 @@ configured per department).
 ## Steps to production
 
 1. **Profiles into Postgres.** Each assistant's skill, settings and adopted lessons become rows, read
-   through the one MCP door by every AI tool; the HQ Manager is the only writer, and only after an adoption.
+   through the one MCP door by every AI tool; every change is written on the owner's adoption (and the owner can
+   put any version back).
 2. **One department at a time,** each with its own read-only data connections and its own tests:
    Finance first (money decisions are where checked numbers matter most), then Online, then Salon.
 3. **Zetaris hosted,** with a read-only user per assistant instead of one administrator key.
