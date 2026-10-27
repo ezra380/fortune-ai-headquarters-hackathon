@@ -14,6 +14,14 @@ export type AssistantId = z.infer<typeof AssistantId>;
 export const BusinessUnit = z.enum(['salon', 'online', 'combined']);
 export type BusinessUnit = z.infer<typeof BusinessUnit>;
 
+// The company's four divisions. A metric's business (salon, online, combined) is the legal split and
+// never changes; its divisions say who reads it (ad spend is online business, read by Finance and Online).
+// 'hq' is the owner's CEO division: the whole company at a glance, no detail it doesn't need.
+export const Division = z.enum(['salon', 'finance', 'online', 'hq']);
+export type Division = z.infer<typeof Division>;
+/** The assistant that runs each division. */
+export const DIVISION_ASSISTANT: Record<Division, AssistantId> = { salon: 'salon', finance: 'finance', online: 'online', hq: 'owner' };
+
 export const UsPhone = z.string().regex(/^\+1\d{10}$/, 'must be an E.164 US number');
 
 export const Person = z.object({

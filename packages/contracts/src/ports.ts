@@ -1,9 +1,29 @@
-import type { Metric, ProposalDocument } from './schemas.ts';
+import type { Division, Metric, ProposalDocument } from './schemas.ts';
 
 // Ports are the seams between lanes. A lane implements a port; lane A's worker consumes it.
 
+/** A fixed data rule that fired: the program, never a model, says a number needs a look. */
+export type Attention = { metricId: string; level: 'watch' | 'act'; rule: string };
+
+/** One division's numbers, read through that division's own Zetaris mart. */
+export type DivisionData = {
+  division: Division;
+  metrics: Metric[];
+  /** The attention rules that fired on these metrics (empty when everything is normal). */
+  attention: Attention[];
+  queryHash: string;
+  /** The Zetaris mart (or view) the numbers came from. */
+  view: string;
+};
+
 /** packages/data: business numbers through Zetaris. Read-only. */
 export interface DataPort {
+  /**
+   * One division's metrics for a period (period totals plus the as-of-now "standing" numbers), with
+   * the attention rules that fired. Optional: a port without it is read through getFinanceMetrics,
+   * sliced by business (see the worker's divisionData).
+   */
+  getDivisionMetrics?(input: { division: Division; period: string; asOf: string }): Promise<DivisionData>;
   /** Cheap reachability check; never throws. */
   health(): Promise<{ ok: boolean; detail: string }>;
   /**
@@ -22,7 +42,10 @@ export interface DataPort {
   readonly catalog?: readonly MetricInfo[];
 }
 
-export type MetricInfo = Pick<Metric, 'id' | 'label' | 'unit' | 'business'>;
+export type MetricInfo = Pick<Metric, 'id' | 'label' | 'unit' | 'business'> & {
+  /** Who reads it; absent on a port that has no divisions (every metric is then its business's). */
+  divisions?: readonly Division[];
+};
 
 export type PrintResult =
   | { status: 'printed'; jobId: string }
