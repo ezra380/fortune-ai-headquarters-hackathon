@@ -324,7 +324,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       for (let i = 0; i < TASKS; i++) {
         const messageSid = sid();
         sids.push(messageSid);
-        await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, ownerPhone, '+15550100001', 'STATUS']);
+        await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, financePhone, '+15550100001', 'STATUS']);
       }
       const cycles = await runConcurrently(watched, 2, () => false, { untilIdle: true });
       expect(cycles).toBeGreaterThanOrEqual(TASKS);
@@ -339,7 +339,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       expect(leases).toHaveLength(TASKS);
       expect(leases.every((s) => s === LEASE_SECONDS)).toBe(true);
       expect(LEASE_SECONDS).toBeLessThanOrEqual(300);
-      expect(sms.filter((m) => m.to === ownerPhone && m.body.startsWith('Open items')).length).toBe(TASKS);
+      expect(sms.filter((m) => m.to === financePhone && m.body.startsWith('Open items')).length).toBe(TASKS);
     });
 
     // Holds `expected` handlers of STATUS texts inside their work (the open-task count) until released.
@@ -360,7 +360,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       };
       return { held, entered, release, finishes };
     };
-    const enqueueStatus = async (from = ownerPhone) => {
+    const enqueueStatus = async (from = financePhone) => {
       const messageSid = sid();
       await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, from, '+15550100001', 'STATUS']);
       return messageSid;
@@ -428,7 +428,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       for (let i = 0; i < 6; i++) {
         const messageSid = sid();
         sids.push(messageSid);
-        await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, ownerPhone, '+15550100001', 'STATUS']);
+        await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, financePhone, '+15550100001', 'STATUS']);
       }
       expect(await runConcurrently(deps, 1, () => false, { untilIdle: true, maxCycles: 4 })).toBe(4);
       const done = (await pool.query(`select count(*)::int as n from public.tasks where idempotency_key = any($1) and status = 'done'`, [sids.map((s) => 'sms:' + s)])).rows[0].n as number;
@@ -441,7 +441,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       let stop = false;
       setTimeout(() => { stop = true; }, 150);
       const messageSid = sid();
-      setTimeout(() => { void pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, ownerPhone, '+15550100001', 'STATUS']); }, 60);
+      setTimeout(() => { void pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, financePhone, '+15550100001', 'STATUS']); }, 60);
       const cycles = await runConcurrently(deps, 2, () => stop, { untilIdle: false, idleMs: 10 });
       expect(cycles).toBeGreaterThanOrEqual(1);
       expect((await taskOfText(messageSid)).status).toBe('done');

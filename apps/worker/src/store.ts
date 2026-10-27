@@ -329,6 +329,14 @@ export function createStore(url: string, serviceKey: string) {
     async divisionBrief(id: string): Promise<DivisionBriefRow> {
       return must(await db.from('division_briefs').select('*').eq('id', id).single(), 'read brief') as DivisionBriefRow;
     },
+    /**
+     * The status lines the divisions sent the CEO division for one day (mailbox reports to `owner`), newest first.
+     * A division that was briefed more than once that day (a BRIEF text) has several; the newest is its latest.
+     */
+    async divisionStatusMessages(date: string): Promise<MessageRow[]> {
+      return must(await db.from('assistant_messages').select('*').eq('to_assistant', 'owner').eq('kind', 'report')
+        .eq('body->>type', 'division_status').eq('body->>date', date).order('created_at', { ascending: false }).limit(60), 'division statuses') as MessageRow[];
+    },
     /** Open work per assistant. Counts only: never a code, a hash or a message body. */
     async openItems(now: Date): Promise<OpenItems[]> {
       const people = must(await db.from('people').select('id, assistant_id'), 'people') as { id: string; assistant_id: AssistantId }[];

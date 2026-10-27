@@ -6,8 +6,9 @@ import {
 import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import type { Command } from './commands.ts';
-import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
-import { DEPARTMENT_LABEL, isDepartment, sliceFor, type Department } from './departments.ts';
+import { approverOf, done, errorText, fail, fitSms, isLiveNumber, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
+import { DEPARTMENT_LABEL, ROUND_DEPARTMENTS, isDepartment, sliceFor, type Department } from './departments.ts';
+import { companyDay, enqueueDigest } from './digest.ts';
 import { formatValue } from './finance.ts';
 import { codeModeDetail, numberTrace, numbersWritten, type TracedNumber } from './reports.ts';
 import type { DivisionBriefRow, MessageRow, PersonRow, TaskRow } from './store.ts';
@@ -24,6 +25,8 @@ import type { DivisionBriefRow, MessageRow, PersonRow, TaskRow } from './store.t
 //              division gets one very short status line.
 // Every step is keyed by the brief (division and day), so a task that runs again reuses what is stored: no
 // model is asked twice and no second code is sent. The STATUS comes from the attention rules, never a model.
+// The day's scheduled brief is brief:<division>:<date>. A brief asked for by text (BRIEF) is a run of its own,
+// brief:<division>:<date>:<id of that text's task>, so a retried text asks for the same run and a new text for a new one.
 
 const APPROVAL_MINUTES = 12 * 60;
 const MAX_REQUESTS = 2;
@@ -37,20 +40,21 @@ const BriefJob = z.object({
   job: z.literal('division_brief'),
   division: z.enum(['finance', 'online', 'salon']),
   date: z.iso.date(),
+  /** The id of the text that asked for this run (BRIEF); none for the day's scheduled brief. */
+  request: z.uuid().optional(),
 });
 
-export const briefKey = (division: BriefDivision, date: string) => `brief:${division}:${date}`;
+export const briefKey = (division: BriefDivision, date: string, request?: string) => `brief:${division}:${date}${request ? `:${request}` : ''}`;
 
-/** Queues the day's brief for one division. Queuing it twice for the same day changes nothing. */
-export async function enqueueBrief(deps: Pick<WorkerDeps, 'store' | 'now'>, division: BriefDivision, date: string): Promise<void> {
+/** Queues a brief for one division: the day's scheduled one, or (with `request`) the run a BRIEF text asked for. Queuing the same one twice changes nothing. */
+export async function enqueueBrief(deps: Pick<WorkerDeps, 'store' | 'now'>, division: BriefDivision, date: string, request?: string): Promise<void> {
   await deps.store.enqueueTask({
-    assistant: DIVISION_ASSISTANT[division], kind: 'scheduled', key: briefKey(division, date),
-    payload: { job: 'division_brief', division, date }, now: deps.now(),
+    assistant: DIVISION_ASSISTANT[division], kind: 'scheduled', key: briefKey(division, date, request),
+    payload: { job: 'division_brief', division, date, ...(request ? { request } : {}) }, now: deps.now(),
   });
 }
 
-/** The synthetic numbers of this repository (+1555…), and no number at all, are not live: nothing real can be texted. */
-export const isLiveNumber = (number: string | null): boolean => number !== null && /^\+1\d{10}$/.test(number) && !number.startsWith('+1555');
+export { isLiveNumber };
 
 // ---- Data ------------------------------------------------------------------------------------------
 
@@ -101,14 +105,14 @@ const shownMetric = (m: Metric) => ({ id: m.id, label: m.label, value: m.value, 
 
 type Run = {
   deps: WorkerDeps; task: TaskRow; runId: string;
-  division: BriefDivision; assistant: AssistantId; label: string; head: PersonRow; key: string; date: string;
+  division: BriefDivision; assistant: AssistantId; label: string; head: PersonRow; key: string; date: string; request?: string;
 };
 
 /** The scheduled job: this division's brief for one day. */
 export async function divisionBrief(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
   const job = BriefJob.safeParse(task.payload);
   if (!job.success) return fail('the brief job needs a division (finance, online or salon) and a date (YYYY-MM-DD)');
-  const { division, date } = job.data;
+  const { division, date, request } = job.data;
   const assistant = DIVISION_ASSISTANT[division];
   if (task.assistant_id !== assistant) return fail(`the ${division} brief belongs to the ${assistant} assistant, not the ${task.assistant_id} assistant`);
   let head: PersonRow;
@@ -117,7 +121,7 @@ export async function divisionBrief(task: TaskRow, deps: WorkerDeps, runId: stri
   } catch {
     return fail(`the ${division} head is not registered, so there is nobody to brief`);
   }
-  const run: Run = { deps, task, runId, division, assistant, label: DEPARTMENT_LABEL[division], head, key: briefKey(division, date), date };
+  const run: Run = { deps, task, runId, division, assistant, label: DEPARTMENT_LABEL[division], head, key: briefKey(division, date, request), date, request };
 
   // A task that runs again after the brief was stored goes straight to delivery (every step there is keyed).
   const stored = await deps.store.divisionBriefByKey(run.key);
@@ -518,10 +522,49 @@ async function deliver(run: Run, row: DivisionBriefRow): Promise<Outcome> {
   await deps.store.addOutbox({ channel: 'print', toPersonId: head.id, from: assistant, body: `${run.label} brief printout`, attachmentRef: `brief:${row.id}`, dedupeKey: `brief-print:${row.id}` });
 
   const texted = await textHead(run, row, doc);
+  const digest = await queueDigestWhenAllIn(run);
   await receipt(deps, {
     runId, taskId: task.id, step: 'brief.deliver', assistant, started, outcome: 'ok',
-    detail: `status ${row.status}${row.written_by === 'rule' ? ' (rule-written)' : ''}; CEO line posted; printout queued; ${texted}`,
+    detail: `status ${row.status}${row.written_by === 'rule' ? ' (rule-written)' : ''}; CEO line posted; printout queued; ${texted}${digest ? '; all three divisions reported, CEO digest queued' : ''}`,
   });
+  return done;
+}
+
+/**
+ * The CEO digest follows the third division's report. Whoever delivers last sees all three status lines of this run
+ * (the day's, or the BRIEF text's) and queues the digest; two that finish together both ask for the same key.
+ */
+async function queueDigestWhenAllIn(run: Run): Promise<boolean> {
+  const { deps, date, request } = run;
+  const posted = await Promise.all(ROUND_DEPARTMENTS.map((d) => deps.store.messageByKey(`status:${briefKey(d, date, request)}`)));
+  if (posted.some((message) => message === null)) return false;
+  await enqueueDigest(deps, date, request);
+  return true;
+}
+
+// ---- BRIEF ------------------------------------------------------------------------------------------
+
+/**
+ * The owner texts BRIEF: all three divisions write their briefs now, and the digest follows when the third is in.
+ * A division head texts BRIEF: only hers. The runs are keyed by this text's task, so a retried text asks for the
+ * same runs, and a second BRIEF is a new one.
+ */
+export async function requestBriefs(
+  person: PersonRow, task: TaskRow, deps: WorkerDeps, runId: string, started: Date, reply: (b: string) => Promise<void>,
+): Promise<Outcome> {
+  const owner = person.role === 'owner';
+  const divisions: BriefDivision[] = owner ? [...ROUND_DEPARTMENTS] : isDepartment(person.assistant_id) ? [person.assistant_id] : [];
+  if (divisions.length === 0) {
+    await receipt(deps, { runId, taskId: task.id, step: 'brief.request', assistant: person.assistant_id, started, outcome: 'refused', detail: 'BRIEF is for the owner and the division heads' });
+    await reply('BRIEF is for the owner and the division heads. Nothing was started.');
+    return done;
+  }
+  const date = companyDay(deps.now());
+  for (const division of divisions) await enqueueBrief(deps, division, date, task.id);
+  await receipt(deps, { runId, taskId: task.id, step: 'brief.request', assistant: person.assistant_id, started, outcome: 'ok', detail: `asked for the ${divisions.join(', ')} brief of ${date}` });
+  await reply(owner
+    ? 'Asking Finance, Salon and Online for their briefs now. Each head gets hers by text, and the company digest follows here when all three are in. Text STATUS to see what is in so far.'
+    : `Writing your ${DEPARTMENT_LABEL[divisions[0]!]} brief now. It will reach you by text when it is ready.`);
   return done;
 }
 
@@ -539,9 +582,10 @@ async function textHead(run: Run, row: DivisionBriefRow, doc: MessageRow): Promi
     return 'text queued (no actions)';
   }
   const code = newCode();
+  const more = row.brief.actions.length > 1 ? ` (APPROVE 1 2 ${code} for more)` : '';
   const issued = await deps.store.issueApproval({
     messageId: doc.id, personId: head.id, action: 'approve_action', code, from: assistant, now: deps.now(), ttlMinutes: APPROVAL_MINUTES, smsDedupeKey,
-    smsBody: briefSms(row, label, `Reply APPROVE <1-3> ${code} to approve an action. The code expires in 12 hours.`),
+    smsBody: briefSms(row, label, `Reply APPROVE <1-3> ${code} to approve an action${more}. The code expires in 12 hours.`),
   });
   return issued.created ? 'text and code issued' : 'text already sent';
 }
@@ -557,16 +601,20 @@ const CODE_FOR: Record<string, string> = {
 /** The same, for a brief's code (flows.ts uses it when someone presents that code with another command). */
 export const BRIEF_CODE_FOR = 'approving a brief action: reply APPROVE <1-3> <code>';
 
+/** "a", "a and b", "a, b and c". */
+const joined = (items: readonly string[]) => (items.length <= 1 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`);
+
 /**
- * The head replies APPROVE <rank> <code>. The code is for one brief and works once. It records the head's decision
- * (the division remembers it; the HQ Manager gets the note); the head carries the action out. The assistant changes nothing.
+ * The head replies APPROVE <ranks> <code>. The code is for one brief and works once, for the actions named in that one
+ * reply. Each action named is recorded as the head's decision: the division remembers it, the World Model holds it and
+ * the HQ Manager gets a note. The head carries the action out. The assistant changes nothing.
  */
 export async function approveAction(
   command: Extract<Command, { kind: 'approve' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
   runId: string, started: Date, reply: (b: string) => Promise<void>,
 ): Promise<Outcome> {
   const used = await deps.store.useApprovalCode({
-    phone: sender.phone, code: command.code, verdict: 'signed', action: 'approve_action', taskId: task.id, detail: { rank: command.rank }, now: started,
+    phone: sender.phone, code: command.code, verdict: 'signed', action: 'approve_action', taskId: task.id, detail: { ranks: command.ranks }, now: started,
   });
   if (used.outcome === 'wrong_action') {
     await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: sender.assistant_id, started, outcome: 'refused', detail: `code is for ${used.action ?? 'another action'}` });
@@ -583,19 +631,37 @@ export async function approveAction(
   const briefId = typeof doc.body.briefId === 'string' ? doc.body.briefId : '';
   if (!briefId) return fail('the approval does not point at a brief');
   const row = await deps.store.divisionBrief(briefId);
-  const action = row.brief.actions.find((a) => a.rank === command.rank);
-  if (!action) {
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: row.division, started, outcome: 'refused', detail: `the brief has no action ${command.rank}` });
-    await answer(`This brief has no action ${command.rank}. Nothing was recorded.`);
+  const found = row.brief.actions.filter((a) => command.ranks.some((rank) => rank === a.rank));
+  const missing = command.ranks.filter((rank) => !found.some((a) => a.rank === rank));
+  if (found.length === 0) {
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: row.division, started, outcome: 'refused', detail: `the brief has no action ${missing.join(', ')}` });
+    await answer(`This brief has no action ${missing.join(' or ')}. Nothing was recorded.`);
     return done;
   }
   const assistant = DIVISION_ASSISTANT[row.division];
-  deps.brain.memory(assistant).rememberDecision({ proposalId: doc.id, personId: person.id, verdict: 'signed', planRank: action.rank, planTitle: action.title, runId });
-  await deps.store.postMessage({
-    from: assistant, to: 'manager', kind: 'decision', replyTo: doc.id, dedupeKey: `action-decision:${doc.id}:${action.rank}`,
-    body: { type: 'action_decision', briefId, division: row.division, rank: action.rank, title: action.title, verdict: 'approved', by: person.id },
+  // The text's own arrival time, so a task that runs again records the same moment.
+  const receivedAt = Date.parse(String((task.payload as { receivedAt?: unknown }).receivedAt ?? ''));
+  const at = new Date(Number.isNaN(receivedAt) ? deps.now() : receivedAt).toISOString();
+  for (const action of found) {
+    // Each action is its own item in the record and in the division's memory, so approving two of one brief keeps both.
+    const item = `${doc.id}:${action.rank}`;
+    await deps.brain.record.proposal({
+      proposalId: item, requestTaskId: row.task_id ?? doc.id, by: assistant, forPersonId: person.id, titles: [action.title],
+      citedMetricIds: action.cites, dataSource: row.data_source ?? 'not recorded', at: new Date(row.created_at).toISOString(), runId,
+    });
+    await deps.brain.record.decision({ proposalId: item, personId: person.id, personName: person.name, verdict: 'signed', planRank: action.rank, action: 'decide_plan', at, runId });
+    deps.brain.memory(assistant).rememberDecision({ proposalId: item, personId: person.id, verdict: 'signed', planRank: action.rank, planTitle: action.title, runId });
+    await deps.store.postMessage({
+      from: assistant, to: 'manager', kind: 'decision', replyTo: doc.id, dedupeKey: `action-decision:${doc.id}:${action.rank}`,
+      body: { type: 'action_decision', briefId, division: row.division, rank: action.rank, title: action.title, verdict: 'approved', by: person.id },
+    });
+  }
+  await receipt(deps, {
+    runId, taskId: task.id, step: 'approval.action', assistant, started, outcome: 'ok',
+    detail: `action ${found.map((a) => a.rank).join(', ')} of the ${row.division} brief approved by ${person.id}${missing.length > 0 ? `; the brief has no action ${missing.join(', ')}` : ''}`,
   });
-  await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant, started, outcome: 'ok', detail: `action ${action.rank} of the ${row.division} brief approved by ${person.id}` });
-  await answer(`Recorded: you approved action ${action.rank} of the ${DEPARTMENT_LABEL[row.division]} brief: ${action.title}. It is yours to carry out; I change nothing myself.`);
+  const names = found.map((a) => `action ${a.rank} (${a.title})`);
+  const absent = missing.length > 0 ? ` Not recorded: action ${missing.join(' or ')}, which this brief does not have.` : '';
+  await answer(`Recorded: you approved ${joined(names)}. ${found.length === 1 ? "It's" : "They're"} yours to carry out.${absent}`);
   return done;
 }

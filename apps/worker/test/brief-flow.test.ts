@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { DIVISION_ASSISTANT, type Attention, type DataPort, type ModelPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { BRIEF_RULES, NEEDS_RULES, enqueueBrief, type BriefDivision } from '../src/brief.ts';
+import { APPROVAL_HINT } from '../src/commands.ts';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { createStore, type TaskRow } from '../src/store.ts';
 import { dataMock, fakeCodeMode, mockMetrics, okResult, scriptedModel } from './fixtures.ts';
@@ -519,7 +520,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     const { row, key, code } = await finished();
     const head = await text(HEAD.finance, `APPROVE 1 ${code}`);
     expect(head.outcome).toEqual({ status: 'done' });
-    expect(head.reply).toBe('Recorded: you approved action 1 of the Finance brief: Hold Google spend. It is yours to carry out; I change nothing myself.');
+    expect(head.reply).toBe("Recorded: you approved action 1 (Hold Google spend). It's yours to carry out.");
     expect(await approvalsOf(key)).toMatchObject([{ action: 'approve_action', status: 'signed' }]);
     const doc = await message(`briefdoc:${key}`);
     expect(await message(`action-decision:${doc.id}:1`)).toMatchObject({
@@ -535,7 +536,7 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
 
   it('a plain yes decides nothing, and a code used with the wrong command word stays usable', async () => {
     const { key, code } = await finished();
-    expect((await text(HEAD.finance, 'yes')).reply).toBe('To approve, reply exactly: SEND <plan 1-3> <6-digit code>, CONFIRM <code>, DECLINE <code>, ADOPT <1-3> <code> or APPROVE <1-3> <code>.');
+    expect((await text(HEAD.finance, 'yes')).reply).toBe(APPROVAL_HINT);
     expect((await text(HEAD.finance, `SEND 1 ${code}`)).reply).toBe('That code is for approving a brief action: reply APPROVE <1-3> <code>. Nothing was sent.');
     expect((await text(HEAD.finance, `CONFIRM ${code}`)).reply).toBe('That code is for approving a brief action: reply APPROVE <1-3> <code>. Nothing was recorded.');
     expect(await approvalsOf(key)).toMatchObject([{ status: 'pending' }]);

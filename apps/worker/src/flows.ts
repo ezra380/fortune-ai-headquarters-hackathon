@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { AssistantId, FrontDoorDecision, Metric, ProfitPlans } from '@fahq/contracts';
-import { approveAction, BRIEF_CODE_FOR, divisionBrief } from './brief.ts';
+import { approveAction, BRIEF_CODE_FOR, divisionBrief, requestBriefs } from './brief.ts';
 import { parseCommand, type Command } from './commands.ts';
 import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
 import { departmentsFor, DEPARTMENT_LABEL, originsOf } from './departments.ts';
+import { ceoDigest, currentDigest } from './digest.ts';
 import { planDigest, PlanError, writePlans } from './finance.ts';
 import { adoptChanges, askQuestion, managerReview, requestReview } from './manager.ts';
 import { routeText } from './router.ts';
@@ -29,6 +30,7 @@ async function scheduled(task: TaskRow, deps: WorkerDeps, runId: string): Promis
   const job = String((task.payload as { job?: unknown }).job ?? '');
   if (task.assistant_id === 'manager' && job === 'manager_review') return managerReview(task, deps, runId);
   if (job === 'division_brief') return divisionBrief(task, deps, runId);
+  if (task.assistant_id === 'owner' && job === 'ceo_digest') return ceoDigest(task, deps, runId);
   return fail(`unsupported scheduled job "${job}" for the ${task.assistant_id} assistant`);
 }
 
@@ -223,7 +225,9 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
       await reply(command.hint);
       return done;
     case 'status': {
-      await reply(`Open items for your assistant: ${await deps.store.openTaskCount(person.assistant_id)}.`);
+      // The owner is the CEO division: STATUS is the company digest, built now from the reports that are in.
+      // A division head keeps the count of her assistant's open items.
+      await reply(person.role === 'owner' ? await currentDigest(deps) : `Open items for your assistant: ${await deps.store.openTaskCount(person.assistant_id)}.`);
       return done;
     }
     case 'send':
@@ -237,6 +241,8 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
       return approveAction(command, person, task, deps, runId, started, reply);
     case 'review':
       return requestReview(person, task, deps, runId, started);
+    case 'brief':
+      return requestBriefs(person, task, deps, runId, started, reply);
   }
 }
 

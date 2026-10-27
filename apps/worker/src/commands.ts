@@ -11,12 +11,19 @@ export type Command =
   | { kind: 'confirm'; code: string }
   | { kind: 'decline'; code: string }
   | { kind: 'adopt'; ranks: Rank[]; code: string }
-  | { kind: 'approve'; rank: Rank; code: string }
+  | { kind: 'approve'; ranks: Rank[]; code: string }
   | { kind: 'review' }
+  | { kind: 'brief' }
   | { kind: 'status' }
   | { kind: 'malformed'; hint: string };
 
-export const APPROVAL_HINT = 'To approve, reply exactly: SEND <plan 1-3> <6-digit code>, CONFIRM <code>, DECLINE <code>, ADOPT <1-3> <code> or APPROVE <1-3> <code>.';
+export const APPROVAL_HINT = 'To approve, reply exactly: SEND <plan 1-3> <6-digit code>, CONFIRM <code>, DECLINE <code>, ADOPT <1-3> <code> or APPROVE <1-3> <code> (APPROVE 1 2 <code> approves two actions at once).';
+
+/** "1 2", "1,2" and "3, 1": ranks 1-3, each once, in order. Null when a rank repeats. */
+function ranksOf(list: string): Rank[] | null {
+  const ranks = (list.match(/[123]/g) ?? []).map(Number) as Rank[];
+  return new Set(ranks).size === ranks.length ? ranks.sort((a, b) => a - b) : null;
+}
 
 export function parseCommand(text: string): Command | null {
   const t = text.trim().replace(/\s+/g, ' ').toUpperCase();
@@ -29,13 +36,18 @@ export function parseCommand(text: string): Command | null {
   // ADOPT 2 482913 · ADOPT 1 2 482913 · ADOPT 1,2,3 482913: ranks 1-3, each once, then the code.
   m = /^ADOPT ([123](?:(?:,\s?| )[123])*) (\d{6})$/.exec(t);
   if (m) {
-    const ranks = (m[1]!.match(/[123]/g) ?? []).map(Number) as Rank[];
-    if (new Set(ranks).size === ranks.length) return { kind: 'adopt', ranks: ranks.sort((a, b) => a - b), code: m[2]! };
+    const ranks = ranksOf(m[1]!);
+    if (ranks) return { kind: 'adopt', ranks, code: m[2]! };
   }
-  // APPROVE 2 482913: one action of a division brief, by the code the brief's text carried.
-  m = /^APPROVE ([123]) (\d{6})$/.exec(t);
-  if (m) return { kind: 'approve', rank: Number(m[1]) as Rank, code: m[2]! };
+  // APPROVE 2 482913 · APPROVE 1 3 482913: the actions of a division brief, by the code the brief's text carried (same grammar as ADOPT).
+  m = /^APPROVE ([123](?:(?:,\s?| )[123])*) (\d{6})$/.exec(t);
+  if (m) {
+    const ranks = ranksOf(m[1]!);
+    if (ranks) return { kind: 'approve', ranks, code: m[2]! };
+  }
   if (t === 'REVIEW') return { kind: 'review' };
+  // BRIEF: the owner asks every division for its brief now; a division head asks for her own.
+  if (t === 'BRIEF') return { kind: 'brief' };
   if (t === 'STATUS') return { kind: 'status' };
   const approvalWord = /\b(SEND|CONFIRM|DECLINE|ADOPT|APPROVE|APPROVED|YES|OK)\b/.test(t);
   // A near-miss approval: a code next to an approval word ("ok send 2 482913 thanks") never goes to a

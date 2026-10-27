@@ -247,13 +247,31 @@ describe('small rules', () => {
     expect(briefKey('online', '2026-10-27')).toBe('brief:online:2026-10-27');
   });
 
-  it('reads APPROVE <1-3> <code> exactly, and keeps near-misses away from any model', () => {
-    expect(parseCommand('approve 2 482913')).toEqual({ kind: 'approve', rank: 2, code: '482913' });
-    expect(parseCommand('  APPROVE   1   654321 ')).toEqual({ kind: 'approve', rank: 1, code: '654321' });
-    for (const t of ['APPROVE', 'approve 2', 'APPROVE 4 482913', 'APPROVE 0 482913', 'APPROVE 1 48291', 'approve it', 'APPROVE 1 2 482913', 'please approve 2 482913 thanks']) {
+  it('a brief asked for by text is a run of its own: the key adds the id of that text\'s task', () => {
+    const request = '123e4567-e89b-42d3-a456-426614174000';
+    expect(briefKey('online', '2026-10-27', request)).toBe(`brief:online:2026-10-27:${request}`);
+  });
+
+  it('reads APPROVE <ranks> <code> exactly (ranks 1-3, each once, like ADOPT), and keeps near-misses away from any model', () => {
+    expect(parseCommand('approve 2 482913')).toEqual({ kind: 'approve', ranks: [2], code: '482913' });
+    expect(parseCommand('  APPROVE   1   654321 ')).toEqual({ kind: 'approve', ranks: [1], code: '654321' });
+    expect(parseCommand('APPROVE 1 2 482913')).toEqual({ kind: 'approve', ranks: [1, 2], code: '482913' });
+    expect(parseCommand('Approve 3,1 482913')).toEqual({ kind: 'approve', ranks: [1, 3], code: '482913' }); // sorted
+    expect(parseCommand('approve 1, 2, 3 654321')).toEqual({ kind: 'approve', ranks: [1, 2, 3], code: '654321' });
+    for (const t of [
+      'APPROVE', 'approve 2', 'APPROVE 4 482913', 'APPROVE 0 482913', 'APPROVE 1 48291', 'approve it', 'APPROVE 1 1 482913', 'APPROVE 1 2 3 1 482913',
+      'APPROVE 1 2', 'APPROVE 482913', 'please approve 2 482913 thanks',
+    ]) {
       expect(parseCommand(t)?.kind, t).toBe('malformed');
     }
     expect(parseCommand('Approve the evening slots idea')).toBeNull();
+    expect((parseCommand('yes') as { hint: string }).hint).toContain('APPROVE 1 2 <code>');
+  });
+
+  it('reads BRIEF exactly, and lets a request that mentions a brief through to the router', () => {
+    expect(parseCommand('brief')).toEqual({ kind: 'brief' });
+    expect(parseCommand('  BRIEF ')).toEqual({ kind: 'brief' });
+    for (const t of ['Brief me on the salon', 'BRIEF 123456', 'write a brief for finance', 'briefs']) expect(parseCommand(t), t).toBeNull();
   });
 
   it('the brief schema holds the sizes the head can read', () => {

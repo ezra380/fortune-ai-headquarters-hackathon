@@ -46,6 +46,9 @@ export const errorText = (error: unknown, fallback: string) => (error instanceof
 export const done: Outcome = { status: 'done' };
 export const fail = (error: string): Outcome => ({ status: 'failed', error });
 
+/** The synthetic numbers of this repository (+1555…), and no number at all, are not live: nothing real can be texted. */
+export const isLiveNumber = (number: string | null): boolean => number !== null && /^\+1\d{10}$/.test(number) && !number.startsWith('+1555');
+
 export async function receipt(
   deps: WorkerDeps,
   r: {
