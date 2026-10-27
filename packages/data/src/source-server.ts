@@ -42,19 +42,39 @@ export const SOURCE_PORT_DEFAULT = 18120;
  * listener (about a second; a REST table created sooner got "Connection refused"), so a fresh
  * start waits `settleMs` before returning.
  */
-export async function ensureSourceServer(
-  port = SOURCE_PORT_DEFAULT,
-  settleMs = 3000,
-): Promise<{ started: boolean; close: () => Promise<void> }> {
-  const healthy = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) })
+type Ensured = { started: boolean; close: () => Promise<void> };
+const notStarted: Ensured = { started: false, close: async () => {} };
+
+// Callers in one process share one start: three departments reading metrics at the same moment used to
+// race, and the second listen failed with EADDRINUSE.
+const starting = new Map<number, Promise<Ensured>>();
+
+export function ensureSourceServer(port = SOURCE_PORT_DEFAULT, settleMs = 3000): Promise<Ensured> {
+  const pending = starting.get(port);
+  if (pending) return pending.then(() => notStarted);
+  const run = start(port, settleMs).finally(() => starting.delete(port));
+  starting.set(port, run);
+  return run;
+}
+
+const answers = (port: number) =>
+  fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) })
     .then((r) => r.ok)
     .catch(() => false);
-  if (healthy) return { started: false, close: async () => {} };
+
+async function start(port: number, settleMs: number): Promise<Ensured> {
+  if (await answers(port)) return notStarted;
   const server = createSourceServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve());
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => resolve());
+    });
+  } catch (error) {
+    // Another process started one between the check and the listen: use it when it answers.
+    if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE' && (await answers(port))) return notStarted;
+    throw error;
+  }
   // It serves while the process has other work, and never keeps a finished script alive on its own.
   server.unref();
   if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));

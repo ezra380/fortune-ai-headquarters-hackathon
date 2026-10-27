@@ -81,6 +81,15 @@ describe('toolLoopAnswer', () => {
     expect(t.calls).toHaveLength(2);
   });
 
+  it('asks for the answer on the last round, and only then', async () => {
+    const t = setup([call('get_finance_metrics'), call('get_finance_metrics'), '{"answer":"Google earned $14,760."}'], 3);
+    const r = await t.ask();
+    expect(r.ok).toBe(true);
+    expect(t.calls[0]!.user).not.toContain('last turn');
+    expect(t.calls[1]!.user).not.toContain('last turn');
+    expect(t.calls[2]!.user).toContain('This is your last turn');
+  });
+
   it('defaults to six rounds', async () => {
     const t = setup(Array.from({ length: 8 }, () => call('get_finance_metrics')));
     const r = await t.ask();

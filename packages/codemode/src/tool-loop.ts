@@ -40,13 +40,17 @@ function systemPrompt(skill: string, tools: readonly ReadTool[]): string {
     '{"call":{"tool":"<name>","args":{...}}} to read something, or',
     '{"answer":"<text>"} when you can answer.',
     'Call one tool per turn, and only the tools above. Every number in your answer must come from a tool result.',
+    'Never call the same tool with the same arguments twice. As soon as the tool calls so far hold what you need, answer.',
     ANSWER_RULES,
   ].join('\n');
 }
 
-function transcript(question: string, entries: readonly string[]): string {
+function transcript(question: string, entries: readonly string[], lastTurn: boolean): string {
   const calls = entries.length > 0 ? entries.join('\n') : 'No tool calls yet.';
-  return `Question: ${question}\n\nTool calls so far:\n${calls}`;
+  // Agent loops with a step limit ask for the answer on the last step; without it the baseline could
+  // spend every round reading and never answer.
+  const close = lastTurn ? '\n\nThis is your last turn: reply with {"answer": ...} from what the tool calls returned.' : '';
+  return `Question: ${question}\n\nTool calls so far:\n${calls}${close}`;
 }
 
 export async function toolLoopAnswer(input: {
@@ -66,7 +70,7 @@ export async function toolLoopAnswer(input: {
   const finish = (answer: string | null, error: string | null): ToolLoopResult => ({ ok: answer !== null, answer, error, ...tally });
 
   while (tally.rounds < maxRounds) {
-    const user = transcript(input.question, entries);
+    const user = transcript(input.question, entries, tally.rounds + 1 === maxRounds);
     tally.rounds += 1;
     tally.transcriptChars = user.length;
     let reply: Awaited<ReturnType<ModelPort['chat']>>;
