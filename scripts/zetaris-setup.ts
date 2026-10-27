@@ -2,6 +2,9 @@
 // Usage: npx tsx scripts/zetaris-setup.ts               (create what is missing, then verify)
 //        npx tsx scripts/zetaris-setup.ts --recreate    (drop and rebuild the tables and views first)
 //        npx tsx scripts/zetaris-setup.ts --verify-only
+//        npx tsx scripts/zetaris-setup.ts --v2 [--recreate | --verify-only]
+//          (version 2 only: its own tables, views and container beside version 1's, served on its own
+//          port; --recreate there drops and rebuilds version 2's objects and never touches version 1's)
 // Three Lightning databases stand for three separately owned systems (salon bookings, the online
 // store, marketing), each a REST source served by packages/data's synthetic source server. Zetaris
 // reaches that server at host.docker.internal. The governed view fortune_hq.finance_metrics is also
@@ -10,12 +13,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  CONTAINER, FINANCE_VIEW, MART, MART_TABLE, MART_VIEW, METRIC_BY_ID, VERSIONS, computeAll, financeQuery, financeViewBody,
+  CONTAINER, FINANCE_VIEW, MART, MART_TABLE, MART_VIEW, METRIC_BY_ID, PERIOD_VIEW_V2, computeAll, financeQuery, financeViewBody,
   martQuery, martSql,
 } from '../packages/data/src/finance-sql.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from '../packages/data/src/source-server.ts';
-import { generateBusiness, type Period } from '../packages/data/src/synthetic.ts';
+import { generateBusiness, generateYear, type Period } from '../packages/data/src/synthetic.ts';
 import { createZetarisClient, zetarisConfigFromEnv } from '../packages/data/src/zetaris-client.ts';
+import { SOURCE_PORT_V2_DEFAULT, v2CreateStatements, v2DropStatements } from '../packages/data/src/zetaris-objects.ts';
 
 const root = path.resolve(import.meta.dirname, '..');
 const envFile = path.join(root, '.env.local');
@@ -23,7 +27,8 @@ if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
 const env = process.env;
 const args = new Set(process.argv.slice(2));
 
-const port = Number(env.FAHQ_SOURCE_PORT ?? SOURCE_PORT_DEFAULT);
+const v2 = args.has('--v2');
+const port = Number(v2 ? (env.FAHQ_SOURCE_PORT_V2 ?? SOURCE_PORT_V2_DEFAULT) : (env.FAHQ_SOURCE_PORT ?? SOURCE_PORT_DEFAULT));
 const sourceBase = `http://${env.FAHQ_SOURCE_HOST ?? 'host.docker.internal'}:${port}`;
 
 // Zetaris descriptions allow only letters, digits, spaces and _ . - ,
@@ -65,7 +70,7 @@ async function drop(label: string, sql: string) {
     await client.run(sql);
     console.log(`dropped  ${label}`);
   } catch (e) {
-    if (/not (found|exist)|does not exist|no such|cannot find/i.test(message(e))) console.log(`absent   ${label}`);
+    if (/not (found|exist)|not_found|does not exist|doesn't exist|no such|cannot (be )?find|cannot be found/i.test(message(e))) console.log(`absent   ${label}`);
     else throw new Error(`${label}: ${message(e)}`);
   }
 }
@@ -84,69 +89,78 @@ async function ensureMart() {
   }
 }
 
-try {
-  if (!args.has('--verify-only')) {
-    if (args.has('--recreate')) {
-      await drop(`mart ${MART}`, martSql().drop);
-      await drop(FINANCE_VIEW, `DROP VIEW ${FINANCE_VIEW}`);
-      for (const v of VIEWS) await drop(`${CONTAINER}.${v.name}`, `DROP VIEW ${CONTAINER}.${v.name}`);
-      for (const d of DATABASES) for (const t of d.tables) await drop(`${d.db.toLowerCase()}.${t.name}`, `DROP LIGHTNING DATABASE TABLE ${d.db.toLowerCase()}.${t.name}`);
-    }
-    for (const d of DATABASES) await create(d.db, `CREATE LIGHTNING DATABASE ${d.db} DESCRIBE BY "${d.about}"`);
-    await create(`container ${CONTAINER}`, `CREATE SCHEMASTORE CONTAINER ${CONTAINER}`);
-    for (const d of DATABASES) {
-      for (const t of d.tables) {
-        await create(
-          `${d.db.toLowerCase()}.${t.name}`,
-          `CREATE LIGHTNING REST TABLE ${t.name} FROM ${d.db} REQUEST(endpoint "${sourceBase}${t.path}", method "get", response_type "json", http_encoding "URLENCODED") HEADER () BODY ()`,
-        );
-      }
-    }
-    for (const v of VIEWS) {
+/** Version 1: creates what is missing (or rebuilds it with --recreate), then its mart. */
+async function buildV1() {
+  if (args.has('--recreate')) {
+    await drop(`mart ${MART}`, martSql().drop);
+    await drop(FINANCE_VIEW, `DROP VIEW ${FINANCE_VIEW}`);
+    for (const v of VIEWS) await drop(`${CONTAINER}.${v.name}`, `DROP VIEW ${CONTAINER}.${v.name}`);
+    for (const d of DATABASES) for (const t of d.tables) await drop(`${d.db.toLowerCase()}.${t.name}`, `DROP LIGHTNING DATABASE TABLE ${d.db.toLowerCase()}.${t.name}`);
+  }
+  for (const d of DATABASES) await create(d.db, `CREATE LIGHTNING DATABASE ${d.db} DESCRIBE BY "${d.about}"`);
+  await create(`container ${CONTAINER}`, `CREATE SCHEMASTORE CONTAINER ${CONTAINER}`);
+  for (const d of DATABASES) {
+    for (const t of d.tables) {
       await create(
-        `${CONTAINER}.${v.name}`,
-        `CREATE SCHEMASTORE VIEW ${v.name} WITH CONTAINER ${CONTAINER} AS SELECT ${v.cols.map((c) => `item.${c}`).join(', ')} FROM ${v.from} LATERAL VIEW explode(data) AS item`,
+        `${d.db.toLowerCase()}.${t.name}`,
+        `CREATE LIGHTNING REST TABLE ${t.name} FROM ${d.db} REQUEST(endpoint "${sourceBase}${t.path}", method "get", response_type "json", http_encoding "URLENCODED") HEADER () BODY ()`,
       );
     }
-    await create(FINANCE_VIEW, `CREATE SCHEMASTORE VIEW finance_metrics WITH CONTAINER ${CONTAINER} AS ${financeViewBody()}`);
-    await ensureMart();
   }
+  for (const v of VIEWS) {
+    await create(
+      `${CONTAINER}.${v.name}`,
+      `CREATE SCHEMASTORE VIEW ${v.name} WITH CONTAINER ${CONTAINER} AS SELECT ${v.cols.map((c) => `item.${c}`).join(', ')} FROM ${v.from} LATERAL VIEW explode(data) AS item`,
+    );
+  }
+  await create(FINANCE_VIEW, `CREATE SCHEMASTORE VIEW finance_metrics WITH CONTAINER ${CONTAINER} AS ${financeViewBody()}`);
+  await ensureMart();
+}
 
-  // Proof: the federated Zetaris answer equals an independent computation over the same rows,
-  // asked of the governed view and again of the Virtual Data Mart table built on it.
-  const business = generateBusiness();
-  async function prove(label: string, queryFor: (period: Period) => string, detail: boolean): Promise<number> {
-    let failures = 0;
-    const oracle = computeAll(business, 1);
-    for (const period of VERSIONS[1].periods) {
-      const t = Date.now();
-      const rows = await client.run(queryFor(period), 500);
-      const got = new Map(rows.map(([id, v]) => [id ?? '', Number(v)]));
-      const want = oracle.get(period)!;
-      const problems: string[] = [];
-      for (const [id, w] of want) {
-        const g = got.get(id);
-        const unit = METRIC_BY_ID.get(id)?.unit;
-        const tolerance = unit === 'ratio' ? 0.00011 : unit === 'usd' ? 0.011 : 0;
-        if (g === undefined) problems.push(`${id}: missing from Zetaris (expected ${w})`);
-        else if (Math.abs(g - w) > tolerance) problems.push(`${id}: Zetaris ${g}, expected ${w}`);
-      }
-      for (const id of got.keys()) if (!want.has(id)) problems.push(`${id}: returned by Zetaris but not expected`);
-      failures += problems.length;
-      console.log(`\n${period}: ${got.size} of ${want.size} metrics from ${label} in ${Date.now() - t} ms; ${problems.length ? `${problems.length} MISMATCHES` : 'all match the independent computation'}`);
-      for (const p of problems) console.log(`  ✗ ${p}`);
-      const show = ['m:online.revenue.total', 'm:online.ads.google.roas', 'm:online.dq.rejected_orders', 'm:salon.revenue.total', 'm:salon.dq.rejected_appointments'];
-      if (detail) for (const id of show) if (got.has(id)) console.log(`  ${id.padEnd(36)} ${got.get(id)}`);
+/** Version 2: only version 2's own objects, beside version 1's (zetaris-objects.ts names nothing of version 1). */
+async function buildV2() {
+  if (args.has('--recreate')) for (const s of v2DropStatements()) await drop(s.label, s.sql);
+  for (const s of v2CreateStatements(sourceBase)) await create(s.label, s.sql);
+}
+
+// Proof: the federated Zetaris answer equals an independent computation over the same rows, period by
+// period, metric by metric.
+const SHOW = ['m:online.revenue.total', 'm:online.ads.google.roas', 'm:online.dq.rejected_orders', 'm:salon.revenue.total', 'm:salon.dq.rejected_appointments'];
+async function prove(label: string, queryFor: (period: Period) => string, oracle: Map<Period, Map<string, number>>, detail: boolean): Promise<number> {
+  let failures = 0;
+  for (const [period, want] of oracle) {
+    const t = Date.now();
+    const rows = await client.run(queryFor(period), 500);
+    const got = new Map(rows.map(([id, v]) => [id ?? '', Number(v)]));
+    const problems: string[] = [];
+    for (const [id, w] of want) {
+      const g = got.get(id);
+      const unit = METRIC_BY_ID.get(id)?.unit;
+      const tolerance = unit === 'ratio' ? 0.00011 : unit === 'usd' ? 0.011 : 0;
+      if (g === undefined) problems.push(`${id}: missing from Zetaris (expected ${w})`);
+      else if (Math.abs(g - w) > tolerance) problems.push(`${id}: Zetaris ${g}, expected ${w}`);
     }
-    return failures;
+    for (const id of got.keys()) if (!want.has(id)) problems.push(`${id}: returned by Zetaris but not expected`);
+    failures += problems.length;
+    console.log(`\n${period}: ${got.size} of ${want.size} metrics from ${label} in ${Date.now() - t} ms; ${problems.length ? `${problems.length} MISMATCHES` : 'all match the independent computation'}`);
+    for (const p of problems) console.log(`  ✗ ${p}`);
+    if (detail) for (const id of SHOW) if (got.has(id)) console.log(`  ${id.padEnd(36)} ${got.get(id)}`);
   }
-  let failures = await prove(FINANCE_VIEW, financeQuery, true);
-  failures += await prove(`the data mart (${MART_VIEW})`, martQuery, false);
+  return failures;
+}
+
+try {
+  if (!args.has('--verify-only')) await (v2 ? buildV2() : buildV1());
+  // Version 1 is asked of its view and again of the Virtual Data Mart table built on it; version 2 of its period view.
+  const failures = v2
+    ? await prove(PERIOD_VIEW_V2, (p) => financeQuery(p, 2), computeAll(generateYear(), 2), true)
+    : (await prove(FINANCE_VIEW, financeQuery, computeAll(generateBusiness(), 1), true))
+      + (await prove(`the data mart (${MART_VIEW})`, martQuery, computeAll(generateBusiness(), 1), false));
   if (failures) {
     console.error(`\nzetaris-setup: ${failures} mismatches`);
     process.exitCode = 1;
   } else {
-    console.log('\nzetaris-setup: verified');
+    console.log(`\nzetaris-setup: version ${v2 ? 2 : 1} verified`);
   }
 } catch (e) {
   console.error(`zetaris-setup failed: ${message(e)}`);

@@ -3,6 +3,7 @@ import { Metric, type DataPort, type Period } from '@fahq/contracts';
 import { VERSIONS, dataVersionFromEnv, financeQuery, financeViewBody } from './finance-sql.ts';
 import { SOURCE_PORT_DEFAULT, ensureSourceServer } from './source-server.ts';
 import { createZetarisClient, zetarisConfigFromEnv, type ZetarisClient } from './zetaris-client.ts';
+import { SOURCE_PORT_V2_DEFAULT } from './zetaris-objects.ts';
 
 export { generateBusiness, generateDivisions, generateHistory, generateYear, PERIODS, SEASON } from './synthetic.ts';
 export { createSourceServer, ensureSourceServer, SOURCE_PORT_DEFAULT } from './source-server.ts';
@@ -25,7 +26,8 @@ export function createZetarisDataPort(
   const served = new Map(defs.map((d) => [d.id, d]));
   const client = deps.client ?? createZetarisClient({ ...zetarisConfigFromEnv(env), ...(deps.fetch ? { fetch: deps.fetch } : {}) });
   // The demo's source systems are a local synthetic API; make sure it is up before Zetaris reads it.
-  const port = Number(env.FAHQ_SOURCE_PORT ?? SOURCE_PORT_DEFAULT);
+  // Version 2's tables read their own port, so the server version 1 reads is never involved.
+  const port = Number(version === 2 ? (env.FAHQ_SOURCE_PORT_V2 ?? SOURCE_PORT_V2_DEFAULT) : (env.FAHQ_SOURCE_PORT ?? SOURCE_PORT_DEFAULT));
   const ensureSources = deps.ensureSources ?? (() => ensureSourceServer(port));
 
   return {
