@@ -86,6 +86,11 @@ function matches(f: Figure, fact: number): boolean {
   return candidates.some((c) => Math.abs(Math.abs(c) / f.scale - f.base) <= tolerance);
 }
 
+/** True when the reply states `value` (at the precision it is written, same rules as traceNumbers). */
+export function mentions(text: string, value: number): boolean {
+  return figuresIn(text).some((f) => matches(f, value));
+}
+
 /**
  * The objections to a reply: each number in `text` that is not one of the numbers in `facts`.
  * A number passes when it equals a fact rounded to the number's own decimals (4 for 3.6071, 3.6, 3.61),

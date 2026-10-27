@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ANSWER_RULES, traceNumbers, writeAnswer } from '../src/answer.ts';
+import { ANSWER_RULES, mentions, traceNumbers, writeAnswer } from '../src/answer.ts';
 import { mockModel } from './model.mock.ts';
 
 const facts = { google: { spend: 4100, revenue: 14760, roas: 3.6071 }, ratio: 0.4231, services: [{ name: 'Wash and set', revenue: 6200 }], noShows: 3, period: '2026-09' };
@@ -84,6 +84,15 @@ describe('traceNumbers', () => {
 
   it('objects to numbers written in words, which cannot be checked', () => {
     expect(traceNumbers('Revenue was twelve thousand dollars.', facts)).toEqual(['"twelve thousand" is a number written in words; write it in digits so it can be checked']);
+  });
+
+  it('can also ask whether a reply states one particular value', () => {
+    expect(mentions('Google earned $14,760.', 14760)).toBe(true);
+    expect(mentions('Google earned $14.8k.', 14760)).toBe(true);
+    expect(mentions('ROAS was 3.6x.', 3.6071)).toBe(true);
+    expect(mentions('ROAS was 3.7x.', 3.6071)).toBe(false);
+    expect(mentions('There were 3 no-shows.', 4)).toBe(false);
+    expect(mentions('Nothing here.', 3)).toBe(false);
   });
 
   it('gives no objections for an empty reply', () => {
