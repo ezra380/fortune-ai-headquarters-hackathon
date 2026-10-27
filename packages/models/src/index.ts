@@ -61,10 +61,12 @@ export function createModelClient(opts: ModelClientOptions): ModelPort & { reado
             stream: false,
             max_tokens: input.maxTokens,
             temperature: input.temperature,
-            messages: [
-              { role: 'system', content: input.system },
-              { role: 'user', content: input.user },
-            ],
+            messages: input.noSystem
+              ? [{ role: 'user', content: input.user }]
+              : [
+                  { role: 'system', content: input.system },
+                  { role: 'user', content: input.user },
+                ],
             // NVIDIA-hosted Nemotron honors this switch; measured: routing 0.6 s / 41 tokens with
             // thinking off vs 14 s / 1,436 tokens with it on.
             ...(input.thinking === false && opts.provider === 'nvidia'
@@ -174,5 +176,11 @@ export function modelsFromEnv(env: NodeJS.ProcessEnv, deps: { fetch?: typeof fet
     planModel: env.NEMOTRON_PLAN_MODEL ?? 'nvidia/nemotron-3-ultra-550b-a55b',
     routerModel: env.NEMOTRON_ROUTER_MODEL ?? 'nvidia/nemotron-3.5-lightning-30b-a3b',
     reviewModel: env.XAI_MODEL ?? '',
+    // The safety screen (guard.ts): a small NVIDIA safety model; GUARD=off turns the screen off.
+    guardModel: env.GUARD_MODEL ?? 'nvidia/llama-3.1-nemotron-safety-guard-8b-v3',
+    guard: env.GUARD !== 'off',
   };
 }
+
+export { screenText } from './guard.ts';
+export type { ScreenInput, ScreenResult } from './guard.ts';

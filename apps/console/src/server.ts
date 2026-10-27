@@ -18,7 +18,7 @@ import { PAGE_CSP, PAGE_HTML } from './page.ts';
 import { placeholderView, shapeDepartment } from './shape.ts';
 
 export type ConsoleDeps = {
-  /** Reads one department's data. Called only for owner, finance and online; never for salon. */
+  /** Reads one department's data. Called only for owner, finance, online and manager; never for salon. */
   load: (department: LiveDepartmentId) => Promise<RawDepartment>;
   now: () => Date;
   /** Where plain one-line problems go. Defaults to stderr. Never receives data or secrets. */

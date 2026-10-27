@@ -102,5 +102,7 @@ export interface ModelPort {
     json: boolean;
     /** false turns off a reasoning model's thinking (fast classification); default: provider default. */
     thinking?: boolean;
+    /** true sends the user message alone, with no system message (safety-guard models answer a bare message). */
+    noSystem?: boolean;
   }): Promise<{ text: string; model: string; inputTokens: number; outputTokens: number; costUsd: number }>;
 }

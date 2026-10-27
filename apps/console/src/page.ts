@@ -50,6 +50,7 @@ section{margin:36px 0 0}
 .bad{color:var(--red);font-size:.875rem;overflow-wrap:anywhere}
 .plans{margin:2px 0 0;padding-left:1.25rem;font-size:.9375rem}
 .plans li{overflow-wrap:anywhere}
+.rec{display:grid;gap:4px;min-width:0;margin-top:6px;padding-top:10px;border-top:1px solid var(--line)}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{flex:none;display:inline-block;font-size:.75rem;font-weight:700;line-height:1;padding:5px 9px;border-radius:999px;background:var(--tint);color:var(--muted);white-space:nowrap}
 .chip.ok{background:var(--green-bg);color:var(--green)}
@@ -77,11 +78,12 @@ const SCRIPT = `
   var lastKey = '';
   var inflight = 0;
 
-  var NAMES = { owner: 'Owner HQ', finance: 'Finance', online: 'Online customer service', salon: 'Salon (Cindy)' };
+  var NAMES = { owner: 'Owner HQ', finance: 'Finance', online: 'Online customer service', manager: 'HQ Manager', salon: 'Salon (Cindy)' };
   var TONE = {
-    ok: 'ok', done: 'ok', sent: 'ok', signed: 'ok', answered: 'ok', closed: 'ok',
+    ok: 'ok', done: 'ok', sent: 'ok', signed: 'ok', answered: 'ok', closed: 'ok', adopted: 'ok',
     refused: 'warn', skipped: 'warn', waiting: 'warn', pending: 'warn', queued: 'warn', running: 'warn',
     open: 'warn', sending: 'warn', expired: 'warn', locked: 'warn', cancelled: 'warn', declined: 'warn',
+    retrying: 'warn', proposed: 'warn', unknown: 'warn',
     failed: 'fail'
   };
   var WORDS = {
@@ -92,7 +94,7 @@ const SCRIPT = `
     inbound_text: 'A text came in', mailbox: 'A message from another assistant', scheduled: 'A scheduled job',
     request: 'Request', proposal: 'Proposal', decision: 'Decision', report: 'Report'
   };
-  var ACTIONS = { forward_plan: 'Send a plan to the finance owner', decide_plan: 'Decide on a plan' };
+  var ACTIONS = { forward_plan: 'Send a plan to the finance owner', decide_plan: 'Decide on a plan', adopt_change: 'Adopt a change' };
   var CHANNELS = { sms: 'Text message', print: 'Printout' };
 
   function h(tag, cls, text) {
@@ -118,6 +120,14 @@ const SCRIPT = `
   function plain(s) { return String(s || '').replace(/[._]/g, ' '); }
   function join(parts) { return parts.filter(function (p) { return p; }).join(' \\u00b7 '); }
   function num(n) { return n === null || n === undefined ? '\\u2013' : String(n); }
+  function fmt(n) { return n === null || n === undefined ? '\\u2013' : Number(n).toLocaleString(); }
+  function tokens(inTokens, outTokens) {
+    var none = function (n) { return n === null || n === undefined; };
+    if (none(inTokens) && none(outTokens)) return '';
+    return fmt(inTokens) + ' in / ' + fmt(outTokens) + ' out tokens';
+  }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  function nameOf(id) { return Object.prototype.hasOwnProperty.call(NAMES, id) ? NAMES[id] : id; }
 
   function section(title, hint, items, build, empty) {
     var s = h('section');
@@ -143,6 +153,69 @@ const SCRIPT = `
     li.appendChild(top);
   }
 
+  var REPORTS_HINT = 'Work reports: what each task did, how many model calls and tokens it used, and what it suggests.';
+
+  function reportsSection(d) {
+    var mine = d.id === 'manager';
+    return section('Work reports', REPORTS_HINT + (mine ? ' The latest 30, across all assistants.' : ' The latest 15 for this assistant.'), d.reports, function (li, r) {
+      head(li, nameOf(r.assistant) + ': ' + plain(r.taskKind), r.outcome);
+      li.appendChild(h('div', 'text', r.summary));
+      var bits = [r.taskId ? 'Task ' + r.taskId : '', plural(r.modelCalls, 'model call', 'model calls'), tokens(r.inputTokens, r.outputTokens), dur(r.durationMs)];
+      if (r.codeMode) {
+        bits.push('Code Mode: ' + plural(r.codeMode.scripts, 'script', 'scripts') + ', ' + plural(r.codeMode.toolCalls, 'lookup', 'lookups') + ', ' + fmt(r.codeMode.resultChars) + ' characters back');
+      }
+      bits.push(when(r.endedAt));
+      li.appendChild(h('div', 'meta', join(bits)));
+      if (r.suggestions && r.suggestions.length) {
+        var ul = h('ul', 'plans');
+        r.suggestions.forEach(function (s) {
+          ul.appendChild(h('li', null, 'Suggests (' + plain(s.kind) + (s.about ? ', ' + nameOf(s.about) : '') + '): ' + s.text));
+        });
+        li.appendChild(ul);
+      }
+    }, 'Nothing yet. A report appears here when a task finishes, with what it did and what it used.');
+  }
+
+  function managerSections(f, m) {
+    var unread = function (part) { return m.unread && m.unread.indexOf(part) >= 0; };
+
+    var rowsForUsage = m.usage
+      ? m.usage.rows.map(function (u) { return { label: nameOf(u.assistant), u: u }; }).concat([{ label: 'All assistants', u: m.usage.total }])
+      : [];
+    f.appendChild(section('Usage, last 24 hours', 'Finished tasks per assistant, with the model calls and tokens they used.', rowsForUsage, function (li, item) {
+      var u = item.u;
+      head(li, item.label);
+      li.appendChild(h('div', 'text', join([
+        plural(u.tasks, 'task', 'tasks'), u.done + ' done', u.failed + ' failed', u.retrying ? u.retrying + ' retrying' : '',
+        plural(u.modelCalls, 'model call', 'model calls'), fmt(u.inputTokens) + ' tokens in', fmt(u.outputTokens) + ' tokens out'
+      ])));
+    }, 'The last 24 hours of work reports could not be read right now. See the notes above.'));
+
+    f.appendChild(section('Latest review', 'The HQ Manager looks over recent work reports and recommends changes. A recommendation changes nothing until the owner adopts it with a code.', m.review ? [m.review] : [], function (li, rv) {
+      head(li, 'Reviewed ' + when(rv.createdAt));
+      li.appendChild(h('div', 'meta', join(['Covers ' + when(rv.coversFrom) + ' to ' + when(rv.coversTo), plural(rv.reportCount, 'report', 'reports'), rv.model])));
+      li.appendChild(h('div', 'text', rv.summary || 'The summary could not be read.'));
+      if (rv.findings.length) {
+        var ul = h('ul', 'plans');
+        rv.findings.forEach(function (x) { ul.appendChild(h('li', null, nameOf(x.assistant) + ': ' + x.text)); });
+        li.appendChild(ul);
+      }
+      rv.recommendations.forEach(function (rec) {
+        var box = h('div', 'rec');
+        head(box, (rec.rank ? rec.rank + '. ' : '') + nameOf(rec.assistant) + ': ' + rec.change, rec.status);
+        if (rec.why) box.appendChild(h('div', 'text', 'Why: ' + rec.why));
+        box.appendChild(h('div', 'meta', rec.status === 'adopted' ? 'Adopted ' + when(rec.decidedAt) : rec.status === 'expired' ? 'Expired without being adopted' : 'Not adopted yet'));
+        li.appendChild(box);
+      });
+    }, unread('review') ? 'The latest review could not be read right now. See the notes above.' : 'No review yet. The HQ Manager writes one after it has looked over recent work reports.'));
+
+    f.appendChild(section('Standing lessons', 'Recommendations the owner adopted with a code, newest first.', m.lessons, function (li, l) {
+      head(li, nameOf(l.assistant));
+      li.appendChild(h('div', 'text', l.change));
+      li.appendChild(h('div', 'meta', 'Adopted ' + when(l.adoptedAt)));
+    }, unread('lessons') ? 'The standing lessons could not be read right now. See the notes above.' : 'None yet. A recommendation becomes a standing lesson only after the owner adopts it with a code.'));
+  }
+
   function render(d) {
     var f = document.createDocumentFragment();
 
@@ -158,7 +231,8 @@ const SCRIPT = `
     if (d.assistant) {
       who.appendChild(document.createTextNode('Assistant: '));
       who.appendChild(h('b', null, d.assistant.displayName || 'not named yet'));
-      who.appendChild(document.createTextNode(d.assistant.number ? ' \\u00b7 texts from ' + d.assistant.number : ' \\u00b7 no texting number yet'));
+      who.appendChild(document.createTextNode(d.assistant.number ? ' \\u00b7 texts from ' + d.assistant.number
+        : d.id === 'manager' ? ' \\u00b7 has no number; it reaches the owner through Owner HQ' : ' \\u00b7 no texting number yet'));
     } else {
       who.appendChild(document.createTextNode('This assistant has no record yet.'));
     }
@@ -179,16 +253,23 @@ const SCRIPT = `
     });
     f.appendChild(cards);
 
+    if (d.manager) {
+      managerSections(f, d.manager);
+      f.appendChild(reportsSection(d));
+    }
+
     f.appendChild(section('Tasks', 'Work this assistant has been given, newest first.', d.tasks, function (li, t) {
       head(li, KINDS[t.kind] || plain(t.kind), t.status);
       if (t.lastError) li.appendChild(h('div', 'bad', t.lastError));
       li.appendChild(h('div', 'meta', join(['Task ' + t.id, t.attempts + (t.attempts === 1 ? ' try' : ' tries'), when(t.createdAt)])));
     }, 'Nothing yet. A task appears here when someone texts this assistant or another assistant sends it a request.'));
 
-    f.appendChild(section('Activity', 'What the assistant did, step by step, and how long each step took.', d.receipts, function (li, r) {
+    if (!d.manager) f.appendChild(reportsSection(d));
+
+    f.appendChild(section('Activity', 'What the assistant did, step by step, how long each step took and the tokens it used.', d.receipts, function (li, r) {
       head(li, plain(r.step), r.outcome);
       if (r.detail) li.appendChild(h('div', 'text', r.detail));
-      li.appendChild(h('div', 'meta', join([r.model, r.dataSource, dur(r.durationMs), r.live === false ? 'practice run' : '', when(r.startedAt)])));
+      li.appendChild(h('div', 'meta', join([r.model, r.dataSource, dur(r.durationMs), tokens(r.inputTokens, r.outputTokens), r.live === false ? 'practice run' : '', when(r.startedAt)])));
     }, 'Nothing yet. Each step the assistant takes is listed here with the model and data it used.'));
 
     f.appendChild(section('Mailbox', 'Requests, proposals and decisions passed between assistants. Only the plan titles are shown.', d.mailbox, function (li, m) {

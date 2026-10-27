@@ -3,16 +3,29 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { openBrain } from '@fahq/brain';
-import type { LiveDepartmentId, RawApproval, RawDepartment, RawMessage, RawOutbox, RawReceipt, RawTask } from './departments.ts';
-import { BRAIN_NOTE } from './departments.ts';
+import type {
+  LiveDepartmentId, ManagerPart, RawApproval, RawDepartment, RawManager, RawMessage, RawOutbox, RawReceipt, RawRecommendation, RawReview,
+  RawTask, RawUsageRow, RawWorkReport,
+} from './departments.ts';
+import { BRAIN_NOTE, USAGE_WINDOW_HOURS } from './departments.ts';
 
 // Reads one department's data. READ ONLY, server side, with the service key (the key lives in the
 // client object the caller passes in; it never appears here). Every query names its columns, and the
 // columns exclude anything secret: approvals are read without code_hash, and people, inbound texts
-// and the spending table are never touched.
+// and the spending table are never touched. The HQ Manager's reviews and recommendations are read
+// without who decided them (decided_by) and without the review's raw digest.
 
-const LIMITS = { tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, proposalIds: 100 };
+const LIMITS = {
+  tasks: 15, mailbox: 15, approvals: 15, outbox: 15, receipts: 30, messageIds: 100,
+  reports: 15, managerReports: 30, usageRows: 500, lessons: 20, recommendations: 3,
+};
 const OPEN_TASK_STATUSES = ['queued', 'running', 'waiting'];
+// Named columns only. The step list (steps) is not read: the page shows each report's summary, counts and suggestions.
+const REPORT_COLUMNS = 'task_id,assistant_id,task_kind,outcome,summary,usage,suggestions,input_tokens,output_tokens,model_calls,started_at,ended_at';
+const USAGE_COLUMNS = 'assistant_id,outcome,model_calls,input_tokens,output_tokens';
+const REVIEW_COLUMNS = 'id,covers_from,covers_to,report_count,review,model,created_at';
+const RECOMMENDATION_COLUMNS = 'rank,assistant_id,change,why,status,decided_at';
+const LESSON_COLUMNS = 'assistant_id,change,status,decided_at';
 
 type Db = Pick<SupabaseClient, 'from'>;
 type Answer<T> = { data: T | null; error: { message: string; code?: string } | null; count?: number | null };
@@ -90,9 +103,9 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
   const { db, now } = options;
 
   return async (id) => {
-    if (id !== 'owner' && id !== 'finance' && id !== 'online') throw new Error('unknown department');
+    if (id !== 'owner' && id !== 'finance' && id !== 'online' && id !== 'manager') throw new Error('unknown department');
     const notes: string[] = [];
-    const mine = `from_assistant.eq.${id},to_assistant.eq.${id}`; // id is one of three fixed words, never user text
+    const mine = `from_assistant.eq.${id},to_assistant.eq.${id}`; // id is one of four fixed words, never user text
 
     const part = async <T>(label: string, fallback: T, run: () => Promise<T>): Promise<T> => {
       try {
@@ -103,7 +116,70 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
       }
     };
 
-    const [assistant, tasks, openTasks, mailbox, outbox, receipts, brain] = await Promise.all([
+    // What only the HQ Manager tab shows: the last day's usage, the latest review with its recommendations,
+    // and the standing lessons (adopted recommendations). A part that cannot be read is named in `unread`.
+    async function readManager(): Promise<RawManager> {
+      const unread: ManagerPart[] = [];
+      const [usageRows, review, lessons] = await Promise.all([
+        part('The last day of work reports', null as RawUsageRow[] | null, async () => {
+          const cutoff = new Date(now().getTime() - USAGE_WINDOW_HOURS * 3_600_000).toISOString();
+          const found = must<RawUsageRow[]>(
+            await db
+              .from('work_reports')
+              .select(USAGE_COLUMNS)
+              .gte('ended_at', cutoff)
+              .order('ended_at', { ascending: false })
+              .limit(LIMITS.usageRows),
+          );
+          // Added up here only as far as the cap; say so rather than show a quiet undercount.
+          if (found.length >= LIMITS.usageRows) {
+            notes.push(`More than ${LIMITS.usageRows} reports finished in the last ${USAGE_WINDOW_HOURS} hours; the usage totals cover the newest ${LIMITS.usageRows}.`);
+          }
+          return found;
+        }),
+        part('The latest review', null as { review: RawReview | null; recommendations: RawRecommendation[] } | null, async () => {
+          const found = must<RawReview[]>(
+            await db.from('manager_reviews').select(REVIEW_COLUMNS).order('created_at', { ascending: false }).limit(1),
+          );
+          const latest = Array.isArray(found) ? found[0] : undefined;
+          if (!latest) return { review: null, recommendations: [] };
+          const recommendations = must<RawRecommendation[]>(
+            await db
+              .from('recommendations')
+              .select(RECOMMENDATION_COLUMNS)
+              .eq('review_id', latest.id)
+              .order('rank', { ascending: true })
+              .limit(LIMITS.recommendations),
+          );
+          return { review: latest, recommendations };
+        }),
+        part('The standing lessons', null as RawRecommendation[] | null, async () =>
+          must<RawRecommendation[]>(
+            await db
+              .from('recommendations')
+              .select(LESSON_COLUMNS)
+              .eq('status', 'adopted')
+              .order('decided_at', { ascending: false, nullsFirst: false })
+              .limit(LIMITS.lessons),
+          ),
+        ),
+      ]);
+      if (usageRows === null) unread.push('usage');
+      if (review === null) unread.push('review');
+      if (lessons === null) unread.push('lessons');
+      return {
+        usageRows,
+        review: review?.review ?? null,
+        recommendations: review?.recommendations ?? [],
+        lessons: lessons ?? [],
+        unread,
+      };
+    }
+
+    // The HQ Manager's own reads start now so they run beside the common ones.
+    const managerReads = id === 'manager' ? readManager() : null;
+
+    const [assistant, tasks, openTasks, mailbox, outbox, receipts, reports, brain] = await Promise.all([
       part('The assistant record', null, async () =>
         must<{ display_name: string | null; sms_from: string | null } | null>(
           await db.from('assistants').select('display_name,sms_from').eq('id', id).maybeSingle(),
@@ -122,7 +198,7 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
       part('The open-task count', null as number | null, async () =>
         mustCount(await db.from('tasks').select('id', { count: 'exact', head: true }).eq('assistant_id', id).in('status', OPEN_TASK_STATUSES)),
       ),
-      part('The mailbox', null as { rows: RawMessage[]; proposals: number; proposalIds: string[] } | null, async () => {
+      part('The mailbox', null as { rows: RawMessage[]; proposals: number; approvalMessageIds: string[] } | null, async () => {
         const rows = must<RawMessage[]>(
           await db
             .from('assistant_messages')
@@ -131,15 +207,20 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
             .order('created_at', { ascending: false })
             .limit(LIMITS.mailbox),
         );
-        const proposals = await db
-          .from('assistant_messages')
-          .select('id', { count: 'exact' })
-          .eq('kind', 'proposal')
-          .or(mine)
-          .order('created_at', { ascending: false })
-          .limit(LIMITS.proposalIds);
-        const ids = must<{ id: string }[]>(proposals).map((p) => p.id);
-        return { rows, proposals: proposals.count ?? ids.length, proposalIds: ids };
+        // Two kinds of message carry an approval: a proposal (send or decide a plan) and the HQ Manager's review,
+        // which is posted to the owner as a 'report' with the ADOPT approval attached. Only proposals are counted as proposals.
+        const idsOfKind = (kind: 'proposal' | 'report') =>
+          db
+            .from('assistant_messages')
+            .select('id', { count: 'exact' })
+            .eq('kind', kind)
+            .or(mine)
+            .order('created_at', { ascending: false })
+            .limit(LIMITS.messageIds);
+        const [proposals, reviews] = await Promise.all([idsOfKind('proposal'), idsOfKind('report')]);
+        const proposalIds = must<{ id: string }[]>(proposals).map((p) => p.id);
+        const reviewIds = must<{ id: string }[]>(reviews).map((r) => r.id);
+        return { rows, proposals: proposals.count ?? proposalIds.length, approvalMessageIds: [...new Set([...proposalIds, ...reviewIds])] };
       }),
       part('Texts and printouts', [] as RawOutbox[], async () =>
         must<RawOutbox[]>(
@@ -155,26 +236,34 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
         must<RawReceipt[]>(
           await db
             .from('receipts')
-            .select('step,outcome,model,data_source,started_at,ended_at,detail,live')
+            .select('step,outcome,model,data_source,started_at,ended_at,detail,live,input_tokens,output_tokens')
             .eq('assistant_id', id)
             .order('started_at', { ascending: false })
             .limit(LIMITS.receipts),
         ),
       ),
+      part('The work reports', [] as RawWorkReport[], async () => {
+        // A department shows its own latest reports; the HQ Manager shows the latest across all assistants.
+        const base = db.from('work_reports').select(REPORT_COLUMNS);
+        const scoped = id === 'manager' ? base : base.eq('assistant_id', id);
+        return must<RawWorkReport[]>(
+          await scoped.order('ended_at', { ascending: false }).limit(id === 'manager' ? LIMITS.managerReports : LIMITS.reports),
+        );
+      }),
       readBrain(id, options.brain),
     ]);
 
-    // Approvals for the proposals this assistant sent or received (the code hash is never requested).
+    // Approvals for the proposals and reviews this assistant sent or received (the code hash is never requested).
     let approvals: RawApproval[] = [];
     let pendingApprovals: number | null = null;
-    const proposalIds = mailbox?.proposalIds ?? [];
-    if (mailbox && proposalIds.length > 0) {
+    const approvalMessageIds = mailbox?.approvalMessageIds ?? [];
+    if (mailbox && approvalMessageIds.length > 0) {
       approvals = await part('Approvals', [] as RawApproval[], async () =>
         must<RawApproval[]>(
           await db
             .from('approvals')
             .select('action,status,expires_at,decided_at')
-            .in('message_id', proposalIds)
+            .in('message_id', approvalMessageIds)
             .order('created_at', { ascending: false })
             .limit(LIMITS.approvals),
         ),
@@ -184,7 +273,7 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
           await db
             .from('approvals')
             .select('id', { count: 'exact', head: true })
-            .in('message_id', proposalIds)
+            .in('message_id', approvalMessageIds)
             .eq('status', 'pending')
             .gt('expires_at', now().toISOString()),
         ),
@@ -192,6 +281,8 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
     } else if (mailbox) {
       pendingApprovals = 0;
     }
+
+    const manager = managerReads ? await managerReads : undefined;
 
     if (!brain.available) notes.push(BRAIN_NOTE);
 
@@ -203,6 +294,8 @@ export function createCloudLoader(options: LoaderOptions): (department: LiveDepa
       approvals,
       outbox,
       receipts,
+      reports,
+      ...(manager ? { manager } : {}),
       decisions: brain.decisions,
       timeline: brain.timeline,
       notes,
