@@ -297,3 +297,127 @@ Full suite: `npm test` 45 files, 785 tests green; `npm run typecheck` clean. Eac
 - A test that runs a worker with a far-future clock claims every stale `running` task in the shared database (`claim_task` takes
   expired leases); the manager tests run the task itself with `handleTask` instead.
 - No new dependency and no new environment variable.
+
+> **Read "Review fixes" below first. Where it differs from slice 3 above, it wins.** In particular the manager no longer applies a
+> lesson or a skill note by itself: as shipped every kind waits for the owner's code.
+
+## Review fixes (2026-10-27, after the independent review of slices 1 to 3)
+
+Fourteen findings: one blocker, five major, eight minor. Every one is fixed except where it says otherwise. Each fix has a test that
+fails without it. Where a finding says "add a test", the test is named.
+
+### What changed, per finding
+
+1. **Blocker: an approval with no code.** `MANAGER_APPLIES` is `{ lesson: false, skill_note: false, reads: false, model: false }`.
+   Every kind waits for `ADOPT <n> <code>` and is written as a version made by `owner`. The mechanism that lets the manager apply
+   a kind itself stays in the worker, tested and off: `WorkerDeps.managerApplies` (optional; nothing in production sets it; the
+   tests do). The review writer is no longer told a kind is "applied at once". Tests: `manager-decides.test.ts` "as shipped: nothing
+   changes a profile without the owner's one-time code" (a lesson and a skill note wait and ADOPT writes a version by the owner;
+   the model's words move nothing; **a review that read an outside report writes no profile version until ADOPT**; **a report filed
+   at the finance door cannot put a lesson into the online profile without the code**; ADOPT closes a recommendation the stored
+   profile will not take), `typed-change.test.ts` "no kind is applied without the one-time code of the owner" (a tripwire on the
+   table), `manager.test.ts` (the whole loop as shipped; the same loop with the rule on). The old tests of the mechanism run
+   unchanged in the groups "if Ezra approves it in writing". **Not done, on purpose:** the review's "at minimum" conditions for turning
+   the rule on (no auto-apply for a review whose digest read outside reports; none for an assistant other than the one whose door
+   filed the report). They need the review to remember which reports its digest carried; they are written up in `docs/manager.md`,
+   "Why the manager does not apply a lesson or a note by itself", as what must be added before the table is changed.
+   I did **not** call this finding wrong: the brief says the HQ Manager "decides what gets updated"; under the fix it decides what is
+   *recommended*, and the owner's code makes it so, which is also the standing invariant ("people decide by single-use codes only").
+2. **Major: a lesson shown with the owner's authority.** `ProfileLesson` has `by: 'owner' | 'manager'` (stored lessons with no
+   `by` read as `manager`, the less trusted). `applyProfileChange` takes `by`; ADOPT writes `owner`, the manager's own path `manager`.
+   `skillWithLessons` shows the owner's lessons as before and the manager's under "Suggested by the HQ Manager ... The owner did not
+   approve them. Your skill and the owner's instructions come first.", in the worker and at a door (`doorSkill`). The comment that said
+   all lessons are adopted by a code is corrected. Tests: `db-source.test.ts` (the wording for both kinds, mixed, newest ten across
+   both, no `by`), `door.test.ts`, `doors.test.ts` (the MCP prompt), `changes.test.ts` ("records who applied it"),
+   `manager-decides.test.ts` ("reach the next Code Mode answer ... under the right heading when the owner adopted / the HQ Manager
+   applied by itself them").
+3. **Major: the H-MEM lesson cache only grew.** The cache is now two-way. `AssistantMemory.rememberLesson` takes `fromProfile` (tagged
+   `profile`); `retireProfileLessons(keep)` replaces each such copy whose recommendation the stored row no longer holds with a
+   "lesson taken back" note (H-MEM's `supersedes` only links, so `lessons()` also skips what a note replaces); the worker's profile
+   read (`syncLessons` in `apps/worker/src/profiles.ts`) calls it after every read for each assistant and, for the manager's
+   "For <assistant>: ..." copies, with every assistant's sources. A lesson that was never a copy of a profile lesson (adopted before
+   profiles were stored) is never touched; a lesson the profile holds again is remembered again. Tests: `profile-lessons.test.ts`
+   (8), and `manager-decides.test.ts` "stop reaching the plan writer and my_lessons once the profile no longer holds them (a version
+   put back), and come back if it holds them again" (apply, put the version back, the next finance plan writer's prompt no longer
+   contains the lesson, and `my_lessons` neither). `list_lessons` still lists every adopted recommendation: it is the history.
+4. **Major: phone formats.** One definition in `packages/contracts/src/redact.ts` (`PHONE_SOURCE`, `CODE_SOURCE`, `hasPhone`,
+   `hasCode`, `maskPhonesAndCodes`), used by `checkChangeText` and `dataNeverStored` (lessons, notes, reviews) and by the read tools'
+   `scrub`; the database's `redact_text` has the same two patterns (new migration, below). A code in two groups (`482-913`, `482 913`)
+   is masked too. `scrub` leaves an id or a hash alone (a uuid, a hex string with a letter): a ten-digit run inside one is not a phone
+   number and masking it would have broken report ids. Tests: `contracts/test/redact.test.ts` + `redact-samples.ts` (one list of 27
+   strings), run **through the database function** in `supabase/tests/profiles.test.ts` ("masks exactly what the lesson rules and the
+   read tools mask", on the shared stack and on a database made from the migration files), the three formats in a filed report
+   ("masks a phone number written without its brackets or dash"), `changes.test.ts`, `read-tools.test.ts`
+   ("masks a phone number written any way", "leaves an id or a hash alone"), and the review writer sent back for them
+   (`manager-decides.test.ts`).
+5. **Major: `--force` undid the owner's reads and models.** `ownerChoices(history)` (pure, `seed.ts`) finds the read tools and the
+   per-job models whose **latest** change in the version history was made by `owner`; `--force` keeps them, records `keptFromOwner` in
+   the version's `change` and the script prints `kept what the owner approved: reads, model answer`. Anything the manager or a reseed
+   changed last is put back from the files. To take an owner's choice back on purpose: `revert-profile.ts`. Tests:
+   `seed-owner.test.ts` (7), `supabase/tests/profiles.test.ts` ("--force keeps the read tools and the model of each job whose latest
+   change the owner made ...", "runs --force as seed-profiles.ts and says which choices of the owner it kept"). The comment that
+   claimed a reseed "never throws away what a person decided" is now true and says what it keeps.
+6. **Major: the review looped on reports it cannot read.** `waiting` is counted over the same 30 days the reader tool reaches
+   (`MAX_HOURS`, now exported) and only when the manager's profile can read `list_session_reports`; unread reports older than the
+   window are closed (`store.expireSessionReports`: `reviewed_at` set, `review_id` empty; receipt `manager.expired`). A quiet day with
+   only such reports makes no digest, no review model call and no text; the owner's own `REVIEW` says that N reports are waiting and
+   why. Tests: `manager-decides.test.ts` ("closes a report older than the reader tool reaches, unread, and a quiet day then asks no
+   model and sends no text" (31 days), "counts outside reports as work as far back as the reader tool reaches" (29 days), "makes no
+   review on a quiet day for a report the manager's profile cannot read" (three days in a row, a manager row without the read)),
+   `store-manager.test.ts` ("closes the unread reports filed before a time, without a review, and only those").
+7. **Minor: reports marked read that the review never saw.** The digest question asks for at most 15 reports and for each one's id;
+   `outsideReportsRead` marks only the ids the reader tool returned **and** the digest carries. Test: "marks only the reports the digest
+   really carries: one the script cut off waits for the next review, and is read by it".
+8. **Minor: `list_session_reports` ignored the caller.** A department reads its own door's reports only (asking for another assistant's
+   throws a plain sentence); only the manager reads every door's. Test: "shows a department only the reports filed at its own door ...".
+   `list_work_reports` (older, not part of this lane's changes) still returns every assistant's work reports to whoever has it in
+   `reads`; nothing gives it to the salon or the online store today. I did not add it to `NEVER_READS`: another lane edits those
+   `reads`, and a refused row would silently fall back to the files at merge.
+9. **Minor: health words.** `thinning`, `balding`/`bald`, `health*`, `illness`, `sickness`, `disease`, `trichotillomania`, `medic*`,
+   "lost/losing her hair", "scalp condition" and a topper near `coverage`/`cover`/`thin` in either order are refused wherever hair
+   loss is (a lesson, a note, a review). Tests: `changes.test.ts` (ten new cases, four in `dataNeverStored`), and the review writer
+   sent back for them.
+10. **Minor: a forced profile read could return the old rows.** `refresh({ force: true })` waits for a read already under way and then
+    reads once more (callers that arrive meanwhile share that second read); a failed read under way does not stop it. Tests:
+    `db-source.test.ts` ("a forced read waits for a read already under way and reads again", "... still reads again when the read
+    under way fails").
+11. **Minor: door list items took extra keys.** `door_check_list` now refuses any key but the item's one field (`step` or `text`), so
+    no number written as a number gets in unmasked. Tests: `supabase/tests/profiles.test.ts` (four refusals through the Data API, and
+    the function itself on a database made from the migration files). Two older tests that stored `detail` and `kind` inside items
+    were corrected. The nesting-depth test moved to `redact_json` itself (no item can nest any more).
+12. **Minor: http to any host.** The door client accepts `http://` only for `localhost`, `127.0.0.1` and `[::1]`. Test:
+    `door-client.test.ts` ("never sends the token over plain http to another machine", eight hostile addresses).
+13. **Minor: the failure text.** The owner is told "The review didn't pass its checks"; the receipt (`manager.review`) says which one
+    (asserted in "never writes a version for a review that does not pass ...").
+14. **Law 12 (size and tests).** The branch is 69 files and about 7,900 added lines in three slices that are separate commit runs:
+    slice 1 `cf19781..4f49753` (about 2,000 lines, the tables, doors, source and seed), slice 2 `7228cfb..0d0babb` (about 1,750, the MCP
+    door), slice 3 plus these fixes `8cbb31f..HEAD` (about 4,200). **Not done: Ezra's OK on the size, or the split.** I cannot give the
+    first; the second is the orchestrator's call at merge (the slices merge in that order: each is green alone only with the earlier
+    ones). The tests the finding listed are all added (revert then H-MEM and plans, a reseed keeping owner reads and models, waiting
+    reports old and unreadable, the three phone formats). **Still not proven:** one successful `saveProfile` through PostgREST on the
+    shared stack (a profile version can never be taken back there); the write itself is proven on throwaway databases and the store's
+    call shape on the real one, as before.
+
+### What the merge must know
+
+- **A new migration, `20261027100200_profiles_review.sql`**, additive (`create or replace` of `redact_text` and `door_check_list`, same
+  names and signatures, so their privileges are unchanged). Apply it **after** `20261027100000_profiles.sql`. I applied it once to
+  the shared local stack with `docker exec ... psql` and recorded it in `supabase_migrations.schema_migrations`. The throwaway-database
+  tests in `supabase/tests/profiles.test.ts` apply both migration files.
+- **Edits outside the lane's list:** `packages/contracts/src/index.ts` (one export line) and new `redact.ts`;
+  `packages/brain/src/memory.ts` and `meterless.ts` (a lesson copy can be taken back; `MemoryRecordLike.supersedes`);
+  `apps/worker/src/common.ts` (optional `managerApplies`); `apps/worker/src/read-tools.ts` (the scrub, the per-door scoping,
+  `MAX_HOURS` exported); `apps/worker/src/store.ts` (one new method, `expireSessionReports`); `packages/profiles/skills/manager/SKILL.md`
+  (the "You never" paragraph); `README.md`, `docs/architecture.md`, `docs/roadmap.md` (they said the manager applies lessons itself).
+  `apps/console` says "Recommendations the owner adopted with a code" under Standing lessons: true again, so slice 3's note that it
+  wanted a wording change is moot.
+- **Behaviour that changes for anyone who reads the code:** `ChangeOptions.by` is required; a stored lesson has `by`; `SeedResult` may carry
+  `keptFromOwner`; a door item may hold only its one field (a tool that filed `{ step, detail }` is now refused with a plain sentence;
+  `file_work_report` never sent extra keys); `list_session_reports` throws when a department asks for another assistant's reports.
+- **The stored rows on the shared stack are still version 1 everywhere.** Reseed with `npx tsx scripts/seed-profiles.ts --force` after
+  the merge to put in the manager skill's new "You never" paragraph (and, from earlier slices, `list_session_reports` and the new End of
+  work). It now keeps any read tool or model the owner approved. I did not reseed the shared stack.
+- **Wire the daily review** as slice 3 said (`queueDailyReview`); with these fixes a quiet day with only unreadable or old reports does nothing.
+- To turn on the manager applying lessons and notes: Ezra approves in writing, a person changes `MANAGER_APPLIES` (or sets
+  `managerApplies` in `main.ts`), and the two conditions above are added first. Nothing else changes.
+- No new dependency and no new environment variable.
