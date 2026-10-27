@@ -3,6 +3,7 @@ import type { AssistantMemory } from '@fahq/brain';
 import { WorkReport, type Receipt } from '@fahq/contracts';
 import { parseCommand } from '../src/commands.ts';
 import { PlanError, planDigest, writePlans } from '../src/finance.ts';
+import { checkReview, renderFacts } from '../src/manager.ts';
 import { buildWorkReport, codeModeDetail, numberTrace, summarizeUsage, type UsageRow } from '../src/reports.ts';
 import { dataMock, modelMock, validPlans } from './fixtures.ts';
 
@@ -264,5 +265,73 @@ describe('numberTrace', () => {
   it('finds numbers inside the data\'s own strings and nested values', () => {
     expect(numberTrace([['t', 'The plan took 75 s.']], { deep: { list: ['finance.plans took 75 s'] } })).toEqual([]);
     expect(numberTrace([['t', 'It was 75.']], { deep: { list: [74] } })).toEqual(['t: "75" is not a number in the data']);
+  });
+});
+
+// ---- The manager's own checks ----------------------------------------------------------------
+
+describe('checkReview', () => {
+  const digest = { byAssistant: [{ assistant: 'finance', tasks: 5, inputTokens: 1500 }], slowest: [{ seconds: 112 }] };
+  const rec = (rank: number, assistant: string, change: string, why = 'Finance used 1500 tokens in.') => ({ rank, assistant, change, why });
+  const review = (over: Record<string, unknown> = {}) => ({
+    summary: 'Finance handled 5 tasks.', findings: [{ assistant: 'finance', text: 'The slowest step took 112 s.' }],
+    recommendations: [rec(2, 'owner', 'Ask which business a question is about.'), rec(1, 'finance', 'Give every stop-loss a lever.')], ...over,
+  });
+
+  it('accepts a review whose numbers are all in the digest, and puts the recommendations in rank order', () => {
+    const check = checkReview(review(), digest, []);
+    expect(check.ok).toBe(true);
+    if (check.ok) expect(check.review.recommendations.map((r) => r.rank)).toEqual([1, 2]);
+  });
+
+  it('refuses what the schema refuses, naming the field', () => {
+    const four = [1, 2, 3, 3].map((n) => rec(n, 'finance', `Change ${n}`));
+    const check = checkReview(review({ recommendations: four }), digest, []);
+    expect(check).toMatchObject({ ok: false });
+    expect(check.ok === false && check.objections[0]).toContain('recommendations');
+    expect(checkReview({ summary: '' }, digest, [])).toMatchObject({ ok: false });
+  });
+
+  it('refuses two recommendations with the same rank', () => {
+    const check = checkReview(review({ recommendations: [rec(1, 'finance', 'One thing.'), rec(1, 'owner', 'Another thing.')] }), digest, []);
+    expect(check).toEqual({ ok: false, objections: ['recommendation ranks must be different: rank each one 1, 2 or 3, once'] });
+  });
+
+  it('refuses a recommendation that repeats an adopted lesson for the same assistant, whatever its case or punctuation', () => {
+    const adopted = [{ assistant: 'finance' as const, text: 'give every stop-loss a LEVER' }];
+    expect(checkReview(review(), digest, adopted)).toEqual({ ok: false, objections: ['recommendation 1 repeats a lesson the owner already adopted'] });
+    expect(checkReview(review(), digest, [{ assistant: 'owner', text: 'give every stop-loss a lever' }]).ok).toBe(true); // another assistant's lesson
+  });
+
+  it('traces every text: summary, findings, change and why', () => {
+    const check = checkReview(review({
+      summary: 'Finance handled 6 tasks.', findings: [{ assistant: 'finance', text: 'It took 113 s.' }],
+      recommendations: [rec(1, 'finance', 'Cut 40 percent.', 'It used 1501 tokens.')],
+    }), digest, []);
+    expect(check).toEqual({
+      ok: false,
+      objections: [
+        'summary: "6" is not a number in the data',
+        'finding 1: "113" is not a number in the data',
+        'recommendation 1 change: "40" is not a number in the data',
+        'recommendation 1 why: "1501" is not a number in the data',
+      ],
+    });
+  });
+});
+
+describe('renderFacts', () => {
+  it('writes the facts as key: value pairs, nested keys joined by dots and list items numbered', () => {
+    expect(renderFacts({ tasks: 12, byAssistant: [{ assistant: 'finance', failed: 1 }], none: null, empty: [] })).toBe(
+      "Here's what I found: tasks: 12; byAssistant.1.assistant: finance; byAssistant.1.failed: 1; none: none; empty: none",
+    );
+    expect(renderFacts(42)).toBe("Here's what I found: result: 42");
+    expect(renderFacts(null)).toBe("Here's what I found: result: none");
+  });
+
+  it('keeps to 600 characters', () => {
+    const long = renderFacts({ text: 'x'.repeat(2000) });
+    expect(long.length).toBeLessThanOrEqual(600);
+    expect(long.endsWith('…')).toBe(true);
   });
 });

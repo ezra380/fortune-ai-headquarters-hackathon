@@ -356,6 +356,17 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(model.calls).toHaveLength(0);
   });
 
+  it('refuses a review window that is not a whole number of hours from 1 to 168', async () => {
+    for (const hours of [0, 500, 1.5, '24']) {
+      const row = (await pool.query(
+        `insert into public.tasks (assistant_id, kind, idempotency_key, payload, status) values ('manager', 'scheduled', $1, $2, 'done') returning id, assistant_id, kind, status, payload, attempts, max_attempts`,
+        ['manager-test:' + randomUUID(), { job: 'manager_review', hours, requestedBy: 'demo-p-owner' }],
+      )).rows[0] as TaskRow;
+      expect(await handleTask(row, deps), String(hours)).toEqual({ status: 'failed', error: 'the review window must be a whole number of hours from 1 to 168' });
+    }
+    expect(codeMode.calls).toHaveLength(0);
+  });
+
   it('tells the owner when the digest cannot be made, and fails the task with that reason', async () => {
     codeMode.respond(() => okResult(null, { ok: false, result: null, error: 'the script ran past its time limit', attempts: 2, toolCalls: 1, resultChars: 0 }));
     model.script('manager.review', makeReview().json);
