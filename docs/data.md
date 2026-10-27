@@ -592,9 +592,13 @@ line each).
   of `zetaris-setup.ts`.
 - **Reads are much slower now, and that is the open problem of this slice:** one period of the period view took 2 to
   3.5 minutes (slice 1: about 12 s), a series through a mart about 4.5 minutes, and a division read passes Zetaris's
-  five-minute connection. Row reads stay quick (the journey 7 to 9 s, return cases about 25 s). The largest new route is
-  the page days (14,077 rows, 2.7 MB of JSON fetched on every read); the inbox's window is the other new cost. Not
-  measured per source yet; the machine was also loaded (load average about 5).
+  five-minute connection. Row reads stay quick (the journey 7 to 9 s, return cases about 25 s). **Timed per source
+  (14:09 ET, read-only, each source's part of the period view alone for `2026-09`):** page days 6.9 s, messages (with
+  the window) 5.4 s, email messages 5.4 s, orders 4.2 s, ads (unchanged since version 1) 3.9 s, blog posts 3.0 s,
+  refunds, reviews and crawl about 2.6 s each. No new source stands out: every read now pays about 2.5 s of fixed cost
+  (slice 1's whole 17-source period read took about 12 s), and the period view's 21 parts add up to the minutes seen.
+  The machine was loaded (load average 4 to 5); Zetaris itself was not restarted (the live worker reads version 1
+  from it).
 
 ## Future work, by owner decision
 

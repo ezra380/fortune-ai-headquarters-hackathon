@@ -165,11 +165,12 @@ All three items were built (4 and 5 first, then 6) and proved live in one rebuil
 - **BLOCKER for version 2 reads (must read before W1/W2 rely on them):** one period of the period view took 2 to
   3.5 minutes live (slice 1: about 12 s), a series through a mart about 4.5 minutes, and the online division read
   (`getDivisionMetrics`, three statements, one of them the derived table over the whole period view) failed with
-  "Cannot reach Zetaris" after about five minutes. Row reads stay quick. Suspects, not yet measured per source: the
-  page days (14,077 rows, 2.7 MB fetched on every read) and the inbox's window; the machine was also loaded. A fix that
-  keeps every test: fewer page-day rows (for example weekly rows, or one source group per page and day), then the
-  period, layer and filter views and the marts rebuilt and proved again. Version 1 (what the live worker reads) is
-  untouched and as fast as before.
+  "Cannot reach Zetaris" after about five minutes. Row reads stay quick. **Timed per source** (14:09 ET, each source's
+  part of the period view alone): 2.5 to 7 s each, the page days 6.9 s, ads (unchanged since version 1) 3.9 s: no new
+  source stands out; every Zetaris read now pays about 2.5 s of fixed cost (slice 1's whole period read took 12 s), on a
+  machine at load 4 to 5. So the fix is not in the data: check the Zetaris containers' health and load (restarting them
+  is the orchestrator's call: the live worker reads version 1 there), or have the version 2 reads ask fewer statements
+  (a division read's derived table re-runs the whole period view). Version 1 (what the live worker reads) is untouched.
 - **Zetaris drops the connection on a long `ADD DATAMART TABLE`** (about five minutes, the derived tables): the table
   is still created; re-list with `SHOW DATAMART TABLES` before retrying (the setup script's `ensureMartsV2` stops on
   the dropped connection; rerunning it carries on).
