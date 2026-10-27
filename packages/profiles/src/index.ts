@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { AssistantId, type ReadTool } from '@fahq/contracts';
 import type { ProfileLesson } from './rows.ts';
 import { buildProfileSource, type ProfileSource, type ProfileSourceOptions } from './source.ts';
+import { doorProfile } from './door.ts';
 import { seedFromFiles, type Queryable, type SeedResult } from './seed.ts';
 
 // The assistants as data. Every assistant is read-only: its reads are a fixed list of tool names, and
@@ -158,6 +159,11 @@ export function createProfileSource(options: Omit<ProfileSourceOptions, 'files' 
   return buildProfileSource({ ...rest, files: () => loadProfiles(env), readNames: READ_TOOL_NAMES });
 }
 
+/** The profile a door serves, from the answer of `door_profile`: refused in plain words when it breaks a rule the worker applies. */
+export function profileFromDoor(raw: unknown, env: NodeJS.ProcessEnv = {}): AssistantProfile {
+  return doorProfile(raw, loadProfiles(env), READ_TOOL_NAMES);
+}
+
 /** Stores the file profiles that have no row yet (`force`: replaces the others' words and models too). See seed.ts. */
 export function seedProfiles(db: Queryable, env: NodeJS.ProcessEnv, options: { force?: boolean; now?: Date } = {}): Promise<SeedResult[]> {
   return seedFromFiles(db, loadProfiles(env), options);
@@ -170,4 +176,6 @@ export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './sou
 export { canonicalJson } from './seed.ts';
 export type { Queryable, SeedAction, SeedResult } from './seed.ts';
 export { issueDoorToken, newDoorToken, tokenHash, writeTokenFile } from './tokens.ts';
+export { DoorProfile, doorSkill } from './door.ts';
+export type { DoorSkillOptions, DoorTool } from './door.ts';
 export type { ProfileLesson };

@@ -45,7 +45,7 @@ const NEVER_READS: Partial<Record<AssistantId, readonly string[]>> = {
  * The rules a schema cannot state. Returns a plain reason, or null when the row may be used.
  * `readNames` is the fixed list of read tools (an assistant can never be given anything else).
  */
-export function checkProfileRow(row: ProfileRow, readNames: readonly string[]): string | null {
+export function checkProfileRow(row: Pick<ProfileRow, 'assistant_id' | 'reads' | 'skill'>, readNames: readonly string[]): string | null {
   const unknown = row.reads.find((name) => !readNames.includes(name));
   if (unknown) return `it reads "${unknown}", which is not a read tool`;
   if (new Set(row.reads).size !== row.reads.length) return 'it lists a read tool twice';

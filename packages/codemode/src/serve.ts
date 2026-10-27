@@ -1,24 +1,34 @@
 // stdio entry for the brain MCP server. Claude Code, Cursor, Codex CLI and Gemini CLI start it as:
-//   npx tsx packages/codemode/src/serve.ts          (Code Mode: one `code` tool)
-//   npx tsx packages/codemode/src/serve.ts --plain  (the individual read tools)
-// Add --profile <owner|finance|online|salon|manager> (default owner): the door then offers only what
-// that assistant may read, and serves its skill as the `skill` prompt.
+//   FAHQ_DOOR_TOKEN=... npx tsx packages/codemode/src/serve.ts --profile finance   (Code Mode: one `code` tool)
+//   ... serve.ts --profile finance --plain                                         (the individual read tools)
+//   ... serve.ts --profile finance --token-file .local/door-tokens/finance.token   (the token from a file)
+//   npx tsx packages/codemode/src/serve.ts --local [--profile owner]               (offline: the file profiles)
+// With a door token (npx tsx scripts/issue-door-token.ts <assistant>), the profile is read from the database
+// through door_profile with the PUBLIC anon key (SUPABASE_URL, SUPABASE_ANON_KEY): the door offers only what
+// that stored profile may read, serves its skill as the `skill` prompt, and has one write, `file_work_report`,
+// which sends the end-of-work report to the HQ Manager. A token is bound to one assistant, so --profile is
+// optional and must match it. --local reads the file profiles instead and cannot file a report.
 // stdout carries the MCP protocol only; diagnostics go to stderr.
 import fs from 'node:fs';
 import path from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { AssistantId, type DataPort } from '@fahq/contracts';
+import type { DataPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { createBrainMcpServer, createCodeModeBrainServer, type BrainMcpDeps } from './index.ts';
+import { DoorError } from './door-client.ts';
+import { openDoor, parseDoorArgs } from './door.ts';
 
 const root = path.resolve(import.meta.dirname, '../../..');
 const envFile = path.join(root, '.env.local');
 if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
 
-const plain = process.argv.includes('--plain');
-const profile = AssistantId.safeParse(option('--profile') ?? 'owner');
-if (!profile.success) {
-  console.error(`fortune-brain: --profile must be one of ${AssistantId.options.join(', ')}`);
+let request, door;
+try {
+  request = parseDoorArgs(process.argv.slice(2));
+  door = await openDoor(request, process.env);
+} catch (error) {
+  if (!(error instanceof DoorError)) throw error;
+  console.error(`fortune-brain: ${error.message}`);
   process.exit(2);
 }
 
@@ -43,17 +53,10 @@ const deps: BrainMcpDeps = {
       dataDir: path.join(root, '.local/brain'),
       actor: 'brain-mcp-reader',
     }),
+  fileReport: door.fileReport,
   now: () => new Date(),
 };
 
-const server = plain ? createBrainMcpServer(deps, profile.data) : await createCodeModeBrainServer(deps, {}, profile.data);
+const server = request.plain ? createBrainMcpServer(deps, door.profile) : await createCodeModeBrainServer(deps, {}, door.profile);
 await server.connect(new StdioServerTransport());
-console.error(`fortune-brain MCP ready (${plain ? 'plain tools' : 'Code Mode'}, profile ${profile.data})`);
-
-/** `--profile finance` or `--profile=finance`. */
-function option(name: string): string | undefined {
-  const args = process.argv.slice(2);
-  const at = args.findIndex((a) => a === name || a.startsWith(`${name}=`));
-  if (at < 0) return undefined;
-  return args[at]!.includes('=') ? args[at]!.slice(name.length + 1) : (args[at + 1] ?? '');
-}
+console.error(`fortune-brain MCP ready (${request.plain ? 'plain tools' : 'Code Mode'}, ${door.summary})`);

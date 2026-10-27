@@ -35,7 +35,7 @@ export type ProfileSource = {
 };
 
 /** The stored row on top of the file profile: its words, reads, models and lessons; everything fixed stays from the files. */
-function overlay(base: AssistantProfile, row: ProfileRow): AssistantProfile {
+export function overlay(base: AssistantProfile, row: Pick<ProfileRow, 'title' | 'skill' | 'reads' | 'models' | 'lessons' | 'version'>): AssistantProfile {
   const models = { ...base.models };
   for (const job of Object.keys(base.models) as (keyof typeof base.models)[]) {
     const stored = row.models[job];

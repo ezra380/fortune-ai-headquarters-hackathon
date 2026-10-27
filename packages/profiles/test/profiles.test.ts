@@ -169,7 +169,7 @@ describe('file profiles and the database layer', () => {
 
   it('keeps the database modules free of a runtime import of index.ts, so the package has no import cycle', () => {
     // index.ts re-exports these files; if one imported index.ts back at run time, load order would decide what exists.
-    for (const name of ['rows', 'source', 'seed', 'tokens']) {
+    for (const name of ['rows', 'source', 'seed', 'tokens', 'door']) {
       const text = fs.readFileSync(path.join(import.meta.dirname, '..', 'src', `${name}.ts`), 'utf8');
       const runtimeImports = text.split('\n').filter((line) => /^import (?!type\b).*from '\.\/index\.ts'/.test(line));
       expect(runtimeImports, name).toEqual([]);

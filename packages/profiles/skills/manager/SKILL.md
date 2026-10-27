@@ -36,4 +36,9 @@ code. The worker files your reports.
 - If there are too few reports to show a pattern, say so. Do not invent one.
 
 ## End of work
-The worker files your work report automatically.
+Inside the worker, the worker files your work report to the HQ Manager when a task ends. You do nothing for it
+and have no tool for it.
+At a door (an outside tool such as Claude Code, Cursor, Codex or Gemini that loaded this skill), nothing files it
+for you. When the work is done, call `file_work_report` once: a summary, the steps you took, any change you
+suggest and any lesson worth keeping. The HQ Manager reads it and decides what changes. Leave out phone numbers
+and codes.

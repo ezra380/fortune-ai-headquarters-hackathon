@@ -1,11 +1,10 @@
 import { codeMcpServer } from '@cloudflare/codemode/mcp';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { AssistantId } from '@fahq/contracts';
-import { createBrainMcpServer, doorReads, registerSkillPrompt, type BrainMcpDeps } from './brain-mcp.ts';
+import { createBrainMcpServer, doorReads, registerSkillPrompt, registerWorkReportTool, type BrainMcpDeps, type DoorProfileArg } from './brain-mcp.ts';
 import { QuickJsExecutor, type QuickJsExecutorOptions } from './quickjs-executor.ts';
 
-export { createBrainMcpServer } from './brain-mcp.ts';
-export type { BrainMcpDeps } from './brain-mcp.ts';
+export { createBrainMcpServer, doorReads, doorTools, registerWorkReportTool } from './brain-mcp.ts';
+export type { BrainMcpDeps, DoorProfileArg, FileReport, FiledReport } from './brain-mcp.ts';
 export { QuickJsExecutor } from './quickjs-executor.ts';
 export type { ExecuteResult, ResolvedProvider } from './quickjs-executor.ts';
 export { createCodeModeRunner, declarations } from './runner.ts';
@@ -20,14 +19,17 @@ export { mentions, traceNumbers, untracedResultNumbers, writeAnswer } from './an
 export async function createCodeModeBrainServer(
   deps: BrainMcpDeps,
   executorOptions: QuickJsExecutorOptions = {},
-  profileId: AssistantId = 'owner',
+  profile: DoorProfileArg = 'owner',
 ): Promise<McpServer> {
-  // A profile with nothing to read has no API to script: its door is just the skill prompt.
-  if (doorReads(profileId).length === 0) return createBrainMcpServer(deps, profileId);
+  // A profile with nothing to read has no API to script: its door is just the skill prompt (and the report tool).
+  if (doorReads(profile).length === 0) return createBrainMcpServer(deps, profile);
+  const { fileReport, ...readDeps } = deps; // a script in the sandbox reaches the reads only, never the write
   const server = await codeMcpServer({
-    server: createBrainMcpServer(deps, profileId),
+    server: createBrainMcpServer(readDeps, profile),
     executor: new QuickJsExecutor({ timeoutMs: 30_000, maxToolCalls: 40, ...executorOptions }),
   });
-  registerSkillPrompt(server, profileId); // the wrapper only proxies tools; the skill prompt is added here
+  // The wrapper only proxies the read tools; the skill prompt and the report tool are added beside the `code` tool.
+  registerSkillPrompt(server, profile, { canReport: fileReport !== undefined });
+  if (fileReport) registerWorkReportTool(server, fileReport);
   return server;
 }

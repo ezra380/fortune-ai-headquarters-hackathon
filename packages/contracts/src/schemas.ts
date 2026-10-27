@@ -245,3 +245,27 @@ export const ManagerReview = z.object({
   recommendations: z.array(Recommendation).max(3),
 });
 export type ManagerReview = z.infer<typeof ManagerReview>;
+
+// ---- Reports from outside AI tools ------------------------------------------------------------
+
+/** One list item in a session report. The database (door_file_report) checks the same limits. */
+const ReportStep = z.object({ step: z.string().min(1).max(80) }).strict();
+const ReportNote = z.object({ text: z.string().min(1).max(300) }).strict();
+
+/**
+ * What an outside AI tool (Claude Code, Cursor, Codex, Gemini) files at the end of a session through an
+ * assistant's door. The HQ Manager reads these. `key` makes a retry store once. The database checks the same
+ * limits and masks phone numbers and codes; the `file_work_report` tool checks them first, to say what is wrong.
+ */
+export const SessionReport = z.object({
+  key: z.string().regex(/^[A-Za-z0-9._:-]{8,80}$/).optional(),
+  tool: z.string().min(1).max(60),
+  summary: z.string().min(1).max(2000),
+  steps: z.array(ReportStep).max(30).optional(),
+  suggestions: z.array(ReportNote).max(10).optional(),
+  lessons: z.array(ReportNote).max(10).optional(),
+}).strict();
+export type SessionReport = z.infer<typeof SessionReport>;
+
+/** The most bytes of JSON a door takes for one report (the database allows 32 KB of its own rendering; this leaves room). */
+export const SESSION_REPORT_MAX_BYTES = 30 * 1024;
