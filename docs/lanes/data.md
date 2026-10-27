@@ -3,7 +3,7 @@
 Cut from hq/foundation at bb29578. Design of record: the lane's `A-divisions.md`. What is built and how it
 is proven: `docs/data.md`. Each slice appends below; nothing above is rewritten.
 
-## Slice 1 of 4: foundation (2026-10-27, 07:37–08:20 ET)
+## Slice 1 of 4: foundation (2026-10-27, 07:37–08:05 ET)
 
 ### What works (with the tests that prove it)
 
