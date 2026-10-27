@@ -35,10 +35,11 @@ describe('the read-only profiles', () => {
   it('gives each assistant exactly its reads and writes', () => {
     expect(profiles.owner.reads).toEqual([
       'get_finance_metrics', 'get_company_overview', 'get_budget_room', 'get_metric_series', 'get_repair_tickets', 'get_supplier_invoices',
-      'get_waiting_conversations', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal',
+      'get_waiting_conversations', 'get_marketplace_stock', 'get_product_performance', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal',
+      'usage_summary', 'explain_proposal',
     ]);
-    expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
-    expect(profiles.online.reads).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'recall_my_decisions', 'my_lessons']);
+    expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'get_marketplace_stock', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
+    expect(profiles.online.reads).toEqual(['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'get_product_performance', 'recall_my_decisions', 'my_lessons']);
     expect(profiles.salon.reads).toEqual(['get_salon_metrics', 'get_metric_series', 'get_repair_tickets', 'recall_my_decisions', 'my_lessons']);
     expect(profiles.manager.reads).toEqual(['list_work_reports', 'list_session_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality']);
     expect(profiles.owner.writes).toEqual(['propose']);
@@ -72,6 +73,9 @@ describe('the read-only profiles', () => {
     expect(readers('get_budget_room')).toEqual(['owner', 'finance']);
     expect(readers('get_waiting_conversations')).toEqual(['owner', 'online']);
     expect(readers('get_low_stock_interest')).toEqual(['online']);
+    // Wave 2's asks: Online asks Finance for the marketplace stock, Finance asks Online for the product performance.
+    expect(readers('get_marketplace_stock')).toEqual(['owner', 'finance']);
+    expect(readers('get_product_performance')).toEqual(['owner', 'online']);
     expect(readers('get_metric_series')).toEqual(['owner', 'finance', 'salon', 'online']);
     expect(readers('get_company_overview')).toEqual(['owner']);
     expect(readers('get_data_quality')).toEqual(['manager']);
@@ -151,7 +155,7 @@ describe('the skills', () => {
 describe('pickTools', () => {
   it('returns exactly the profile tools, in the profile order', () => {
     const picked = pickTools(allTools(), profiles.finance);
-    expect(picked.map((t) => t.name)).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
+    expect(picked.map((t) => t.name)).toEqual(['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'get_marketplace_stock', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
   });
 
   it('never returns a tool the profile does not list, even when more are available', () => {

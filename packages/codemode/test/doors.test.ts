@@ -77,11 +77,11 @@ describe('profile doors (plain tools)', () => {
   it('offers each profile only the tools it may read', async () => {
     const expected: Record<AssistantId, string[]> = {
       owner: [
-        'get_budget_room', 'get_company_overview', 'get_finance_metrics', 'get_metric_series', 'get_repair_tickets', 'get_supplier_invoices', 'get_timeline',
-        'get_waiting_conversations', 'recall_decisions',
+        'get_budget_room', 'get_company_overview', 'get_finance_metrics', 'get_marketplace_stock', 'get_metric_series', 'get_product_performance', 'get_repair_tickets',
+        'get_supplier_invoices', 'get_timeline', 'get_waiting_conversations', 'recall_decisions',
       ],
-      finance: ['get_budget_room', 'get_finance_metrics', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions'],
-      online: ['get_low_stock_interest', 'get_metric_series', 'get_online_metrics', 'get_waiting_conversations', 'recall_my_decisions'],
+      finance: ['get_budget_room', 'get_finance_metrics', 'get_marketplace_stock', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions'],
+      online: ['get_low_stock_interest', 'get_metric_series', 'get_online_metrics', 'get_product_performance', 'get_waiting_conversations', 'recall_my_decisions'],
       salon: ['get_metric_series', 'get_repair_tickets', 'get_salon_metrics', 'recall_my_decisions'],
       manager: ['get_data_quality', 'get_timeline', 'recall_decisions'],
     };
@@ -186,6 +186,8 @@ describe('profile doors (plain tools)', () => {
     await finance.callTool({ name: 'get_supplier_invoices', arguments: { status: 'due_30d' } });
     const bad = await finance.callTool({ name: 'get_supplier_invoices', arguments: { status: 'open', business: 'combined' } });
     expect(bad.isError).toBe(true);
+    await finance.callTool({ name: 'get_marketplace_stock', arguments: { status: 'low', marketplace: 'amazon' } });
+    expect((await finance.callTool({ name: 'get_marketplace_stock', arguments: { marketplace: 'ebay' } })).isError).toBe(true);
     await finance.close();
     const online = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'online'));
     await online.callTool({ name: 'get_waiting_conversations', arguments: {} });
@@ -193,10 +195,11 @@ describe('profile doors (plain tools)', () => {
     const stock = JSON.parse(text(await online.callTool({ name: 'get_low_stock_interest', arguments: { limit: 2 } }))) as { rows: unknown[]; totals: { count: number } };
     expect(stock.rows).toHaveLength(2);
     expect(stock.totals.count).toBe(30);
+    await online.callTool({ name: 'get_product_performance', arguments: { period: '2026-09', sort: 'worst' } });
     await online.close();
     expect(asked).toEqual([
-      { table: 'invoices', status: 'overdue', business: 'online' }, { table: 'invoices', status: 'due_30d' },
-      { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' },
+      { table: 'invoices', status: 'overdue', business: 'online' }, { table: 'invoices', status: 'due_30d' }, { table: 'marketplace_stock', status: 'low', marketplace: 'amazon' },
+      { table: 'waiting', olderThanHours: 0 }, { table: 'waiting', olderThanHours: 24 }, { table: 'low_stock' }, { table: 'products', period: '2026-09', sort: 'worst' },
     ]);
   });
 

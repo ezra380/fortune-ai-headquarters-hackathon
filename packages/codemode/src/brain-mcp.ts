@@ -72,6 +72,10 @@ function describeReads(profile: AssistantProfile): Partial<Record<ReadToolName, 
       'Customer messages from the last week still waiting for a first answer, through Zetaris (read-only): channel, topic and hours waited; never the text or the customer.',
     get_low_stock_interest:
       'Store products at or below their reorder point on the data date, through Zetaris (read-only), most viewed first, with how many are wanted and how many wanted ones are out of stock.',
+    get_marketplace_stock:
+      'Amazon and Walmart warehouse stock on the data date, through Zetaris (read-only): each listing on hand, inbound, sold in the last 28 days and its days of cover; all, or only those out of stock or under three weeks of cover; with the totals.',
+    get_product_performance:
+      "Each store product's units, revenue, cost, refunds, profit and views for one period, through Zetaris (read-only), best or worst profit first, with the totals and how many lost money.",
     recall_decisions: "What people approved or declined before, from one assistant's memory. Returns decisions only, never unapproved ideas.",
     recall_my_decisions: `What people approved or declined before, from your own memory (${profile.memory}) only. Returns decisions only, never unapproved ideas.`,
     get_timeline: 'The latest events in the shared record: who asked, which assistant proposed, which numbers were cited, who decided.',
@@ -159,7 +163,7 @@ const DOOR_READS: readonly ReadToolName[] = [
   'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_decisions', 'recall_my_decisions', 'get_timeline',
   // The division data: these need only the data port.
   'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
-  'get_waiting_conversations', 'get_low_stock_interest',
+  'get_waiting_conversations', 'get_low_stock_interest', 'get_marketplace_stock', 'get_product_performance',
 ];
 
 /** What a profile's door offers: its reads, limited to what the door can serve. Empty for the salon placeholder. */
@@ -312,6 +316,10 @@ function registerDivisionReads(server: McpServer, deps: BrainMcpDeps, profile: A
     readRows(deps, { table: 'waiting', olderThanHours: olderThanHours ?? 0 }, limit));
   tool('get_low_stock_interest', { limit: rowLimit }, ({ limit }) =>
     readRows(deps, { table: 'low_stock' }, limit));
+  tool('get_marketplace_stock', { status: z.enum(['all', 'low']).optional(), marketplace: z.enum(['amazon', 'walmart']).optional(), limit: rowLimit }, ({ status, marketplace, limit }) =>
+    readRows(deps, { table: 'marketplace_stock', status: status ?? 'all', ...(marketplace ? { marketplace } : {}) }, limit));
+  tool('get_product_performance', { period, sort: z.enum(['best', 'worst']).optional(), limit: rowLimit }, ({ period: p, sort, limit }) =>
+    readRows(deps, { table: 'products', period: p, sort: sort ?? 'best' }, limit));
 }
 
 // ---- The one write: the end-of-work report -----------------------------------------------------------

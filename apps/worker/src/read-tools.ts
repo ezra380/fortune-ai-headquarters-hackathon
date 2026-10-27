@@ -278,6 +278,20 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
       run: ({ limit }) => rows({ table: 'low_stock' }, limit),
     }),
     tool({
+      name: 'get_marketplace_stock',
+      description: 'Amazon and Walmart warehouse stock on the data date, through Zetaris: each listing\'s units on hand and on their way in, units sold in the last 28 days, units a day and days of cover at that pace (null when none sold); "low" keeps only those out of stock or under three weeks of cover. Totals: listings, out of stock, low on cover, units on hand and inbound.',
+      signature: `(args: { status?: "all" | "low"; marketplace?: "amazon" | "walmart"; limit?: number }) => Promise<${RowsOf('{ sku: string; marketplace: "amazon" | "walmart"; productLine: string; onHand: number; inbound: number; units28d: number; dailyUnits: number; daysOfCover: number | null; status: "out" | "low" | "ok" }', '{ count: number; outOfStock: number; lowCover: number; onHandUnits: number; inboundUnits: number }')}>`,
+      schema: z.object({ status: z.enum(['all', 'low']).optional(), marketplace: z.enum(['amazon', 'walmart']).optional(), limit: Limit }).strict(),
+      run: ({ status, marketplace, limit }) => rows({ table: 'marketplace_stock', status: status ?? 'all', ...(marketplace ? { marketplace } : {}) }, limit),
+    }),
+    tool({
+      name: 'get_product_performance',
+      description: 'Each store product\'s period from its order lines, through Zetaris, by profit ("best" first by default, or "worst"): units, revenue, cost, refunds on those orders to the data date, profit after them, margin, refund rate and product views in the period\'s last week. Totals: products, units, revenue, cost, refunds, profit and how many lost money.',
+      signature: `(args: { period: ${served.map((p) => `"${p}"`).join(' | ')}; sort?: "best" | "worst"; limit?: number }) => Promise<${RowsOf('{ sku: string; productLine: string; units: number; revenueUsd: number; costUsd: number; refundsUsd: number; profitUsd: number; margin: number | null; refundRate: number | null; views7d: number | null }', '{ count: number; units: number; revenueUsd: number; costUsd: number; refundsUsd: number; profitUsd: number; losing: number }')}>`,
+      schema: z.object({ period: PeriodArg, sort: z.enum(['best', 'worst']).optional(), limit: Limit }).strict(),
+      run: ({ period, sort, limit }) => rows({ table: 'products', period, sort: sort ?? 'best' }, limit),
+    }),
+    tool({
       name: 'recall_my_decisions',
       description: "Decisions people approved or declined that are in YOUR OWN memory, most relevant first (never another assistant's).",
       signature: '(args: { query: string; limit?: number }) => Promise<{ decisions: { id: string; text: string; relevance: number }[] }>',
