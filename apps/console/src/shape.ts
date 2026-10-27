@@ -324,6 +324,9 @@ const BRIEF_STATUSES = ['normal', 'watch', 'act'] as const;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const DIGEST_STATES = ['in', 'missing', 'unreadable'] as const;
 const SHOWN = { findings: 4, actions: 3, cites: 8, requestsEach: 10, digestText: 600 };
+/** A cleaned, cut and trimmed text: a question of only spaces is no question. */
+const said = (v: unknown, max: number): string => text(v, max).trim();
+const listed = (v: unknown, max: number): unknown[] => (Array.isArray(v) ? v.slice(0, max) : []);
 
 const briefStatus = (v: unknown, flag: Flag): BriefStatusView => {
   if ((BRIEF_STATUSES as readonly unknown[]).includes(v)) return v as BriefStatusView;
@@ -333,7 +336,7 @@ const briefStatus = (v: unknown, flag: Flag): BriefStatusView => {
 
 /** Metric ids a finding or action rests on. */
 const citedIds = (v: unknown): string[] =>
-  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, SHOWN.cites).map((x) => text(x, 80)).filter((x) => x !== '') : [];
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, SHOWN.cites).map((x) => said(x, 80)).filter((x) => x !== '') : [];
 
 /**
  * Where each action of a brief stands. An action the head approved is approved, whatever became of the code. The rest
@@ -343,7 +346,7 @@ const citedIds = (v: unknown): string[] =>
 function actionApproval(rank: number, d: RawDivisionState, approvedAt: ReadonlyMap<number, string | null>, now: Date): ActionView['approval'] {
   const approved = approvedAt.get(rank);
   if (approved !== undefined) return { state: 'approved', at: approved };
-  if (d.unread.includes('actions')) return { state: 'unknown', at: null };
+  if (listed(d.unread, 5).includes('actions')) return { state: 'unknown', at: null };
   const code = d.approval;
   if (!code) return { state: 'no_code', at: null };
   const ends = iso(code.expires_at);
@@ -365,7 +368,7 @@ function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | nul
   const rec = isRecord(body) ? body : null;
   if (!rec) flag('brief');
 
-  const headline = text(rec?.headline, 160);
+  const headline = said(rec?.headline, 160);
   if (rec && headline === '') flag('brief');
 
   const findings: BriefView['findings'] = [];
@@ -373,7 +376,7 @@ function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | nul
     if (!Array.isArray(rec.findings)) flag('brief');
     else {
       for (const f of rec.findings) {
-        const t = isRecord(f) ? text(f.text, 300) : '';
+        const t = isRecord(f) ? said(f.text, 300) : '';
         if (!isRecord(f) || t === '') flag('brief');
         else if (findings.length < SHOWN.findings) findings.push({ text: t, cites: citedIds(f.cites) });
       }
@@ -393,10 +396,10 @@ function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | nul
     else {
       for (const a of rec.actions) {
         const rank = isRecord(a) ? whole(a.rank) : 0;
-        const title = isRecord(a) ? text(a.title, 80) : '';
+        const title = isRecord(a) ? said(a.title, 80) : '';
         if (!isRecord(a) || rank < 1 || rank > 3 || title === '') flag('brief');
         else if (actions.length < SHOWN.actions) {
-          actions.push({ rank, title, why: text(a.why, 300), steps: text(a.steps, 300), cites: citedIds(a.cites), approval: actionApproval(rank, d, approvedAt, now) });
+          actions.push({ rank, title, why: said(a.why, 300), steps: said(a.steps, 300), cites: citedIds(a.cites), approval: actionApproval(rank, d, approvedAt, now) });
         }
       }
     }
@@ -411,7 +414,7 @@ function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | nul
     headline,
     findings,
     actions,
-    ceoLine: text(r.ceo_line, 140),
+    ceoLine: said(r.ceo_line, 140),
   };
 }
 
@@ -419,12 +422,12 @@ function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | nul
 function shapeRequests(raw: RawDivisions, flag: Flag): RequestView[] {
   const answers = new Map<string, RawReply>();
   for (const a of rows(raw.replies, 200)) if (typeof a.reply_to === 'string') answers.set(a.reply_to, a);
-  const answersUnread = raw.unread.includes('replies');
+  const answersUnread = listed(raw.unread, 5).includes('replies');
 
   const out: RequestView[] = [];
   for (const q of rows<RawRequest>(raw.requests, 100)) {
     const body = parsed(q.body);
-    const question = isRecord(body) && body.type === 'data_request' ? text(body.question, 300) : '';
+    const question = isRecord(body) && body.type === 'data_request' ? said(body.question, 300) : '';
     if (!isBriefDivision(q.from_assistant) || !isBriefDivision(q.to_assistant) || question === '') {
       flag('requests');
       continue;
@@ -437,7 +440,7 @@ function shapeRequests(raw: RawDivisions, flag: Flag): RequestView[] {
       if (answer.ok === true || answer.ok === 'true') state = 'answered';
       else if (answer.ok === false || answer.ok === 'false') {
         state = 'unavailable';
-        reason = maybeText(answer.reason, 200);
+        reason = said(answer.reason, 200) || null;
       } else {
         state = 'unreadable';
         flag('answers');
@@ -459,7 +462,7 @@ function shapeRequests(raw: RawDivisions, flag: Flag): RequestView[] {
 function shapeDigest(d: RawDigest | null, flag: Flag): DigestView | null {
   if (!d) return null;
   const body = parsed(d.body);
-  const words = isRecord(body) && body.type === 'ceo_digest' ? text(body.text, SHOWN.digestText) : '';
+  const words = isRecord(body) && body.type === 'ceo_digest' ? said(body.text, SHOWN.digestText) : '';
   if (!isRecord(body) || words === '') {
     flag('digest');
     return null;
@@ -483,7 +486,7 @@ export function shapeDivisions(raw: RawDivisions, now: Date): DivisionsView {
     flagged.add(key);
   };
   const requests = shapeRequests(raw, flag);
-  const byDivision = new Map(rows(raw.divisions, 10).map((d) => [d.division, d]));
+  const byDivision = new Map(rows(raw.divisions, 10).filter((d) => isRecord(d)).map((d) => [d.division, d]));
 
   const divisions: DivisionBlock[] = BRIEF_DIVISIONS.map((info) => {
     // A division the source did not report on is shown as unread, never as "no brief yet".

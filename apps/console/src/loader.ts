@@ -357,7 +357,7 @@ export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDiv
         ? []
         : await part('The briefs\' mailbox notes', null as { id: string; dedupe_key: string }[] | null, async () =>
             must<{ id: string; dedupe_key: string }[]>(
-              await db.from('assistant_messages').select('id,dedupe_key').in('dedupe_key', briefs.map((b) => `briefdoc:${b.brief_key}`)),
+              await db.from('assistant_messages').select('id,dedupe_key').in('dedupe_key', briefs.map((b) => `briefdoc:${b.brief_key}`)).limit(10),
             ),
           );
       const docIds = (docs ?? []).map((d) => d.id);
