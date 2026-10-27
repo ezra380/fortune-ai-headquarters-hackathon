@@ -302,7 +302,8 @@ describe.skipIf(!api)('what changes a profile (real database and Meterless; prof
       expect(made.reason).toMatch(/ adopted a (data access|model): /);
       const now = profileTables.row('finance');
       if (_kind === 'reads') {
-        expect(now.reads).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'explain_proposal', 'usage_summary']);
+        // Finance's file reads (the data lane added the division reads) with latest_proposal taken out and usage_summary added.
+        expect(now.reads).toEqual([...files.finance.reads.filter((name) => name !== 'latest_proposal'), 'usage_summary']);
       } else {
         expect((now.models as Record<string, { model: string }>).answer!.model).toBe('MOCK/owner/answer');
         expect((now.models as Record<string, { model: string }>).code!.model).toBe(files.finance.models.code!.model);
