@@ -65,6 +65,10 @@ describe('version 1 is frozen at bb29578', () => {
 describe('version 2 leaves those numbers where they were', () => {
   const year = generateYear();
 
+  it("keeps version 2's period view as it was built live in Zetaris (574bd04, 07:58 ET), so the layers built on it read the same view", () => {
+    expect(sha(financeViewBody(2))).toBe('2747af1dd068029234c79ad539832b524e116b590db429c23e85d8d39f89c1da');
+  });
+
   it("carries version 1's rows unchanged among its own", () => {
     const v1 = generateBusiness();
     const pairs: [readonly object[], readonly object[]][] = [

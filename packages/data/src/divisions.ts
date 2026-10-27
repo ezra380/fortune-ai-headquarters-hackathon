@@ -1,0 +1,131 @@
+import type { Attention, Division, Metric, Period } from '@fahq/contracts';
+import { CONTAINER_V2, PERIOD_VIEW_V2, VERSIONS, financeViewBody, quoted, type MetricDef } from './finance-sql.ts';
+import {
+  DERIVED, DERIVED_VIEW_V2, STANDING_METRICS, STANDING_PERIOD, STANDING_VIEW_V2, derivedViewBody, standingViewBody,
+  type DerivedDef, type Layers,
+} from './layers.ts';
+
+// The four divisions in Zetaris (version 2). Who reads a metric is the catalog's `divisions`; the boundary
+// is drawn in Zetaris itself: per division and layer, a filter view over the layer view that keeps only that
+// division's ids, and per division a Virtual Data Mart whose three tables are those filter views. A division
+// reads only its own mart, so per-assistant read-only users can later be granted one mart each.
+// The attention list is a fixed set of rules over the values a division already has: a rule picks values
+// out, it never makes a number.
+
+export type Layer = 'period' | 'derived' | 'standing';
+export const LAYERS: readonly Layer[] = ['period', 'derived', 'standing'];
+export const DIVISIONS: readonly Division[] = ['salon', 'finance', 'online', 'hq'];
+
+/** Every metric version 2 serves, all three layers, in layer order. */
+export const CATALOG_V2: readonly (MetricDef | DerivedDef)[] = [...VERSIONS[2].metrics, ...DERIVED, ...STANDING_METRICS];
+export const CATALOG_V2_BY_ID = new Map(CATALOG_V2.map((m) => [m.id, m]));
+
+/** Each layer's own view and the body it was created from (part of every query hash that reads it). */
+export const LAYER_VIEW: Record<Layer, { view: string; body: () => string }> = {
+  period: { view: PERIOD_VIEW_V2, body: () => financeViewBody(2) },
+  derived: { view: DERIVED_VIEW_V2, body: derivedViewBody },
+  standing: { view: STANDING_VIEW_V2, body: standingViewBody },
+};
+
+/** The ids one division reads in one layer, in catalog order. */
+export function divisionIds(division: Division, layer: Layer): string[] {
+  return CATALOG_V2.filter((m) => m.layer === layer && m.divisions.includes(division)).map((m) => m.id);
+}
+
+export const filterViewName = (division: Division, layer: Layer) => `${division}_${layer}_metrics`;
+
+/** A division's filter view over one layer: only its own ids, nothing computed. */
+export function filterViewBody(division: Division, layer: Layer): string {
+  const ids = divisionIds(division, layer);
+  if (ids.length === 0) throw new Error(`the ${division} division reads no ${layer} metric`);
+  return `SELECT period, metric_id, value FROM ${LAYER_VIEW[layer].view} WHERE metric_id IN (${quoted(ids)})`;
+}
+
+/** Version 2's division marts. Not the version 1 mart's name, nor a prefix of it. */
+export const MARTS_V2: Record<Division, string> = {
+  salon: 'fortune_demo_v2_salon_mart', finance: 'fortune_demo_v2_finance_mart', online: 'fortune_demo_v2_online_mart', hq: 'fortune_demo_v2_hq_mart',
+};
+export const martTableName = (layer: Layer) => `${layer}_metrics`;
+
+/** A division mart's statements: create it, add one table per layer (from the filter views), drop it. */
+export function divisionMartSql(division: Division): { create: string; tables: { table: string; sql: string }[]; drop: string } {
+  const mart = MARTS_V2[division];
+  return {
+    create: `CREATE DATAMART ${mart} DESCRIBE BY 'Fortune demo ${division} division mart, version two, synthetic'`,
+    tables: LAYERS.map((layer) => ({
+      table: martTableName(layer),
+      sql: `ADD DATAMART TABLE ${martTableName(layer)} INTO ${mart} FROM ${CONTAINER_V2}.${filterViewName(division, layer)} VSCHEMA (period period, metric_id metric_id, value value)`,
+    })),
+    drop: `DROP DATAMART ${mart}`,
+  };
+}
+
+export type LayerQuery = { layer: Layer; table: string; sql: string; period: string };
+
+/** The three statements a division read runs against its mart (the standing one asks no period). */
+export function divisionQueries(division: Division, period: Period): LayerQuery[] {
+  if (!VERSIONS[2].periods.includes(period)) throw new Error(`unknown period ${period}`);
+  return LAYERS.map((layer) => {
+    const table = `${MARTS_V2[division]}.${martTableName(layer)}`;
+    const asked = layer === 'standing' ? STANDING_PERIOD : period;
+    return { layer, table, period: asked, sql: `SELECT metric_id, value FROM ${table} WHERE period = '${asked}'` };
+  });
+}
+
+/** The three statements the unsliced read (getFinanceMetrics, version 2) runs against the layer views. */
+export function layerQueries(period: Period): LayerQuery[] {
+  if (!VERSIONS[2].periods.includes(period)) throw new Error(`unknown period ${period}`);
+  return LAYERS.map((layer) => {
+    const asked = layer === 'standing' ? STANDING_PERIOD : period;
+    return { layer, table: LAYER_VIEW[layer].view, period: asked, sql: `SELECT metric_id, value FROM ${LAYER_VIEW[layer].view} WHERE period = '${asked}'` };
+  });
+}
+
+/** What a division read's query hash covers: every view body under its mart, the mart tables and the queries. */
+export function divisionHashText(division: Division, queries: readonly LayerQuery[]): string {
+  const mart = divisionMartSql(division);
+  return [
+    ...LAYERS.map((l) => LAYER_VIEW[l].body()),
+    ...LAYERS.map((l) => filterViewBody(division, l)),
+    ...mart.tables.map((t) => t.sql),
+    ...queries.map((q) => q.sql),
+  ].join('\n--\n');
+}
+
+/** What the unsliced version 2 read's query hash covers: the three layer bodies and the queries. */
+export function layerHashText(queries: readonly LayerQuery[]): string {
+  return [...LAYERS.map((l) => LAYER_VIEW[l].body()), ...queries.map((q) => q.sql)].join('\n--\n');
+}
+
+/** The oracle's answer to one division read: its own ids, each layer's value for the period (standing: as of the data date). */
+export function divisionSlice(layers: Layers, division: Division, period: Period): Map<string, number> {
+  const out = new Map<string, number>();
+  const take = (layer: Layer, values: Map<string, number> | undefined) => {
+    for (const id of divisionIds(division, layer)) if (values?.has(id)) out.set(id, values.get(id)!);
+  };
+  take('period', layers.period.get(period));
+  take('derived', layers.derived.get(period));
+  take('standing', layers.standing);
+  return out;
+}
+
+// ---- Attention ----------------------------------------------------------------------------
+
+/** One fixed rule: which metrics it looks at, when a value needs a look, how urgent, and why in plain words. */
+export type AttentionRule = { metrics: RegExp; when: (value: number) => boolean; level: Attention['level']; rule: string };
+
+const BUDGET_USED = /^m:online\.budget\.(google|meta|amazon)\.used$/;
+
+/** The attention list. Its sentences carry no numbers: the number is the metric's own value. */
+export const ATTENTION: readonly AttentionRule[] = [
+  { metrics: /^m:(salon|online|combined)\.dq\.rejected_/, when: (v) => v > 0, level: 'watch', rule: 'Some rows failed the data checks and were left out of the numbers.' },
+  { metrics: BUDGET_USED, when: (v) => v > 1, level: 'act', rule: 'Ad spend went over the approved budget.' },
+  { metrics: BUDGET_USED, when: (v) => v > 0.9 && v <= 1, level: 'watch', rule: 'Ad spend is close to the approved budget.' },
+  { metrics: /^m:online\.budget\.proposed\.count$/, when: (v) => v > 0, level: 'act', rule: "A proposed ad budget change is waiting for the finance owner's decision." },
+];
+
+/** The rules that fire on these metrics, in metric order. Only metrics present can fire; nothing is computed. */
+export function attentionFor(metrics: readonly Pick<Metric, 'id' | 'value'>[]): Attention[] {
+  return metrics.flatMap((m) =>
+    ATTENTION.filter((r) => r.metrics.test(m.id) && r.when(m.value)).map((r) => ({ metricId: m.id, level: r.level, rule: r.rule })));
+}

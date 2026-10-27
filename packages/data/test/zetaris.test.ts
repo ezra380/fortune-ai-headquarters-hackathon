@@ -1,17 +1,35 @@
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Metric } from '@fahq/contracts';
+import { Metric, type Period } from '@fahq/contracts';
 import { createZetarisDataPort } from '../src/index.ts';
+import {
+  CATALOG_V2, CATALOG_V2_BY_ID, DIVISIONS, MARTS_V2, attentionFor, divisionHashText, divisionIds, divisionQueries, divisionSlice, layerHashText,
+  layerQueries, type Layer,
+} from '../src/divisions.ts';
 import {
   FINANCE_VIEW, FINANCE_VIEW_COLUMNS, MART, MART_TABLE, MART_VIEW, METRICS, METRIC_BY_ID, VERSIONS, computeAll, financeQuery, financeViewBody, martQuery,
   martSql,
 } from '../src/finance-sql.ts';
+import { computeLayers } from '../src/layers.ts';
 import { createSourceServer } from '../src/source-server.ts';
 import { generateBusiness, generateYear } from '../src/synthetic.ts';
 import { createZetarisClient, zetarisConfigFromEnv } from '../src/zetaris-client.ts';
 
 const KEY = 'test-api-key-never-logged';
 const env = { ZETARIS_ORG_ID: '7', ZETARIS_API_KEY: KEY, ZETARIS_REST_URL: 'http://zetaris.test/api/v1.0/' } as NodeJS.ProcessEnv;
+
+// Version 2's answers, as Zetaris would give them: a layer view's rows, or a division mart table's (its own
+// ids only), for the period the statement asks.
+const layers = computeLayers(generateYear());
+function fromOracle(sql: string): string[][] {
+  const [, table, period] = /FROM (\S+) WHERE period = '([^']+)'$/.exec(sql)!;
+  const layer = /(period|derived|standing)_metrics$/.exec(table!)![1] as Layer;
+  const values = layer === 'standing' ? layers.standing : layers[layer].get(period as Period)!;
+  const division = /^fortune_demo_v2_([a-z]+)_mart\./.exec(table!)?.[1] as (typeof DIVISIONS)[number] | undefined;
+  const ids = division ? divisionIds(division, layer) : [...values.keys()];
+  return ids.filter((id) => values.has(id)).map((id) => [id, String(values.get(id))]);
+}
 
 type Call = { url: string; init: RequestInit };
 function fakeZetaris(respond: (sql: string) => { status?: number; body: unknown }) {
@@ -202,25 +220,30 @@ describe('Zetaris DataPort', () => {
     // The catalog a read tool lists is exactly what the view returns, with the same labels.
     expect(port.catalog!.map((c) => c.id).sort()).toEqual(r.metrics.map((m) => m.id).sort());
     for (const m of r.metrics) {
-      expect(port.catalog!.find((c) => c.id === m.id)).toEqual({ id: m.id, label: m.label, unit: m.unit, business: m.business, divisions: METRIC_BY_ID.get(m.id)!.divisions });
+      expect(port.catalog!.find((c) => c.id === m.id)).toEqual({ id: m.id, label: m.label, unit: m.unit, business: m.business, divisions: METRIC_BY_ID.get(m.id)!.divisions, layer: 'period' });
     }
     expect(port.periods).toEqual(['2026-09', '2026-10-mtd']);
+    // Version 1's hash is computed exactly as at bb29578: its view body, then the query.
+    expect(r.queryHash).toBe(createHash('sha256').update(`${financeViewBody(1)}\n--\n${financeQuery('2026-09')}`).digest('hex'));
+    expect(port.getDivisionMetrics).toBeUndefined();
   });
 
-  it('reads version 2 only when FAHQ_DATA_VERSION=2, from its own view, for any of its thirteen periods', async () => {
-    const year = generateYear();
-    const oracle = computeAll(year, 2).get('2025-12')!;
-    const z = fakeZetaris((sql) => {
-      expect(sql).toBe("SELECT metric_id, value FROM fortune_hq_v2.period_metrics WHERE period = '2025-12'");
-      return { body: { data: [...oracle].map(([id, v]) => [id, String(v)]) } };
-    });
+  it('reads version 2 only when FAHQ_DATA_VERSION=2: all three layer views, unsliced, for any of its thirteen periods', async () => {
+    const asked: string[] = [];
+    const z = fakeZetaris((sql) => { asked.push(sql); return { body: { data: fromOracle(sql) } }; });
     const port = createZetarisDataPort({ ...env, FAHQ_DATA_VERSION: '2' }, { fetch: z.fetchFn, ensureSources: noSources });
     expect(port.periods).toHaveLength(13);
-    expect(port.catalog!.map((c) => c.id)).toContain('m:online.budget.meta.cap');
+    expect(port.catalog!.map((c) => c.id)).toEqual(CATALOG_V2.map((m) => m.id));
+    expect(port.catalog!.find((c) => c.id === 'm:online.budget.meta.room')!.layer).toBe('derived');
     const r = await port.getFinanceMetrics({ asOf: '2026-10-26T12:00:00.000Z', period: '2025-12' });
+    expect(asked.sort()).toEqual(layerQueries('2025-12').map((q) => q.sql).sort());
     expect(r.view).toBe('fortune_hq_v2.period_metrics');
-    expect(r.metrics.find((m) => m.id === 'm:online.ads.meta.spend')!.value).toBe(oracle.get('m:online.ads.meta.spend'));
-    expect(r.metrics).toHaveLength(oracle.size);
+    expect(r.queryHash).toBe(createHash('sha256').update(layerHashText(layerQueries('2025-12'))).digest('hex'));
+    const want = new Map([...layers.period.get('2025-12')!, ...layers.derived.get('2025-12')!, ...layers.standing]);
+    expect(new Map(r.metrics.map((m) => [m.id, m.value]))).toEqual(want);
+    expect(r.metrics.find((m) => m.id === 'm:online.budget.google.room')!.source.view).toBe('fortune_hq_v2.derived_metrics');
+    expect(r.metrics.find((m) => m.id === 'm:online.budget.proposed.count')!.period).toBe('standing');
+    expect(r.metrics.every((m) => m.source.queryHash === r.queryHash)).toBe(true);
     const v1 = await createZetarisDataPort(env, { fetch: z.fetchFn, ensureSources: noSources }).getFinanceMetrics({ asOf: '2026-10-26T12:00:00.000Z', period: '2025-12' }).catch((e: Error) => e.message);
     expect(v1).toBe('unknown period "2025-12"');
     expect(() => createZetarisDataPort({ ...env, FAHQ_DATA_VERSION: '3' })).toThrow('FAHQ_DATA_VERSION must be 1 or 2');
@@ -250,5 +273,60 @@ describe('Zetaris DataPort', () => {
     const h = await down.health();
     expect(h.ok).toBe(false);
     expect(h.detail).not.toContain(KEY);
+  });
+});
+
+describe('division reads (version 2)', () => {
+  const v2 = { ...env, FAHQ_DATA_VERSION: '2' } as NodeJS.ProcessEnv;
+  const asOf = '2026-10-27T12:00:00.000Z';
+  const noSources = async () => {};
+  const portWith = (respond: (sql: string) => string[][]) => {
+    const asked: string[] = [];
+    const port = createZetarisDataPort(v2, { fetch: fakeZetaris((sql) => { asked.push(sql); return { body: { data: respond(sql) } }; }).fetchFn, ensureSources: noSources });
+    return { port, asked };
+  };
+
+  it("reads each division from its own mart: three statements, its own ids only, standing numbers as of the data date", async () => {
+    const hashes = new Set<string>();
+    for (const division of DIVISIONS) {
+      const { port, asked } = portWith(fromOracle);
+      const r = await port.getDivisionMetrics!({ division, period: '2026-10-mtd', asOf });
+      expect(asked.sort()).toEqual(divisionQueries(division, '2026-10-mtd').map((q) => q.sql).sort());
+      expect(r.division).toBe(division);
+      expect(r.view).toBe(MARTS_V2[division]);
+      expect(new Map(r.metrics.map((m) => [m.id, m.value]))).toEqual(divisionSlice(layers, division, '2026-10-mtd'));
+      expect(r.queryHash).toBe(createHash('sha256').update(divisionHashText(division, divisionQueries(division, '2026-10-mtd'))).digest('hex'));
+      for (const m of r.metrics) {
+        expect(() => Metric.parse(m)).not.toThrow();
+        const layer = CATALOG_V2_BY_ID.get(m.id)!.layer;
+        expect(m.source.view).toBe(`${MARTS_V2[division]}.${layer}_metrics`);
+        expect(m.period).toBe(layer === 'standing' ? 'standing' : '2026-10-mtd');
+        expect(m.source.queryHash).toBe(r.queryHash);
+      }
+      expect(r.attention).toEqual(attentionFor(r.metrics));
+      hashes.add(r.queryHash);
+      // The same question later has the same provenance.
+      expect((await port.getDivisionMetrics!({ division, period: '2026-10-mtd', asOf: '2026-10-28T09:00:00.000Z' })).queryHash).toBe(r.queryHash);
+    }
+    expect(hashes.size).toBe(4);
+  });
+
+  it('reports the attention rules that fired: the waiting budget change for Finance, nothing for a division that does not see it', async () => {
+    const finance = await portWith(fromOracle).port.getDivisionMetrics!({ division: 'finance', period: '2026-10-mtd', asOf });
+    expect(finance.attention).toContainEqual({ metricId: 'm:online.budget.proposed.count', level: 'act', rule: "A proposed ad budget change is waiting for the finance owner's decision." });
+    const salon = await portWith(fromOracle).port.getDivisionMetrics!({ division: 'salon', period: '2026-10-mtd', asOf });
+    expect(salon.attention).toEqual([]);
+  });
+
+  it('refuses a metric outside the division, a metric twice, an unknown division or period, and no rows at all', async () => {
+    const leak = portWith((sql) => (sql.includes('salon_mart.period_metrics') ? [...fromOracle(sql), ['m:online.revenue.total', '1']] : fromOracle(sql)));
+    await expect(leak.port.getDivisionMetrics!({ division: 'salon', period: '2026-09', asOf })).rejects.toThrow('does not know');
+    const twice = portWith((sql) => (sql.includes('salon_mart.period_metrics') ? [...fromOracle(sql), ['m:salon.revenue.total', '1']] : fromOracle(sql)));
+    await expect(twice.port.getDivisionMetrics!({ division: 'salon', period: '2026-09', asOf })).rejects.toThrow('twice');
+    const { port, asked } = portWith(fromOracle);
+    await expect(port.getDivisionMetrics!({ division: 'marketing' as never, period: '2026-09', asOf })).rejects.toThrow('unknown division "marketing"');
+    await expect(port.getDivisionMetrics!({ division: 'salon', period: '2026-13', asOf })).rejects.toThrow('unknown period "2026-13"');
+    expect(asked).toEqual([]);
+    await expect(portWith(() => []).port.getDivisionMetrics!({ division: 'hq', period: '2026-09', asOf })).rejects.toThrow('no hq metrics');
   });
 });

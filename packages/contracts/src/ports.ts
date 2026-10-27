@@ -50,6 +50,12 @@ export interface DataPort {
 export type MetricInfo = Pick<Metric, 'id' | 'label' | 'unit' | 'business'> & {
   /** Who reads it; absent on a port that has no divisions (every metric is then its business's). */
   divisions?: readonly Division[];
+  /**
+   * 'period': a total over the period; 'derived': made from other metrics (budget left, the season index);
+   * 'standing': as of the data date, whatever period is asked (its metrics carry period "standing").
+   * Absent: 'period'.
+   */
+  layer?: 'period' | 'derived' | 'standing';
 };
 
 export type PrintResult =

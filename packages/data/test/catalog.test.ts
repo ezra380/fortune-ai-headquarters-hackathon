@@ -1,31 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import { Division, MetricId } from '@fahq/contracts';
+import { CATALOG_V2 } from '../src/divisions.ts';
 import { METRICS, VERSIONS } from '../src/finance-sql.ts';
 
 // The metric catalog: who reads each metric (divisions), which layer it is, and what a reader or the plan
 // checker needs to know about it. The business stays the legal split; divisions only say who reads.
+// CATALOG_V2 holds every layer (period totals, derived and standing numbers); METRICS the period totals.
 
 describe('metric catalog', () => {
   it('names each metric once, under its business, readable by at least one division', () => {
-    expect(new Set(METRICS.map((m) => m.id)).size).toBe(METRICS.length);
-    for (const m of METRICS) {
+    expect(new Set(CATALOG_V2.map((m) => m.id)).size).toBe(CATALOG_V2.length);
+    for (const m of CATALOG_V2) {
       expect(() => MetricId.parse(m.id)).not.toThrow();
       expect(m.id.startsWith(`m:${m.business}.`)).toBe(true);
       expect(m.divisions.length).toBeGreaterThan(0);
       for (const d of m.divisions) expect(() => Division.parse(d)).not.toThrow();
       expect(['period', 'derived', 'standing']).toContain(m.layer);
     }
+    expect(METRICS.every((m) => m.layer === 'period')).toBe(true);
   });
 
   it('keeps thresholds and amounts out of labels (they go in "about"), and gives every count its nouns', () => {
-    for (const m of METRICS) {
+    for (const m of CATALOG_V2) {
       expect(m.label, m.id).not.toMatch(/\d/);
+      expect(m.label.length, m.id).toBeLessThanOrEqual(120);
       if (m.unit === 'count') expect(m.nouns?.length, m.id).toBeGreaterThan(0);
     }
   });
 
   it('keeps each business with its own division: salon metrics never reach Online, online never Salon', () => {
-    for (const m of METRICS) {
+    for (const m of CATALOG_V2) {
       if (m.business === 'salon') expect(m.divisions).not.toContain('online');
       if (m.business === 'online') expect(m.divisions).not.toContain('salon');
     }
@@ -46,6 +50,7 @@ describe('metric catalog', () => {
     expect(VERSIONS[1].metrics).toHaveLength(33);
     expect(VERSIONS[1].metrics.some((m) => m.id.includes('meta') || m.id.includes('budget'))).toBe(false);
     expect(VERSIONS[2].metrics).toHaveLength(METRICS.length);
+    expect(CATALOG_V2.filter((m) => m.layer !== 'period').every((m) => m.since === 2)).toBe(true);
     expect(VERSIONS[1].periods).toEqual(['2026-09', '2026-10-mtd']);
     expect(VERSIONS[2].periods).toHaveLength(13);
   });

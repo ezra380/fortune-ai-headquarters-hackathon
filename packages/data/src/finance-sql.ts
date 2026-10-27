@@ -33,16 +33,17 @@ export function martSql(): { create: string; addTable: string; drop: string } {
   };
 }
 
-type Row = Record<string, unknown>;
+export type Row = Record<string, unknown>;
 type Field = string | { sql: string; js: (r: Row) => number };
 
 export type DataVersion = 1 | 2;
-type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets';
-const quoted = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', ');
+export type Source = 'orders' | 'appointments' | 'ads' | 'email' | 'budgets';
+type SourceSpec = { table: string; date: string; validSql: string; valid: (r: Row) => boolean };
+export const quoted = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', ');
 const num = (r: Row, k: string) => Number(r[k]);
 
 /** Each source: its row view's name (in each version's container), its date column and its data-quality rule. */
-export const SOURCES: Record<Source, { table: string; date: string; validSql: string; valid: (r: Row) => boolean }> = {
+export const SOURCES: Record<Source, SourceSpec> = {
   orders: {
     table: 'online_orders',
     date: 'order_date',
@@ -82,7 +83,8 @@ type Agg =
   | { kind: 'ratio'; num: Field; den: Field }
   | { kind: 'rejected' };
 
-export type MetricDef = {
+/** What every metric says about itself, whichever layer computes it. */
+export type MetricAbout = {
   id: string;
   label: string;
   unit: 'usd' | 'count' | 'ratio';
@@ -90,11 +92,8 @@ export type MetricDef = {
   business: 'salon' | 'online';
   /** Who reads it. Ad spend is online business, read by Finance and Online. */
   divisions: readonly Division[];
-  /** 'period': a total over the period's rows; 'derived': from other metrics of the same period; 'standing': as of the data date. */
+  /** 'period': a total over the period's rows; 'derived': from other metrics (layers.ts); 'standing': as of the data date. */
   layer: 'period' | 'derived' | 'standing';
-  source: Source;
-  agg: Agg;
-  where?: Record<string, string>;
   /** Thresholds and caveats a reader needs, kept out of the label so a plan never echoes them as numbers. */
   about?: string;
   /** For a count: the words that name what it counts, so a plan's small counts can be checked against it. */
@@ -105,13 +104,23 @@ export type MetricDef = {
   since?: 2;
 };
 
+/** A metric computed from one source's rows: a period total, or (standing) one number as of the data date. */
+export type MetricDef = MetricAbout & {
+  layer: 'period' | 'standing';
+  source: Source;
+  agg: Agg;
+  where?: Record<string, string>;
+  /** Standing metrics: only rows dated from `from` (and up to `to`, when given), whatever the period. */
+  window?: { from: string; to?: string };
+};
+
 const profit: Field = { sql: '(net_usd - cost_usd)', js: (r) => num(r, 'net_usd') - num(r, 'cost_usd') };
 const LINE_LABEL: Record<(typeof PRODUCT_LINES)[number], string> = { fortune: 'Fortune', mazali: 'Mazali', tuni: 'Tuni', accessories: 'accessories' };
 const SERVICE_LABEL: Record<(typeof SALON_SERVICES)[number], string> = {
   wash_set: 'wash and set', cut_style: 'cut and style', repair: 'repair', consignment_intake: 'consignment intake fee',
   color: 'color', fortune_appointment: 'Fortune fitting appointment',
 };
-const CHANNEL_LABEL: Record<(typeof AD_CHANNELS)[number], string> = { google: 'Google', meta: 'Meta', amazon: 'Amazon' };
+export const CHANNEL_LABEL: Record<(typeof AD_CHANNELS)[number], string> = { google: 'Google', meta: 'Meta', amazon: 'Amazon' };
 const done = { status: 'completed' };
 
 // Who reads what. Finance reads the money of both businesses side by side; HQ reads the headline and
@@ -200,10 +209,12 @@ const fieldSql = (f: Field) => (typeof f === 'string' ? f : f.sql);
 // Conditional aggregates: each metric's filter goes inside its aggregate, so every source view is
 // scanned once. (Spark rejects a query that unions the same LATERAL VIEW explode view with itself:
 // MISSING_ATTRIBUTES.RESOLVED_ATTRIBUTE_APPEAR_IN_OPERATION, seen live 2026-10-26.)
-function aggSql(d: MetricDef, validSql: string): string {
+export function aggSql(d: MetricDef, s: SourceSpec): string {
+  const validSql = s.validSql;
   const filters = Object.entries(d.where ?? {}).map(([k, v]) => `${k} = '${v}'`);
+  const window = d.window ? [`${s.date} >= '${d.window.from}'`, ...(d.window.to ? [`${s.date} <= '${d.window.to}'`] : [])] : [];
   const agg = d.agg;
-  const cond = [...(agg.kind === 'rejected' ? [] : [`(${validSql})`]), ...filters].join(' AND ') || 'TRUE';
+  const cond = [...(agg.kind === 'rejected' ? [] : [`(${validSql})`]), ...filters, ...window].join(' AND ') || 'TRUE';
   const when = (f: Field) => `CASE WHEN ${cond} THEN ${fieldSql(f)} END`;
   switch (agg.kind) {
     case 'sum': return `ROUND(SUM(${when(agg.field)}), 2)`;
@@ -221,9 +232,14 @@ function sourceSelect(source: Source, version: DataVersion): string {
   const defs = metrics.filter((d) => d.source === source);
   const period = periodCase(s.date, periods);
   const [first, last] = [PERIODS[periods[0]!].from, PERIODS[periods[periods.length - 1]!].to];
-  const wide = `SELECT ${period} AS period, ${defs.map((d, i) => `CAST(${aggSql(d, s.validSql)} AS DOUBLE) AS m${i}`).join(', ')} FROM ${container}.${s.table} WHERE ${s.date} BETWEEN '${first}' AND '${last}' GROUP BY ${period}`;
+  const wide = `SELECT ${period} AS period, ${defs.map((d, i) => `CAST(${aggSql(d, s)} AS DOUBLE) AS m${i}`).join(', ')} FROM ${container}.${s.table} WHERE ${s.date} BETWEEN '${first}' AND '${last}' GROUP BY ${period}`;
+  return unpivot(defs, wide, source);
+}
+
+/** Turns a wide select (period, m0, m1, ...) into rows (period, metric_id, value), dropping NULLs. */
+export function unpivot(defs: readonly { id: string }[], wide: string, name: string): string {
   const stack = `stack(${defs.length}, ${defs.map((d, i) => `'${d.id}', m${i}`).join(', ')}) AS (metric_id, value)`;
-  return `SELECT period, metric_id, value FROM (SELECT period, ${stack} FROM (${wide}) w_${source}) s_${source} WHERE value IS NOT NULL`;
+  return `SELECT period, metric_id, value FROM (SELECT period, ${stack} FROM (${wide}) w_${name}) s_${name} WHERE value IS NOT NULL`;
 }
 
 /** The body of a version's period view (version 1: fortune_hq.finance_metrics): one row per (period, metric). */
@@ -250,10 +266,39 @@ export function martQuery(period: Period): string {
 
 const fieldJs = (f: Field) => (typeof f === 'string' ? (r: Row) => num(r, f) : f.js);
 const sum = (rows: Row[], f: Field) => rows.reduce((t, r) => t + fieldJs(f)(r), 0);
-const round = (n: number, places: number) => Math.round(n * 10 ** places) / 10 ** places;
+export const round = (n: number, places: number) => Math.round(n * 10 ** places) / 10 ** places;
 
 /** Rows to compute from: a version 1 business, or version 2's year (which adds the budget sheet). */
 export type SourceRows = SyntheticBusiness & { finance?: { budgets: readonly BudgetRow[] } };
+
+/** Each source's rows, by the name the metric definitions use. */
+export function sourceRows(b: SourceRows): Record<Source, readonly Row[]> {
+  return {
+    orders: b.online.orders, appointments: b.salon.appointments, ads: b.marketing.ads, email: b.marketing.email,
+    budgets: b.finance?.budgets ?? [],
+  };
+}
+
+/**
+ * One metric over the rows its SQL aggregates (a period's rows, or for a standing metric all of them), as
+ * the SQL computes it. undefined is SQL's NULL: COUNT of nothing is 0; SUM, AVG and a ratio over nothing are
+ * NULL, and NULL rows are dropped from the view.
+ */
+export function aggregate(d: MetricDef, rows: readonly Row[]): number | undefined {
+  const s = SOURCES[d.source];
+  const inWindow = (r: Row) => !d.window || (String(r[s.date]) >= d.window.from && (!d.window.to || String(r[s.date]) <= d.window.to));
+  const matching = rows
+    .filter((r) => d.agg.kind === 'rejected' || s.valid(r))
+    .filter((r) => Object.entries(d.where ?? {}).every(([k, v]) => r[k] === v))
+    .filter(inWindow);
+  const a = d.agg;
+  if (matching.length === 0 && (a.kind === 'sum' || a.kind === 'avg' || a.kind === 'ratio')) return undefined;
+  return a.kind === 'sum' ? round(sum(matching, a.field), 2)
+    : a.kind === 'avg' ? round(sum(matching, a.field) / matching.length, 2)
+    : a.kind === 'count' ? matching.length
+    : a.kind === 'ratio' ? round(sum(matching, a.num) / sum(matching, a.den), 4)
+    : matching.filter((r) => !s.valid(r)).length;
+}
 
 /** One period's metric values, as the view's SQL computes them. */
 function periodValues(defs: readonly MetricDef[], rowsBySource: Record<Source, readonly Row[]>, period: Period): Map<string, number> {
@@ -263,19 +308,8 @@ function periodValues(defs: readonly MetricDef[], rowsBySource: Record<Source, r
     const s = SOURCES[d.source];
     const inPeriod = rowsBySource[d.source].filter((r) => String(r[s.date]) >= from && String(r[s.date]) <= to);
     if (inPeriod.length === 0) continue; // no GROUP BY row for this source and period
-    const rows = inPeriod
-      .filter((r) => d.agg.kind === 'rejected' || s.valid(r))
-      .filter((r) => Object.entries(d.where ?? {}).every(([k, v]) => r[k] === v));
-    const a = d.agg;
-    // SQL: COUNT of nothing is 0; SUM, AVG and a ratio over nothing are NULL, and NULL rows are dropped.
-    if (rows.length === 0 && (a.kind === 'sum' || a.kind === 'avg' || a.kind === 'ratio')) continue;
-    const value =
-      a.kind === 'sum' ? round(sum(rows, a.field), 2)
-      : a.kind === 'avg' ? round(sum(rows, a.field) / rows.length, 2)
-      : a.kind === 'count' ? rows.length
-      : a.kind === 'ratio' ? round(sum(rows, a.num) / sum(rows, a.den), 4)
-      : rows.filter((r) => !s.valid(r)).length;
-    out.set(d.id, value);
+    const value = aggregate(d, inPeriod);
+    if (value !== undefined) out.set(d.id, value);
   }
   return out;
 }
@@ -285,10 +319,6 @@ function periodValues(defs: readonly MetricDef[], rowsBySource: Record<Source, r
  * rows Zetaris reads. All periods at once, because a season index needs the whole year.
  */
 export function computeAll(b: SourceRows, version: DataVersion = 2): Map<Period, Map<string, number>> {
-  const rowsBySource: Record<Source, readonly Row[]> = {
-    orders: b.online.orders, appointments: b.salon.appointments, ads: b.marketing.ads, email: b.marketing.email,
-    budgets: b.finance?.budgets ?? [],
-  };
   const { periods, metrics } = VERSIONS[version];
-  return new Map(periods.map((p) => [p, periodValues(metrics, rowsBySource, p)]));
+  return new Map(periods.map((p) => [p, periodValues(metrics, sourceRows(b), p)]));
 }
