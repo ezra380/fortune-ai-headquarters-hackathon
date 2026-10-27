@@ -194,3 +194,106 @@ database or none. Every line names its tests.
   appended at the end of `packages/contracts/src/schemas.ts`. No migration, no new dependency.
 - `doors-db.test.ts` uses `npx supabase status -o env` for the local anon key, makes door tokens and reports and deletes
   them again; it touches no profile (a version is append-only).
+
+## Slice 3 of 3: the manager decides (2026-10-27)
+
+The rule the orchestrator decided, recorded in [`docs/manager.md`](../manager.md) ("Who decides what changes"): **the HQ Manager
+applies lessons and skill notes itself, each as a new profile version made by `manager` with its reason, reversible from the
+history; a change to what an assistant may read (data access) or which model it uses still needs the owner's ADOPT code.**
+The program decides by kind (`MANAGER_APPLIES` in contracts), never the model.
+
+### What works
+
+Full suite: `npm test` 45 files, 785 tests green; `npm run typecheck` clean. Each line names its tests.
+
+- **Typed recommendations.** `ChangeKind` (`lesson`, `skill_note`, `reads`, `model`), `TypedRecommendation`, `TypedManagerReview`,
+  `RecommendationDetail`, `MANAGER_APPLIES` are appended to `schemas.ts`. A recommendation with no kind is a lesson, so older reviews
+  and rows read. Tests: `contracts/test/typed-change.test.ts` (11), `units.test.ts` "checkReview" ("reads a review from before
+  kinds as lessons...", "asks the caller whether each change could be made...").
+- **The manager applies lessons and skill notes at once.** A lesson goes into the profile's `lessons` (newest 50 kept), a skill note
+  into a `## Notes from the HQ Manager` section at the end of the skill (newest 12 kept); both are one line that passes
+  `checkChangeText` (no phone number or code, nothing medical, no way around the rules, no order to read a tool the assistant may not
+  read). Tests: `packages/profiles/test/changes.test.ts` (40: every rule with a case, the limits, the walls, the pure functions),
+  `manager-decides.test.ts` "writes a skill note ... with no code", "applies several recommendations of one review in order",
+  "keeps only the newest fifty lessons ... says in the version which it let go", "reaches a door too".
+- **Reads and models wait for the owner's code, in the program's words.** The owner reads `Read tools: add usage_summary` or
+  `Model for answer: <name>`, never the model's sentence; ADOPT writes a version made by `owner`. A model change may only move one of
+  the jobs `code`, `answer`, `review` to a model another job already uses. Tests: "a reads change waits ...", "a model change waits
+  ..." (both end to end through ADOPT), "decides who applies by the kind the program reads, not by anything the model adds".
+- **Refusals.** At review time (a correction round for the writer): a lesson that breaks a rule, a wall that would be crossed, a
+  name that is not a read tool, a model nobody uses, a change that changes nothing. At apply time (the profile moved on): the
+  recommendation is closed with the reason and the owner's text says "I did not apply". No stored profile: it stays open and ADOPT says
+  why. Tests: "sends the review writer back, with the reason ...", "never writes a version for a review that does not pass", "closes a
+  recommendation the stored profile will not take", "leaves a recommendation open ... when the profile is not stored".
+- **Two writers and a crash.** Another writer saving first makes the manager read again and write on top of it; a task that
+  crashed between the write and the mark finds its version in the history and does not write a second. Tests: "reads the profile
+  again when another writer got in first ...", "finds, when the task runs again after a crash, the version it already wrote ...",
+  "runs a retried review once" (`manager.test.ts`).
+- **`list_session_reports`** (manager read tool; one-line changes to `READ_TOOL_NAMES`, the manager's `reads` and its skill's "You
+  can read"). The digest asks for the outside reports nobody has read; the program marks as read exactly the ids the tool returned
+  to the script (from `toolOutputs`, not from the model), with the review's id. Outside reports count as work for a review. Tests:
+  `read-tools.test.ts` (4 new), `store-manager.test.ts` "lists what outside tools filed ...", `manager-decides.test.ts` "asks the
+  digest for them, marks the ones the digest script was given ...", "counts outside reports as work, however old ...", "says so, and
+  reads nothing, when the manager's profile has no way to read them", "refuses a lesson that came out of a report's words ...".
+- **The owner's text** says what the manager changed, what it did not apply and why, and what needs his code; a code (12 hours) is
+  issued only when something needs it. A review carries no phone number or medical data (`checkReview`). Tests: the main flow in
+  `manager.test.ts`, "Nothing needs your code" in `manager-decides.test.ts`, "keeps a phone number and anything medical ...".
+- **The database is the source of lessons; H-MEM is a cache.** Every read of the profiles copies the lessons this machine has not
+  got into its H-MEM (`workerProfiles(..., brain)`), once each, so plan writers and `my_lessons` on another machine see them; the
+  manager's own change refreshes this worker's profiles at once (`profiles.refresh`), so the next Code Mode lookup and answer carry
+  the lesson. Tests: "reach the next Code Mode answer of the assistant in this worker at once, and no other assistant's", "are copied
+  into the H-MEM of another machine ... once each", `db-source.test.ts` "a listener on every read" (3).
+- **The daily manager review** is `queueDailyReview(deps)` (`manager-daily.ts`, also exported from `manager.ts`); one per New York
+  day, quiet when there is nothing to review. Tests: "queues one review a day, by the day in New York ...", "sends no text on a day
+  with nothing to review ...".
+- **Putting a version back.** `scripts/revert-profile.ts <assistant> <version>` (and `--list`) writes an earlier version as a new
+  one; `restoreProfileVersion` in `@fahq/profiles`. `--force` reseeding keeps the manager's notes. Tests in `supabase/tests/profiles.test.ts`
+  (+5): "--force also keeps the notes ...", "puts an earlier version back ...", "refuses, in plain words ...", "refuses a version the rules would
+  not accept today ... and one changed while it was being put back", "runs as revert-profile.ts".
+- **The store's new calls** (`profileRow`, `saveProfile`, `profileVersionFor`, `recommendationsOf`, `putInForce`, `refuseRecommendation`,
+  `sessionReports`, `markSessionReportsReviewed`, `taskStatusByKey`) on the real database through the real Data API:
+  `store-manager.test.ts` (8), including a write from a version the profile is not at, which must write nothing.
+- Mutation checks, each caught by tests: reads applied by the manager, no look in the history before writing, no text rules, every
+  reported id marked read, a refused write counted as done, no profile refresh after a change, no H-MEM copy, no dry run at review
+  time, the manager applying every kind, the day by UTC, `--force` dropping the notes, the kind not saved.
+
+### Not done
+
+- **Not wired into the loop.** Nothing calls `queueDailyReview` (the brief said not to edit `main.ts`'s loop); the wiring is in
+  mergeNotes and `docs/manager.md`.
+- **The positive profile write is not proven through the Data API on the shared stack.** A profile version cannot be taken back, so
+  the manager tests use the profile tables in memory (`apps/worker/test/profile-port.ts`). What is proven on real Postgres:
+  `save_assistant_profile` and its guard (slice 1, and the restore tests here), the store's call shape (a stale write returns
+  nothing and writes nothing), and every recommendation write (real tables). What is not: one successful `saveProfile` through
+  PostgREST. It is a thin `rpc` of a function the throwaway-database tests exercise; do one real `REVIEW` on a stack you may write to.
+- **Lessons adopted before this change** are in `recommendations` (and the H-MEM of the machine that adopted them), not in a profile
+  row; they are not copied across. `list_lessons` still lists them.
+- The model can change only `code`, `answer` and `review` jobs; `plan` and `route` are not the manager's to change.
+- No new door tool: a door still reads only its `DOOR_READS`; `list_session_reports` is for the manager inside the worker.
+- The cloud Supabase project was not touched, the migration is not applied there, and nothing live was run.
+- The keyword net in `checkChangeText` is not a proof against a clever instruction; the structure around it (one short line, checked
+  again against the stored profile, told to the owner the same day, reversible) is what limits the damage. Stated in `docs/manager.md`.
+
+### What the merge must know
+
+- **Order of release:** apply `supabase/migrations/20261027100100_manager_decides.sql` (additive: four columns on `recommendations`,
+  one on `session_reports`, one index) **before** the new worker starts: the worker writes `kind` and `detail`. I applied it once to
+  the shared local stack with `docker exec ... psql` and recorded it in `supabase_migrations.schema_migrations`.
+- **Reseed the manager's profile:** the stored manager row (version 1 everywhere so far) does not have `list_session_reports`. Run
+  `npx tsx scripts/seed-profiles.ts --force` (keeps lessons and the manager's notes) or the manager cannot read outside reports; its
+  receipt `manager.sessions` says so when reports are waiting. I did not reseed the shared stack.
+- **Wire the daily review** where the scheduler lives (another lane adds it):
+  `import { queueDailyReview } from './manager.ts'; await queueDailyReview(deps)` once a day (calling it hourly is safe: the key is
+  the New York day, and it answers `{ queued: false }` for a day already queued).
+- **Edits outside the lane's list:** `apps/worker/src/common.ts` (`profiles.model` takes every job, `profiles.refresh?` added; the
+  type only), `apps/worker/src/read-tools.ts` (the new tool and `sessionReports` in the context's store), `packages/profiles/src/{index,
+  seed,source}.ts` and `skills/manager/SKILL.md` (the reads line, one Job sentence, the "You never" paragraph), `README.md` (two
+  places), `docs/architecture.md` (the manager paragraph), `docs/roadmap.md` (two sentences): they said the owner adopts every change.
+  `apps/console` still says "Recommendations the owner adopted with a code" under Standing lessons; a manager-applied lesson shows
+  there too (status `adopted`, no `decided_by`), so its wording wants a small change by that lane.
+- **Tests that touch other tests:** `manager.test.ts` now builds its deps with the profile tables in memory and no outside reports;
+  `packages/profiles/test/profiles.test.ts` pins the manager's reads (one line); `units.test.ts` and `read-tools.test.ts` gained cases.
+  Another lane that edits the manager's `reads` or `READ_TOOL_NAMES` meets the same lines.
+- A test that runs a worker with a far-future clock claims every stale `running` task in the shared database (`claim_task` takes
+  expired leases); the manager tests run the task itself with `handleTask` instead.
+- No new dependency and no new environment variable.
