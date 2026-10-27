@@ -233,6 +233,8 @@ describe('spending cap', () => {
   it('never lets concurrent reservations pass the daily cap', async ({ skip }) => {
     if (!reachable) skip();
     const day = `20${String(30 + Math.floor(Math.random() * 60))}-01-01`;
+    // The test leaves its row behind, so an earlier run may already have spent this random day (about one run in ten, and growing).
+    await pool.query('delete from public.model_spend where day = $1', [day]);
     const results = await Promise.all(
       Array.from({ length: 6 }, () => pool.query('select public.reserve_model_spend($1, 0.4, 1.0) as ok', [day])),
     );

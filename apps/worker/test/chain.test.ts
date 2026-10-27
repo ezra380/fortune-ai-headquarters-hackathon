@@ -5,6 +5,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openBrain } from '@fahq/brain';
+import { createDeliveryPort } from '../../../packages/delivery/src/index.ts';
 import type { Explained } from '../src/explain.ts';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { PLAN_SYSTEM } from '../src/finance.ts';
@@ -106,6 +107,9 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     (await pool.query(`select id, from_assistant, to_assistant, kind, status, dedupe_key, body from public.assistant_messages where dedupe_key like $1 order by dedupe_key collate "C"`, [`%${roundId}%`])).rows as Message[];
   const receiptsOf = async (...taskIds: string[]) =>
     (await pool.query(`select step, assistant_id, outcome, model, input_tokens, output_tokens, detail from public.receipts where task_id = any($1) order by id`, [taskIds])).rows as ReceiptRow[];
+  /** What an assistant's memory recalls as decisions for a query (the memory lasts across the tests of this file). */
+  const decisionsOf = (assistant: 'owner' | 'finance' | 'salon' | 'online', query: string) =>
+    deps.brain.memory(assistant).recallDecisions(query, 20).map((d) => d.memory.content);
   const planCalls = () => model.calls.filter((c) => /\.plans$/.test(c.purpose)).length;
   const planPurposes = () => model.calls.filter((c) => /\.plans$/.test(c.purpose)).map((c) => c.purpose);
 
@@ -197,9 +201,10 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     expect(lastTo(ownerPhone)).toContain('approved plan 1: Raise Google ad spend 20%');
 
     // The decision lands in the department that wrote the plan AND in finance's memory; the salon heard nothing.
-    expect(deps.brain.memory('online').recallDecisions('raise google ad spend')[0]?.memory.content).toContain('approved plan 1 "Raise Google ad spend 20%"');
-    expect(deps.brain.memory('finance').recallDecisions('raise google ad spend')[0]?.memory.content).toContain('approved plan 1 "Raise Google ad spend 20%"');
-    expect(deps.brain.memory('salon').recallDecisions('raise google ad spend')).toEqual([]);
+    const approvedAds = expect.stringContaining('approved plan 1 "Raise Google ad spend 20%"');
+    expect(decisionsOf('online', 'raise google ad spend')).toContainEqual(approvedAds);
+    expect(decisionsOf('finance', 'raise google ad spend')).toContainEqual(approvedAds);
+    expect(decisionsOf('salon', 'raise google ad spend').filter((c) => c.includes('Raise Google ad spend'))).toEqual([]);
 
     // "Why did you propose plan 1?" is answered from what was kept.
     const tools = createReadTools({ store: deps.store, brain: deps.brain, data: deps.data, now: deps.now }, 'owner');
@@ -259,6 +264,31 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     // The failure reaches the manager's report as a reliability suggestion about the online department.
     const report = (await pool.query(`select suggestions from public.work_reports where task_id = $1`, [round.id])).rows[0];
     expect(report.suggestions).toContainEqual({ kind: 'reliability', about: 'online', text: expect.stringContaining('online.plans failed') });
+
+    // The three that remain go on all the way: SEND 1 (a salon plan) → CONFIRM lands in the salon's memory and finance's.
+    await textIn(ownerPhone, `SEND 1 ${code}`);
+    expect(lastTo(financePhone)).toContain('From the Salon department.');
+    await textIn(financePhone, `CONFIRM ${/CONFIRM (\d{6})/.exec(lastTo(financePhone))?.[1]}`);
+    expect(lastTo(ownerPhone)).toContain('approved plan 1: Open evening wash and set slots');
+    const approvedEvenings = expect.stringContaining('approved plan 1 "Open evening wash and set slots"');
+    expect(decisionsOf('salon', 'open evening wash and set slots')).toContainEqual(approvedEvenings);
+    expect(decisionsOf('finance', 'open evening wash and set slots')).toContainEqual(approvedEvenings);
+    expect(decisionsOf('online', 'open evening wash and set slots').filter((c) => c.includes('Open evening wash'))).toEqual([]);
+  });
+
+  it('prints the final proposal: the real PDF renderer accepts the three plans Owner HQ stored', async () => {
+    deps.delivery = createDeliveryPort({}, { fetch, now: () => new Date(), sentLedger: new Set<string>() });
+    try {
+      const { roundId } = await askForPlans();
+      const final = (await messages(roundId)).find((r) => r.dedupe_key.startsWith('final:'))!;
+      const printed = await pool.query(`select id, status, last_error from public.outbox where attachment_ref = $1`, [`proposal:${final.id}`]);
+      expect(printed.rows).toHaveLength(1);
+      expect(printed.rows[0]).toMatchObject({ status: 'skipped', last_error: 'printing is not configured (no PrintNode key)' });
+      const pdf = fs.readFileSync(path.join(deps.printDir, `${printed.rows[0].id}.pdf`));
+      expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+    } finally {
+      deps.delivery = null;
+    }
   });
 
   it('picks by rule, and says so, when the picker fails its number check twice', async () => {
@@ -402,6 +432,6 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     expect(lastTo(financePhone)).toContain('plan 2: Evening wash and set slots');
     expect(lastTo(financePhone)).not.toContain('From the');
     await textIn(financePhone, `CONFIRM ${/CONFIRM (\d{6})/.exec(lastTo(financePhone))?.[1]}`);
-    expect(deps.brain.memory('finance').recallDecisions('evening wash and set slots')[0]?.memory.content).toContain('approved plan 2');
+    expect(decisionsOf('finance', 'evening wash and set slots')).toContainEqual(expect.stringContaining('approved plan 2 "Evening wash and set slots"'));
   });
 });

@@ -82,6 +82,13 @@ export type ApprovalAction = 'forward_plan' | 'decide_plan' | 'adopt_change';
 /** One approval on a proposal, without its code: what it was for, where it stands, and (for a decision) the plan. */
 export type ApprovalSummary = { action: ApprovalAction; status: 'pending' | 'signed' | 'declined' | 'expired'; planRank: number | null; expiresAt: string; decidedAt: string | null };
 
+/**
+ * How long a claimed task is the claiming loop's. A round of plans can take several minutes (three planners at
+ * once, then the picker, each with a correction round), and with more than one claim loop a lease that ran out
+ * mid-round would hand the same task to the other loop.
+ */
+const LEASE_SECONDS = 900;
+
 const ASSISTANTS: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
 
 type Result<T> = { data: T | null; error: { message: string; code?: string } | null };
@@ -102,7 +109,7 @@ export function createStore(url: string, serviceKey: string) {
 
   return {
     async claimTask(worker: string, now: Date): Promise<TaskRow | null> {
-      const rows = must(await db.rpc('claim_task', { p_worker: worker, p_lease_seconds: 300, p_now: now.toISOString() }), 'claim_task') as TaskRow[];
+      const rows = must(await db.rpc('claim_task', { p_worker: worker, p_lease_seconds: LEASE_SECONDS, p_now: now.toISOString() }), 'claim_task') as TaskRow[];
       return rows[0] ?? null;
     },
     async finishTask(id: string, worker: string, status: 'done' | 'failed' | 'waiting' | 'queued', error: string | null, now: Date) {

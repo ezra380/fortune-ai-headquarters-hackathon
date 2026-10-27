@@ -97,7 +97,7 @@ function summarize(task: ReportTask, outcome: 'done' | 'failed' | 'retrying', er
   const seconds = Math.round((endedAt.getTime() - startedAt.getTime()) / 1000);
   const word = outcome === 'retrying' ? 'will retry' : outcome;
   const parts = steps.map((s) => {
-    const planAttempt = PLAN_STEP.test(s.step) || s.step === 'manager.review' ? /\battempts (\d+)\b/.exec(s.detail ?? '')?.[1] : undefined;
+    const planAttempt = PLAN_STEP.test(s.step) || s.step === 'manager.review' || s.step === 'owner.synthesis' ? /\battempts (\d+)\b/.exec(s.detail ?? '')?.[1] : undefined;
     return `${s.step} ${s.outcome}${planAttempt ? ` (attempt ${planAttempt} of 2)` : ''}`;
   });
   const shown = parts.length > 6 ? [...parts.slice(0, 6), `and ${parts.length - 6} more`] : parts;

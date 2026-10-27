@@ -300,6 +300,7 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
     it('never hand one task to two loops: every text is handled once, and both loops work at the same time', async () => {
       const TASKS = 12;
       const claimed: string[] = [];
+      const leases: number[] = [];
       let running = 0;
       let busiest = 0;
       const store = deps.store;
@@ -309,7 +310,11 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
           ...store,
           claimTask: async (worker, now) => {
             const task = await store.claimTask(worker, now);
-            if (task) { claimed.push(task.id); running += 1; busiest = Math.max(busiest, running); await sleep(25); } // work that takes a moment
+            if (task) {
+              claimed.push(task.id); running += 1; busiest = Math.max(busiest, running);
+              leases.push(Number((await pool.query(`select extract(epoch from (lease_until - $2::timestamptz))::int as s from public.tasks where id = $1`, [task.id, now.toISOString()])).rows[0].s));
+              await sleep(25); // work that takes a moment
+            }
             return task;
           },
           finishTask: async (...args) => { running -= 1; return store.finishTask(...args); },
@@ -329,6 +334,9 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       expect(rows.every((r) => r.status === 'done' && r.attempts === 1)).toBe(true);
       expect(new Set(claimed)).toEqual(new Set(rows.map((r) => r.id)));
       expect(busiest).toBe(2); // two tasks were being handled at once
+      // A task stays its loop's for 15 minutes, longer than a round of plans can take, so the other loop never claims it again.
+      expect(leases).toHaveLength(TASKS);
+      expect(leases.every((s) => s === 900)).toBe(true);
       expect(sms.filter((m) => m.to === ownerPhone && m.body.startsWith('Open items')).length).toBe(TASKS);
     });
 
