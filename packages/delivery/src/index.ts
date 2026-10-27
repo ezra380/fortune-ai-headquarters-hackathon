@@ -4,8 +4,8 @@ import { buildWeeklyEmail, buildWorkerEmail } from './report-email.ts';
 import { renderWeeklyPacketPdf, renderWorkerReportPdf } from './report-pdf.ts';
 
 export { renderProposalPdf, toWinAnsi } from './pdf.ts';
-export { renderWeeklyPacketPdf, renderWorkerReportPdf } from './report-pdf.ts';
-export { formatValue, longDate, WORKER_LABEL } from './format.ts';
+export { keyMetrics, renderWeeklyPacketPdf, renderWorkerReportPdf, rowKey, rowValue, sourceText } from './report-pdf.ts';
+export { formatValue, longDate, money, WORKER_LABEL } from './format.ts';
 export { buildWeeklyEmail, buildWorkerEmail } from './report-email.ts';
 
 // Texts, emails and printouts. Twilio, Postmark and PrintNode are called with server-side credentials only; a

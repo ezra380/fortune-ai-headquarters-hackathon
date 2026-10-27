@@ -164,7 +164,7 @@ const ranks = (n: readonly number[]) => (n.length < 2 ? `${n[0]}` : `${n.slice(0
 
 // ---- one worker's page ---------------------------------------------------------------------
 
-function keyMetrics(report: WorkerReport): { shown: Metric[]; more: number } {
+export function keyMetrics(report: WorkerReport): { shown: Metric[]; more: number } {
   const metrics = byId(report.metrics);
   const picked = new Map<string, Metric>();
   // The numbers the words and the rules lean on come first; the rest follow in the order the data gave them.
@@ -177,8 +177,8 @@ function keyMetrics(report: WorkerReport): { shown: Metric[]; more: number } {
   return { shown: all.slice(0, KEY_NUMBERS), more: Math.max(0, all.length - KEY_NUMBERS) };
 }
 
-const rowKey = (key: string) => key.replace(/_usd$/, '').replace(/_/g, ' ');
-const rowValue = (key: string, value: number) => (key.endsWith('_usd') ? money(value) : value.toLocaleString('en-US', { maximumFractionDigits: 2 }));
+export const rowKey = (key: string) => key.replace(/_usd$/, '').replace(/_/g, ' ');
+export const rowValue = (key: string, value: number) => (key.endsWith('_usd') ? money(value) : value.toLocaleString('en-US', { maximumFractionDigits: 2 }));
 
 function workerPage(sheet: Sheet, report: WorkerReport, ctx: ReportContext) {
   const metrics = byId(report.metrics);
@@ -214,7 +214,7 @@ function workerPage(sheet: Sheet, report: WorkerReport, ctx: ReportContext) {
 }
 
 /** The data source as the report holds it (view#hash, system-made); anything else is cleaned like all text. */
-const sourceText = (report: Pick<WorkerReport, 'dataSource' | 'metrics'>): string => {
+export const sourceText = (report: Pick<WorkerReport, 'dataSource' | 'metrics'>): string => {
   const asOf = report.metrics[0]?.source.asOf.slice(0, 10);
   const source = /^[a-z0-9_.]+#[0-9a-f]{12}$/.test(report.dataSource) ? report.dataSource : clean(report.dataSource);
   return asOf ? `${source}, as of ${asOf}` : source;

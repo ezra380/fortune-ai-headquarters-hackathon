@@ -1,11 +1,16 @@
+import { MANAGERS, WeeklyReport, WORKER_IDS, WorkerReport, workerDivision } from '@fahq/contracts';
+import type { Metric, WorkerId } from '@fahq/contracts';
+import { formatValue, keyMetrics, longDate, money, rowKey, rowValue, sourceText, WORKER_LABEL } from '@fahq/delivery';
+import { weekStart } from './days.ts';
 import type {
   DepartmentInfo, DepartmentView, ManagerBlock, RawDepartment, RawManager, RawRecommendation, RawReview,
   RawUsageRow, RawWorkReport, RecommendationView, ReportView, ReviewView, UsageCounts,
 } from './departments.ts';
 import { USAGE_WINDOW_HOURS } from './departments.ts';
 import type {
-  ActionState, ActionView, BriefStatusView, BriefView, DigestView, DivisionBlock, DivisionsView, RawBriefRow, RawDigest, RawDivisionState,
-  RawDivisions, RawReply, RawRequest, RequestView,
+  ActionState, ActionView, BriefDivision, BriefPart, BriefStatusView, BriefView, DigestView, DivisionBlock, DivisionsView, NumberView, RawActionDecision,
+  RawBriefRow, RawDigest, RawDivisionReports, RawDivisionState, RawDivisions, RawReply, RawRequest, RawWeeklyReportRow, RawWorkerReportRow,
+  ReportsBlock, ReportsPart, RequestView, WeeklyOptionView, WeeklyView, WorkerDayView, WorkerReportView, WorkerSlotView,
 } from './divisions.ts';
 import { BRIEF_DIVISIONS, isBriefDivision } from './divisions.ts';
 import { cleanText, clip, maskNumber } from './scrub.ts';
@@ -74,6 +79,8 @@ const NOTES = {
   requests: 'Some data requests could not be read and are left out.',
   answers: 'Some answers to data requests could not be read. Those requests are shown as unreadable.',
   digest: 'The latest digest could not be read in full (unexpected shape). What could not be read is left out.',
+  workerReports: 'Some worker reports could not be read in full (unexpected shape). They are shown as unreadable.',
+  weekly: 'A weekly report could not be read in full (unexpected shape). It is not shown.',
 } as const;
 type NoteKey = keyof typeof NOTES;
 type Flag = (key: NoteKey) => void;
@@ -343,7 +350,7 @@ const citedIds = (v: unknown): string[] =>
  * follow the newest code: waiting, ended (a waiting code whose time has passed is shown as expired, because the database only
  * marks it when someone tries it), locked, or already used for other actions of the same brief.
  */
-function actionApproval(rank: number, d: RawDivisionState, approvedAt: ReadonlyMap<number, string | null>, now: Date): ActionView['approval'] {
+function actionApproval(rank: number, d: Pick<RawDivisionState, 'approval' | 'unread'>, approvedAt: ReadonlyMap<number, string | null>, now: Date): ActionView['approval'] {
   const approved = approvedAt.get(rank);
   if (approved !== undefined) return { state: 'approved', at: approved };
   if (listed(d.unread, 5).includes('actions')) return { state: 'unknown', at: null };
@@ -359,6 +366,17 @@ function actionApproval(rank: number, d: RawDivisionState, approvedAt: ReadonlyM
     case 'declined': return state('not_approved', iso(code.decided_at));
     default: return state('unknown', null);
   }
+}
+
+/** The actions or paths the head approved, from the notes the HQ Manager was sent (rank and verdict only, never who decided). */
+function approvedAtOf(decisions: readonly RawActionDecision[] | undefined): Map<number, string | null> {
+  const approvedAt = new Map<number, string | null>();
+  for (const x of rows(decisions, SHOWN.actions * 4)) {
+    if (!isRecord(x)) continue;
+    const b = parsed(x.body);
+    if (isRecord(b) && b.verdict === 'approved' && whole(b.rank) >= 1) approvedAt.set(whole(b.rank), iso(x.created_at));
+  }
+  return approvedAt;
 }
 
 function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | null {
@@ -383,12 +401,7 @@ function shapeBrief(d: RawDivisionState, now: Date, flag: Flag): BriefView | nul
     }
   }
 
-  // The actions the head approved, from the notes the HQ Manager was sent (rank and verdict only).
-  const approvedAt = new Map<number, string | null>();
-  for (const x of rows(d.decisions, SHOWN.actions * 4)) {
-    const b = parsed(x.body);
-    if (isRecord(b) && b.verdict === 'approved' && whole(b.rank) >= 1) approvedAt.set(whole(b.rank), iso(x.created_at));
-  }
+  const approvedAt = approvedAtOf(d.decisions);
 
   const actions: ActionView[] = [];
   if (rec) {
@@ -480,7 +493,190 @@ function shapeDigest(d: RawDigest | null, flag: Flag): DigestView | null {
   return { date: typeof body.date === 'string' && DAY.test(body.date) ? body.date : null, createdAt: iso(d.created_at), text: words, reports };
 }
 
-export function shapeDivisions(raw: RawDivisions, now: Date): DivisionsView {
+// ---- Wave 2: each division's manager, its workers' daily reports and its weekly report -------------------------
+// The stored reports are checked against their contracts (packages/contracts/src/reports.ts); a report in another shape is
+// shown as unreadable with a note, never as missing. Numbers are written by their unit with the same words the PDF uses, and
+// each one keeps the metric id it traces to. Ids are passed on only when they are well-formed, because the PDF link is built
+// from them.
+
+const SHOWN_REPORTS = { workerFindings: 5, rules: 6, rowTotals: 12, rowReads: 4, weekDays: 7, sections: 8, asked: 4, optionNumbers: 12, steps: 6, projections: 6, risks: 5 };
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const rowId = (v: unknown): string | null => (typeof v === 'string' && UUID.test(v) ? v : null);
+const plainNumber = (v: number): string => v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+
+const numberView = (m: Pick<Metric, 'id' | 'label' | 'value' | 'unit'>): NumberView => ({ id: said(m.id, 80), label: said(m.label, 120), shown: said(formatValue(m), 40) });
+
+/** A number a report cites, looked up in the numbers it holds. One it does not hold keeps its id, with the value given when there is one. */
+function citedNumber(id: string, metrics: ReadonlyMap<string, Metric>, given?: number): NumberView {
+  const m = metrics.get(id);
+  if (m) return numberView(m);
+  return { id: said(id, 80), label: said(id, 80), shown: given === undefined ? '' : plainNumber(given) };
+}
+
+function workerReportView(row: RawWorkerReportRow, report: WorkerReport): WorkerReportView {
+  const { shown, more } = keyMetrics(report);
+  return {
+    id: rowId(row.id),
+    day: report.day,
+    period: said(report.period, 40),
+    createdAt: iso(row.created_at),
+    status: report.status,
+    writtenBy: report.writtenBy,
+    headline: said(report.headline, 160),
+    findings: report.findings.slice(0, SHOWN_REPORTS.workerFindings).map((f) => ({ text: said(f.text, 300), cites: citedIds(f.cites) })),
+    rules: report.attention.slice(0, SHOWN_REPORTS.rules).map((a) => ({ level: a.level, rule: said(a.rule, 200), metricId: said(a.metricId, 80) })),
+    numbers: shown.map(numberView),
+    moreNumbers: more,
+    rows: report.rows.slice(0, SHOWN_REPORTS.rowReads).map((r) => ({
+      read: said(r.read, 40),
+      totals: Object.entries(r.totals).slice(0, SHOWN_REPORTS.rowTotals).map(([key, value]) => ({ label: said(rowKey(key), 60), shown: said(rowValue(key, value), 40) })),
+    })),
+    source: said(sourceText(report), 200),
+  };
+}
+
+const DAY_OF_REPORT = /^\d{4}-\d{2}-\d{2}$/;
+/** Newest first: the company day, then when it was written (a run asked for by hand the same day is newer). */
+const newestFirst = (a: RawWorkerReportRow, b: RawWorkerReportRow): number =>
+  String(b.report_date).localeCompare(String(a.report_date)) || String(b.created_at).localeCompare(String(a.created_at));
+
+function workerSlot(worker: WorkerId, list: readonly RawWorkerReportRow[], start: string, flag: Flag): WorkerSlotView {
+  const base = { workerId: worker, label: WORKER_LABEL[worker] };
+  const mine = list.filter((r) => isRecord(r) && r.worker_id === worker && DAY_OF_REPORT.test(String(r.report_date))).sort(newestFirst);
+  if (mine.length === 0) return { ...base, state: 'none', latest: null, stale: false, week: [] };
+
+  // A report is checked once, whether it is the latest or one of the week; it must be the report of the worker whose row holds it.
+  const checked = new Map<RawWorkerReportRow, WorkerReport | null>();
+  const check = (row: RawWorkerReportRow): WorkerReport | null => {
+    if (!checked.has(row)) {
+      const result = WorkerReport.safeParse(parsed(row.report));
+      const report = result.success && result.data.workerId === worker ? result.data : null;
+      if (!report) flag('workerReports');
+      checked.set(row, report);
+    }
+    return checked.get(row) ?? null;
+  };
+
+  const week: WorkerDayView[] = [];
+  const seen = new Set<string>();
+  for (const row of mine) {
+    if (row.report_date < start || seen.has(row.report_date) || week.length >= SHOWN_REPORTS.weekDays) continue;
+    seen.add(row.report_date);
+    const report = check(row);
+    if (report) week.push({ id: rowId(row.id), day: report.day, status: report.status, headline: said(report.headline, 160), writtenBy: report.writtenBy });
+  }
+
+  const newest = mine[0]!;
+  const report = check(newest);
+  if (!report) return { ...base, state: 'unreadable', latest: null, stale: false, week };
+  return { ...base, state: 'ok', latest: workerReportView(newest, report), stale: newest.report_date < start, week };
+}
+
+/** The options the head may approve: the three paths of finance's report, or the actions of the others. */
+function weeklyOptions(report: WeeklyReport, metrics: ReadonlyMap<string, Metric>, standing: (rank: number) => ActionView['approval']): WeeklyOptionView[] {
+  if (report.paths) {
+    return [...report.paths.plans].sort((a, b) => a.rank - b.rank).map((plan) => ({
+      kind: 'path' as const,
+      rank: plan.rank,
+      title: said(plan.title, 90),
+      why: said(plan.summary, 600),
+      steps: plan.actions.slice(0, SHOWN_REPORTS.steps).map((s) => said(s, 200)),
+      numbers: plan.evidence.slice(0, SHOWN_REPORTS.optionNumbers).map((e) => citedNumber(e.metricId, metrics, e.value)),
+      projections: plan.projections.slice(0, SHOWN_REPORTS.projections).map((p) => {
+        const base = metrics.get(p.baseMetricId);
+        const result = base?.unit === 'usd' ? money(p.result) : plainNumber(p.result);
+        return { text: said(`${p.label}: ${base ? formatValue(base) : p.baseMetricId} x ${p.factor} = ${result}`, 300), assumption: said(p.assumption, 300) };
+      }),
+      test: said(plan.test, 300),
+      stopLoss: said(plan.stopLoss, 300),
+      risks: plan.risks.slice(0, SHOWN_REPORTS.risks).map((r) => said(r, 200)),
+      approval: standing(plan.rank),
+    }));
+  }
+  return [...report.actions].sort((a, b) => a.rank - b.rank).map((a) => ({
+    kind: 'action' as const,
+    rank: a.rank,
+    title: said(a.title, 80),
+    why: said(a.why, 300),
+    steps: [said(a.steps, 300)],
+    numbers: a.cites.slice(0, SHOWN_REPORTS.optionNumbers).map((id) => citedNumber(id, metrics)),
+    projections: [],
+    test: null,
+    stopLoss: null,
+    risks: [],
+    approval: standing(a.rank),
+  }));
+}
+
+function shapeWeekly(division: BriefDivision, r: RawDivisionReports, now: Date, flag: Flag): WeeklyView | 'unreadable' | null {
+  const row: RawWeeklyReportRow | null = isRecord(r.weekly) ? r.weekly : null;
+  if (!row) return null;
+  const result = WeeklyReport.safeParse(parsed(row.report));
+  if (!result.success || result.data.division !== division) {
+    flag('weekly');
+    return 'unreadable';
+  }
+  const report = result.data;
+  const metrics = new Map(report.metrics.map((m) => [m.id, m]));
+  const sent = typeof row.message_id === 'string' && row.message_id !== '';
+  // Where each path or action stands is read the way the brief's is: the newest code on the report's note, and the decisions recorded against it.
+  const standing = { approval: sent && isRecord(r.approval) ? r.approval : null, unread: r.unread.includes('approvals') ? (['actions'] as BriefPart[]) : [] };
+  const approvedAt = approvedAtOf(r.decisions);
+  const goalMetric = report.goal ? metrics.get(report.goal.metricId) : undefined;
+  const at = (value: number) => (goalMetric ? formatValue({ id: goalMetric.id, unit: goalMetric.unit, value }) : plainNumber(value));
+
+  return {
+    id: rowId(row.id),
+    weekOf: report.weekOf,
+    createdAt: iso(row.created_at),
+    period: said(report.period, 40),
+    status: report.status,
+    writtenBy: report.writtenBy,
+    summary: said(report.summary, 800),
+    goal: report.goal
+      ? { title: said(report.goal.title, 120), metric: said(goalMetric?.label ?? report.goal.metricId, 120), from: at(report.goal.from), to: at(report.goal.to), by: longDate(report.goal.by), why: said(report.goal.why, 300) }
+      : null,
+    options: weeklyOptions(report, metrics, (rank) => actionApproval(rank, standing, approvedAt, now)),
+    sections: report.sections.slice(0, SHOWN_REPORTS.sections).map((s) => ({
+      workerId: s.workerId,
+      label: WORKER_LABEL[s.workerId],
+      status: s.status,
+      summary: said(s.summary, 500),
+      numbers: s.cites.slice(0, SHOWN.cites).map((id) => citedNumber(id, metrics)),
+    })),
+    asked: report.asked.slice(0, SHOWN_REPORTS.asked).map((a) => ({ division: a.division, question: said(a.question, 300), answer: said(a.answer, 500), ok: a.ok })),
+    ceoLine: said(report.ceoLine, 140),
+    sent,
+    source: said(sourceText(report), 200),
+  };
+}
+
+const REPORTS_PARTS: readonly ReportsPart[] = ['workers', 'weekly', 'approvals'];
+
+function shapeReports(division: BriefDivision, d: RawDivisionState, now: Date, flag: Flag): ReportsBlock {
+  const ids = WORKER_IDS.filter((w) => workerDivision(w) === division);
+  // A source that sent nothing about the reports is shown as unread, never as "no report yet".
+  if (!isRecord(d.reports)) {
+    return { workers: ids.map((w) => ({ workerId: w, label: WORKER_LABEL[w], state: 'unread' as const, latest: null, stale: false, week: [] })), weekly: null, unread: ['workers', 'weekly'] };
+  }
+  const r = d.reports;
+  const list = Array.isArray(r.workerReports) ? r.workerReports : [];
+  const unread = rows(r.unread, 3).filter((p): p is ReportsPart => (REPORTS_PARTS as readonly unknown[]).includes(p));
+  const workersUnread = unread.includes('workers');
+  const start = weekStart(now);
+  const workers = ids.map((w): WorkerSlotView =>
+    workersUnread ? { workerId: w, label: WORKER_LABEL[w], state: 'unread', latest: null, stale: false, week: [] } : workerSlot(w, list, start, flag));
+
+  const found = shapeWeekly(division, { ...r, unread, decisions: Array.isArray(r.decisions) ? r.decisions : [] }, now, flag);
+  const weekly = found === 'unreadable' ? null : found;
+  return { workers, weekly, unread: found === 'unreadable' && !unread.includes('weekly') ? [...unread, 'weekly'] : unread };
+}
+
+/** A note names its part by division ("The Salon worker reports ..."); a head's view drops the other divisions'. */
+const aboutAnother = (note: string, only: BriefDivision): boolean =>
+  BRIEF_DIVISIONS.some((d) => d.id !== only && note.startsWith(`The ${d.name} `));
+
+export function shapeDivisions(raw: RawDivisions, now: Date, only?: BriefDivision): DivisionsView {
   const flagged = new Set<NoteKey>();
   const flag: Flag = (key) => {
     flagged.add(key);
@@ -488,25 +684,33 @@ export function shapeDivisions(raw: RawDivisions, now: Date): DivisionsView {
   const requests = shapeRequests(raw, flag);
   const byDivision = new Map(rows(raw.divisions, 10).filter((d) => isRecord(d)).map((d) => [d.division, d]));
 
-  const divisions: DivisionBlock[] = BRIEF_DIVISIONS.map((info) => {
+  const divisions: DivisionBlock[] = BRIEF_DIVISIONS.filter((info) => only === undefined || info.id === only).map((info) => {
     // A division the source did not report on is shown as unread, never as "no brief yet".
     const d: RawDivisionState = byDivision.get(info.id) ?? { division: info.id, brief: null, approval: null, decisions: [], unread: ['brief'] };
+    const manager = MANAGERS[info.id];
     return {
       id: info.id,
       name: info.name,
       head: info.head,
+      manager: { name: manager.manager, title: manager.title, reportsTo: manager.head },
       brief: shapeBrief(d, now, flag),
+      reports: shapeReports(info.id, d, now, flag),
       asked: requests.filter((r) => r.from === info.id).slice(0, SHOWN.requestsEach),
       received: requests.filter((r) => r.to === info.id).slice(0, SHOWN.requestsEach),
       unread: rows(d.unread, 2),
     };
   });
 
+  // Last, so a note raised by any part above is in the list.
+  const digest = only ? null : shapeDigest(raw.digest, flag);
+  const notes = [...rows(raw.notes, LIMITS.notes).map((n) => text(n, 300)), ...[...flagged].map((k) => NOTES[k])].filter((n) => n !== '');
   return {
     generatedAt: now.toISOString(),
+    // A head's view holds its own division and nothing of the others, and no CEO digest: that is the owner's.
+    ...(only ? { only } : {}),
     divisions,
-    digest: shapeDigest(raw.digest, flag),
-    unread: rows(raw.unread, 3),
-    notes: [...rows(raw.notes, LIMITS.notes).map((n) => text(n, 300)), ...[...flagged].map((k) => NOTES[k])].filter((n) => n !== '').slice(0, LIMITS.notes),
+    digest,
+    unread: rows(raw.unread, 3).filter((p) => !only || p !== 'digest'),
+    notes: (only ? notes.filter((n) => !aboutAnother(n, only)) : notes).slice(0, LIMITS.notes),
   };
 }
