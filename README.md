@@ -9,20 +9,23 @@ Why".
 
 ## The flagship workflow
 
-The owner texts his assistant: *"Ask the finance assistant for three aggressive plans to double profit this
-month."*
+The owner texts Owner HQ: *"Get me three plans to double profit this month."*
 1. The SMS webhook stores the task once and answers "working on it" in about a second.
-2. A front door on **NVIDIA Nemotron Lightning** routes the text and flags the risks.
-3. The finance assistant pulls numbers through **Zetaris**, a federated view over separately owned salon,
-   online and marketing sources.
-4. It recalls past decisions from **Meterless H-MEM** and asks **Nemotron 3 Ultra** for three plans.
-5. A validator rejects any plan whose numbers don't trace to a Zetaris metric, a computed projection, or
+2. An **NVIDIA Nemotron** safety screen and the Nemotron Lightning front door read the text together;
+   nothing acts on a text the screen did not pass.
+3. **Finance, Online and the Salon propose at once**, each from its own slice of the numbers, read through
+   **Zetaris**, a federated view over separately owned salon, online and marketing sources. Each recalls its
+   own decisions and adopted lessons from **Meterless H-MEM** and asks **Nemotron 3 Ultra** for three plans.
+4. A validator rejects any plan whose numbers don't trace to a Zetaris metric, a computed projection, or
    a declared proposed setting.
+5. **Owner HQ picks the final three** and says why; it can rank plans but never change a number.
 6. The owner forwards one plan with `SEND <n> <code>`, and the finance owner answers `CONFIRM <code>` or
    `DECLINE <code>`.
-7. Everything is recorded in the **Meterless World Model**, and the decision becomes long-term memory.
-8. Every AI tool can read the same brain through **Cloudflare Code Mode**: one typed `code` tool, run in a
-   sandbox.
+7. Everything is recorded in the **Meterless World Model**. "Why plan 2?" is answered from that graph: who
+   asked, which department proposed it, the metrics it cited, who decided.
+8. Questions to any department run through **Cloudflare Code Mode**: one script over that assistant's
+   read-only tools, in a sandbox. The **HQ Manager** reviews every assistant's work (`REVIEW`), and the owner
+   adopts its recommendations by code (`ADOPT`).
 
 Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what: [`docs/LANES.md`](docs/LANES.md)
 
@@ -39,9 +42,25 @@ Architecture: [`docs/architecture.md`](docs/architecture.md) · Who builds what:
 | Plan writer (Nemotron 3 Ultra, thinking on) + number validator | **Live-tested on sample metrics** | Passed validation on the first attempt in 82 s; every run recorded in [`docs/research/live-runs-2026-10-26.md`](docs/research/live-runs-2026-10-26.md). The validator proves numbers are traceable, not that assumptions are wise; people approve. |
 | Cloudflare Code Mode over the brain MCP server | **Working** | QuickJS sandbox: no network, files or timers; deadline, memory and tool-call caps; one `code` call answers a multi-tool script |
 | Full chain request → plans → forward → decision | **Working** with models and data **mocked** | End-to-end test on the real local database and the real Meterless engines |
+| Departments propose together; Owner HQ picks three; explain why | **Working** with models **mocked** | Round, pick, number checks, retries and the World Model links tested on the real local database and Meterless; not yet run live end to end |
+| Ask any department; department heads ask their own | **Working** | Each answers through Code Mode on its own read tools; the salon is a stand-in on synthetic data |
+| Code Mode savings | **Measured live**, 8 runs | 73–88% fewer tokens than classic tool calling every run; answers less reliable with this small model (clean 5 of 15 reasoning off, 4 of 6 on, against 20 of 21): [summary](docs/research/codemode-savings-summary-2026-10-27.md) |
+| HQ Manager: work reports, `REVIEW`, `ADOPT`, lessons | **Working** with models **mocked** | Review numbers traced to the digest; adopted lessons reach the plan writers |
+| Safety screen (Nemotron 3.5 content safety) | **Built**, fails closed | Every free text screened before any model acts; long texts screened in windows |
 | Business numbers through Zetaris | **Working** on local Zetaris | Three source databases federated into one governed view with data-quality rules; `npm run zetaris:setup` proves the live answer equals an independent computation (33 of 33 metrics, both periods) |
-| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Owner HQ, Finance, Online Customer Service and a Salon (Cindy) placeholder; loopback only, numbers masked, codes redacted; 24 tests |
+| Admin console (owner only, read-only) | **Working** against the cloud project | Tabs for Owner HQ, Finance, Online Customer Service, the HQ Manager and a Salon (Cindy) placeholder; loopback only, numbers masked, codes redacted |
 | Proposal PDF, printing, SMS sender | **Built** | 9 tests; printing is skipped unless a PrintNode printer is configured |
+
+## What runs where
+
+| The owner texts | NVIDIA Nemotron | Zetaris | Meterless | Code Mode | Supabase |
+|---|---|---|---|---|---|
+| any free text | 3.5 content safety screens it; Lightning routes it | | | | the task, stored once |
+| "Get me three plans to double profit this month" | 3 Ultra writes each department's plans, then picks three | each department's slice of the metrics | H-MEM: each department's decisions and lessons; World Model: the proposal and its links | | mailbox requests, the round task, the `SEND` code |
+| "How is the salon doing?" (any department) | Lightning writes the script (reasoning on) and the reply | the metrics the script reads | H-MEM and World Model reads | one script over that department's read tools | receipts, work report |
+| "Why plan 2?" | Lightning | | World Model graph (`explain_proposal`) | the lookup | approvals (status only) |
+| `SEND` / `CONFIRM` / `DECLINE` | none | | the decision, in Finance's memory and the proposing department's | | single-use codes |
+| `REVIEW` / `ADOPT` | Lightning reviews (reasoning on) | | lessons into H-MEM | the digest of work reports | reviews, recommendations, the `ADOPT` code |
 
 ## Quickstart (WSL / Linux, Node 24, Docker)
 

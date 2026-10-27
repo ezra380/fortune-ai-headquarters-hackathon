@@ -1,7 +1,7 @@
 # The HQ Manager
 
-Status: built on branch `hq/manager`; `main.ts` still runs with `codeMode: null` and a TEMP profiles stub until the
-profiles lane merges (see "Wiring"). Synthetic data only.
+Status: merged into `hq/foundation`; the worker runs with the real profiles and the Code Mode runner (script step with
+reasoning on). Synthetic data only.
 
 The HQ Manager is the sixth assistant id (`manager`). It has **no phone number and no person**: it reaches the owner
 through Owner HQ's number. It reads what the other assistants did, recommends changes, and keeps the ones the owner
@@ -30,11 +30,11 @@ A retried task resumes: the stored review is reused (no model is asked again), t
 
 ## Questions through Code Mode
 
-The owner's free text (when the front door picks the owner assistant or intent `status`) and the finance owner's free
-text are answered in two steps: a Code Mode lookup with that assistant's read tools (`<id>.lookup`), then one model
-call that words the answer (`<id>.answer`). The answer's numbers are traced to the lookup's result; if the answer
-fails the trace, or the model fails, the owner gets the facts as they are ("Here's what I found: ...") and the receipt
-says `refused`. A salon or online sender's question is saved as before.
+A question is answered in two steps: a Code Mode lookup with the answering assistant's read tools (`<id>.lookup`), then
+one model call that words the answer (`<id>.answer`). The owner's question goes to the department the front door names
+(Owner HQ, Finance, Online, Salon, or the manager); a department head's question goes to her own assistant only. The
+answer's numbers are traced to the lookup's result, with one correction round; if it still fails, or the model fails,
+the person gets the facts as they are ("Here's what I found: ...") and the receipt says `refused`.
 
 ## The number trace (`numberTrace` in `reports.ts`)
 
@@ -77,9 +77,9 @@ bodies (only plan titles). A profile lists the names it allows; `pick` throws on
 | `open_items` | `{}` | open tasks and pending approvals per assistant (counts) |
 | `latest_proposal` | `{}` | the newest plans: short id, titles, cited metric ids, decided or not |
 
-## Wiring (what is left for the merge)
+## Wiring
 
-`WorkerDeps` has two new fields. `main.ts` sets them to a TEMP stub; the profiles lane replaces it.
+`WorkerDeps` has two fields for this. `main.ts` fills them from `createCodeModeRunner` and `loadProfiles` (`packages/profiles`).
 
 ```ts
 codeMode: CodeModeRunner | null;   // null: the steps that need it fail with a plain sentence
@@ -102,3 +102,4 @@ The review needs `profiles.reads('manager')` to include tools that can see the r
 ## Environment
 
 - `REVIEW_MAX_TOKENS` (default 8000): the review writer's output cap.
+- `CODE_THINKING` (default on): `off` makes every Code Mode script step answer without reasoning first.

@@ -10,12 +10,14 @@ review (the builder never approves its own work).
 
 | Lane | Agent | Branch | Runs where | Owns (may edit) |
 |---|---|---|---|---|
-| **A: Foundation** | Claude Code | `hq/foundation` | WSL, main checkout `~/fortune-ai-headquarters-hackathon` | `packages/contracts`, `packages/brain`, `packages/models`, `packages/codemode`, `packages/delivery`, `apps/worker`, `supabase/`, `scripts/`, `docs/` (except `docs/research` written for A by D), root config |
+| **A: Foundation** | Claude Code | `hq/foundation` | WSL, main checkout `~/fortune-ai-headquarters-hackathon` | `packages/contracts`, `packages/brain`, `packages/models`, `packages/codemode`, `packages/profiles`, `packages/delivery`, `apps/worker`, `supabase/`, `scripts/`, `docs/` (except `docs/research` written for A by D), root config |
 | **B: Admin console** | Cursor (optional) | `hq/cursor-console` | WSL worktree `~/fahq-cursor` | `apps/console` only |
 | **D: Reader** | Gemini CLI | none | WSL, read-only | writes only `docs/research/*.md` when asked by lane A |
 
 *Oct 26: the Codex lane (C) was dropped; lane A took over `packages/delivery` and `docs/submission`.
-Later the same evening lane A also took `packages/data` (Zetaris); Cursor keeps only the console.*
+Later the same evening lane A also took `packages/data` (Zetaris); Cursor keeps only the console.
+Oct 26–27: lane A ran its own build lanes in WSL worktrees (`~/fahq-l1` … `~/fahq-pb1`), each a builder, a senior
+review and one fix round, merged into `hq/foundation` by lane A.*
 
 **Coordination:** Claude and Cursor talk through `~/fahq-shared/coordination.md`, an append-only log
 outside both checkouts. Cursor posts READY-FOR-REVIEW with a commit hash after each green step; Claude
@@ -49,11 +51,11 @@ answers with REVIEW (GREEN / GREEN-WITH-NOTES / RED) and answers QUESTION and CO
   - a synthetic generator for the salon book, online orders, marketing spend and email revenue;
   - a local read-only JSON API server for them;
   - idempotent Zetaris setup scripts (one Lightning database per source, REST tables, views, a Virtual
-    Data Mart `finance_mart`, one data-quality rule);
+    Data Mart, `fortune_demo_finance_mart`, one data-quality rule);
   - an adapter that returns `Metric[]` with stable IDs and a query hash;
   - tests;
   - then `apps/console`: the owner-only **Admin console**, with one sub-tab per assistant department
-    (see `docs/architecture.md` §7).
+    (see `docs/architecture.md` §8).
 - **A (also):**
   - `packages/delivery` implements `DeliveryPort`: proposal PDF (pdf-lib), PrintNode printing (dry-run
     unless configured), and a Twilio SMS sender that refuses unregistered recipients and is idempotent per

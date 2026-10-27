@@ -1,48 +1,79 @@
 # Fortune AI Headquarters — Architecture
 
-Status: **foundation under construction** (branch `hq/foundation`, Oct 26–27, 2026). This file is the
+Status: **foundation built** (branch `hq/foundation`, Oct 26–27, 2026; 524 tests). This file is the
 source of truth for every agent working in this repository. Lane ownership is in [`LANES.md`](LANES.md).
 Live vs mock status is recorded in the README; nothing here claims a component works until its tests pass.
+Where this is headed: [`roadmap.md`](roadmap.md).
 
 ## 1. What it is
 
 A company brain and a team of AI assistants for a family-run wig business with two separate businesses: a
-salon and an online store. Three owners each get an assistant: the online owner, the head stylist and the
-finance owner. Assistants **pass proposals, never orders**, and a person decides every consequential step
-with a one-time code. Every AI tool (Claude, Cursor, Codex, Gemini, ChatGPT) reads the same brain through
-**one MCP door**. Cloudflare's **Code Mode** turns that door into a single typed `code` tool, so an agent
-can do many lookups in one sandboxed script instead of many model round trips.
+salon and an online store. Each department has its own assistant: **Owner HQ** (the owner's), **Finance**,
+**Online** and the **Salon** (a stand-in for the head stylist's own assistant, on synthetic data). The **HQ
+Manager** sits under Owner HQ: it reads what every assistant did and recommends changes. Assistants **pass
+proposals, never orders**, and a person decides every consequential step with a one-time code. Every AI tool
+(Claude, Cursor, Codex, Gemini, ChatGPT) reads the same brain through **one MCP door**. Cloudflare's **Code
+Mode** turns reads into one sandboxed script instead of many model round trips, inside the worker as well as
+at the door.
 
 All data in this repository is **synthetic**. No customer, staff or family records, and no production
 credentials, are ever used here.
 
 ## 2. The flagship workflow (Track 02: "The Agent That Can Explain Why")
 
-1. The owner texts his assistant: *"Ask the finance assistant for three aggressive plans to double profit
-   this month."*
+1. The owner texts Owner HQ: *"Get me three plans to double profit this month."*
 2. A Supabase Edge Function verifies the Twilio signature, stores the task once (keyed by `MessageSid`) and
    answers "Working on it" within about a second. **No model runs inside the webhook.**
-3. The worker claims the task (lease + `SKIP LOCKED`). The **front door** (Nemotron Lightning, shaped like
-   Meterless Scout) classifies intent, risk and target assistant. Anything that touches money, customers or
-   ads needs an **execution contract** signed by a person.
-4. The owner's assistant sends a **request** to the finance assistant through the mailbox.
-5. The finance assistant:
-   - pulls metrics from **Zetaris**, a federated, read-only view over separately owned sources (salon book,
-     online orders, marketing spend). Salon and online are joined for analysis, never merged into one store;
-   - recalls past decisions from its own **Meterless H-MEM** memory;
-   - asks **Nemotron 3 Ultra** for exactly three plans, as strict JSON.
-6. **Every number is checked.**
-   - Evidence numbers must equal the Zetaris metric they cite.
-   - Projections must equal `metric × factor`.
-   - A single claim may not mix salon and online numbers.
+3. The worker claims the task (lease + `SKIP LOCKED`, renewed while it works). A **safety screen**
+   (`nemotron-3.5-content-safety`, fails closed) and the **front door** (Nemotron Lightning) start together;
+   the front door's answer is used only if the screen says safe. It reads intent (plans, question, status)
+   and the target department.
+4. **The departments propose together.** Owner HQ posts one request to Finance, Online and the Salon through
+   the mailbox, and one round task collects them (`apps/worker/src/rounds.ts`). Each department:
+   - reads only its own slice of the metrics from **Zetaris**, a federated, read-only view over separately
+     owned sources (salon book, online orders, marketing spend). Salon and online are never merged;
+   - recalls its own past decisions and adopted lessons from its **Meterless H-MEM** memory;
+   - asks **Nemotron 3 Ultra** for three plans, as strict JSON.
+5. **Every number is checked**, per department and again on the final set:
+   - Evidence numbers must equal the Zetaris metric they cite; projections must equal `metric × factor`.
+   - No sentence mixes a salon number and an online number.
    - Plans that contradict an approved memory are flagged.
-7. The proposal is recorded in the **Meterless World Model** (the shared record), rendered as a PDF,
-   printed if a printer is configured, and summarized by text.
+6. **Owner HQ picks three** (`synthesis.ts`): one model call ranks the departments' plans and writes a reason
+   for each; it can reorder plans but never change a number, and its reasons pass the same checks. If it
+   fails twice, a fixed rule picks instead, and the text says so.
+7. The final proposal is recorded in the **Meterless World Model** with a link to the department each plan
+   came from, rendered as a PDF, printed if a printer is configured, and summarized by text.
 8. The owner replies `SEND 2 <code>`. The finance owner gets plan 2 and replies `CONFIRM <code>` or
-   `DECLINE <code>`. The decision is recorded and promoted to long-term memory. **Nothing moves money,
-   messages a customer or changes an ad.**
+   `DECLINE <code>`. The decision is remembered by Finance and by the department the plan came from.
+   **Nothing moves money, messages a customer or changes an ad.**
+9. **Explain why.** "Why plan 2?" is answered from the World Model graph (`explain_proposal`): who asked,
+   which department proposed it, why it was picked, the metrics it cited with their Zetaris view and query
+   hash, and who decided. Never a code or a phone number.
 
-## 3. Components
+## 3. Assistants: profiles, Code Mode, the mailbox and who decides
+
+- **Profiles** (`packages/profiles`). Each assistant has one `SKILL.md` (its job and its read-only rules), a
+  model for each job (route, plan, code, answer, review) and a fixed list of read tools. No assistant has a
+  write tool: proposals, reports and reviews are fixed code paths in the worker.
+- **Code Mode inside the worker** (`packages/codemode`). A question to any department is a Code Mode lookup:
+  the model writes one script against that profile's typed read API, the QuickJS sandbox runs it, and only
+  the small result goes back. A second call words the answer; its numbers are traced to the result, with one
+  correction round, and otherwise the person gets the facts as they are. Live runs: 73–88% fewer tokens than
+  classic tool calling, but less reliable answers with this small model
+  ([summary](research/codemode-savings-summary-2026-10-27.md)).
+- **Assistants talk through the API, never by text.** A request, a proposal, a report or a decision between
+  assistants is a typed row in the Supabase mailbox, keyed so a retry never duplicates it. Texts go only
+  between a person and their own assistant's number. One department reading another's numbers does so
+  through its own read tools, never by asking the other assistant.
+- **Who decides.** The owner can ask any department anything ("ask the salon how Tuesdays went"). A
+  department head asks only her own assistant, on her own data. A decision in someone's field needs that
+  person's code: a plan for Finance is confirmed by the finance owner, not the owner.
+- **The HQ Manager** ([`manager.md`](manager.md)). Every finished task leaves a work report (steps, models,
+  tokens, rule-based suggestions). `REVIEW` asks the manager to read them through Code Mode and recommend at
+  most three changes; `ADOPT <n> <code>` makes one a standing lesson in that assistant's memory, which its
+  plan writer then receives. The manager recommends; only the owner's code changes anything.
+
+## 4. Components
 
 | Component | Path | Sponsor / tech | Lane |
 |---|---|---|---|
@@ -51,14 +82,15 @@ credentials, are ever used here.
 | SMS webhook (ack + enqueue) | `supabase/functions/inbound` | Supabase Edge Functions, Twilio | A |
 | Shared record + per-assistant memory | `packages/brain` | **Meterless World Model + H-MEM** | A |
 | Model clients, budget caps, receipts | `packages/models` | **NVIDIA Nemotron** (Ultra, Lightning); optional xAI Grok reviewer | A |
-| Code Mode: sandbox executor + brain MCP server | `packages/codemode` | **Cloudflare `@cloudflare/codemode`**, MCP SDK, QuickJS (WASM) | A |
-| Assistant runtime: claim loop, front door, handlers | `apps/worker` | — | A |
+| Code Mode: sandbox executor, the worker's script runner, brain MCP server | `packages/codemode` | **Cloudflare `@cloudflare/codemode`**, MCP SDK, QuickJS (WASM) | A |
+| Assistant profiles: one read-only skill, models per job, read tools | `packages/profiles` | — | A |
+| Assistant runtime: claim loops, safety screen, front door, department rounds, Owner HQ's pick, questions, HQ Manager | `apps/worker` | **NVIDIA Nemotron** content safety | A |
 | Synthetic business data, local source APIs, Zetaris setup, Zetaris adapter | `packages/data` | **Zetaris** (REST tables, views, Virtual Data Mart, data-quality rule) | B (Cursor) |
 | Admin console (owner-only, one sub-tab per department) | `apps/console` | Reads the brain over MCP; queue tables server-side | B (Cursor), after data |
 | PDF, printing, SMS sender | `packages/delivery` | pdf-lib, PrintNode (optional), Twilio REST | A (Claude) |
 | Submission write-up and deck outline | `docs/submission` | — | A (Claude) |
 
-## 4. Where state lives
+## 5. Where state lives
 
 | Kind of state | Owner | Notes |
 |---|---|---|
@@ -68,7 +100,7 @@ credentials, are ever used here.
 | Business numbers | The sources themselves, read through Zetaris | Read-only; every metric carries its query hash |
 | Secrets | `.env.local` (mode 600), Supabase secrets | Never in git, logs, receipts or prompts |
 
-## 5. Invariants (each has a test)
+## 6. Invariants (each has a test)
 
 1. **Synthetic only.** Every record ID starts with `demo-`. No production credentials anywhere.
 2. **The webhook is fast and dumb.** Valid Twilio signature or 403. Unknown sender gets a refusal and no
@@ -94,8 +126,13 @@ credentials, are ever used here.
 9. **Honest receipts.** Every step records run, assistant, model, data source, timing, cost and
    live/mock.
 10. **Spending caps** per task and per day, enforced before the call.
+11. **A safety screen in front of every free text.** No router, plan writer or answer model acts on a text
+    the screen did not call safe; a screen that cannot be reached counts as not safe. Commands with codes are
+    parsed before any model and never reach one.
+12. **Read-only assistants.** Every tool an assistant's script can call reads; each one blanks phone numbers
+    and codes in what it returns.
 
-## 6. Runtime topology
+## 7. Runtime topology
 
 - **Development:** Supabase local stack (Docker, via the `supabase` CLI) on the same machine as Zetaris
   (Docker) and the worker (Node 24, WSL).
@@ -109,7 +146,7 @@ credentials, are ever used here.
   `code` tool. Code runs in a QuickJS WebAssembly sandbox implementing Code Mode's `Executor`
   interface. On Cloudflare, `DynamicWorkerExecutor` (Worker Loader) replaces it with no other change.
 
-## 7. Departments and the Admin console
+## 8. Departments and the Admin console
 
 Each assistant is its own department, with its own text number, memory, mailbox and app view:
 
@@ -118,7 +155,8 @@ Each assistant is its own department, with its own text number, memory, mailbox 
 | Owner HQ | the owner's head assistant / manager | `TWILIO_FROM_OWNER_ASSISTANT` |
 | Finance Department | the finance owner's assistant (money decisions, marketing reports) | `TWILIO_FROM_FINANCE_ASSISTANT` |
 | Online Customer Service Department | the online customer-service manager | `TWILIO_FROM_ONLINE_ASSISTANT` |
-| Salon Department | Cindy, the head stylist's existing assistant (separate app) | her own number |
+| Salon Department | Cindy, the head stylist's existing assistant (separate app); here a stand-in on synthetic salon data | her own number |
+| HQ Manager | under Owner HQ: reviews the other assistants' work | none: it reaches the owner through Owner HQ |
 
 Every text gets an immediate acknowledgement from the webhook; the assistant's real work runs afterwards
 and replies when it is done.
@@ -139,9 +177,12 @@ Phone numbers show only their last four digits.
 The **Salon Department** sub-tab is reserved for Cindy, which is a separate, already-running app. In
 production it mirrors Cindy's own backend (her memory, her salon actions, her personal-to-business
 hand-offs) at the same admin level, with the head stylist's knowledge. Her family and personal data stay in
-her app; only salon work crosses into the business brain. For the event it is a labeled placeholder.
+her app; only salon work crosses into the business brain. For the event the worker runs a **Salon stand-in**:
+it proposes in rounds and answers the owner from the salon metrics only (`get_salon_metrics`), on synthetic
+data. The console's Salon sub-tab is still the labeled placeholder (known gap: `apps/console/src/server.ts`
+returns the placeholder view for `salon`).
 
-## 8. Production path (planned, not built here)
+## 9. Production path (planned, not built here)
 
 - The four assistants (owner, salon, finance, online staff) move into the business's existing internal
   platform behind its existing sign-in and roles.
