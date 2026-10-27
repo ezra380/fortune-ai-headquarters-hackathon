@@ -1,6 +1,6 @@
 import { PERIOD_KEYS, type Period } from '@fahq/contracts';
 import { describe, expect, it } from 'vitest';
-import { SOURCES, VERSIONS } from '../src/finance-sql.ts';
+import { CONTAINER_V2, METRIC_BY_ID, PERIOD_VIEW_V2, SOURCES, VERSIONS, financeViewBody, periodSubsetBody, specOf } from '../src/finance-sql.ts';
 import { AS_OF, DERIVED, DERIVED_INPUTS, STANDING_METRICS, computeLayers, derivedViewBody, standingViewBody } from '../src/layers.ts';
 import { generateYear } from '../src/synthetic.ts';
 
@@ -17,11 +17,31 @@ const period = (p: Period, id: string) => layers.period.get(p)!.get(id);
 describe('derived view', () => {
   const body = derivedViewBody();
 
-  it('reads the period view once, names every derived metric once and holds one statement', () => {
-    expect(body.split('fortune_hq_v2.period_metrics').length - 1).toBe(1);
+  it('names every derived metric once and holds one statement', () => {
     for (const d of DERIVED) expect(body.split(`'${d.id}'`).length - 1, d.id).toBe(1);
     expect(body).not.toContain(';');
     expect(body).not.toContain('fortune_hq.');
+  });
+
+  // Review fix (blocker): the derived view pivoted the whole period view, so it paid for all 21 sources (the
+  // inbox's window, 14,077 page days) and passed Zetaris's five minutes. It now reads only its inputs' sources.
+  it('reads only the sources its inputs come from, each once, never the period view', () => {
+    expect(body).not.toContain(PERIOD_VIEW_V2);
+    const feeding = new Set(DERIVED_INPUTS.map((id) => METRIC_BY_ID.get(id)!.source));
+    expect([...feeding].sort()).toEqual(['ads', 'appointments', 'budgets', 'order_costs', 'orders', 'refunds']);
+    for (const s of VERSIONS[2].sources) {
+      const table = new RegExp(`${CONTAINER_V2}\\.${specOf(s, 2).table}(?![A-Za-z0-9_])`, 'g');
+      expect(body.match(table)?.length ?? 0, s).toBe(feeding.has(s) ? 1 : 0);
+    }
+    // Only the inputs are aggregated: no other period metric is named anywhere in the body.
+    const named = new Set([...body.matchAll(/'(m:[^']+)'/g)].map((m) => m[1]!));
+    for (const id of named) expect([...DERIVED_INPUTS, ...DERIVED.map((d) => d.id)], id).toContain(id);
+  });
+
+  it('reads its inputs with the period view\'s own SQL, and refuses a metric the period view does not serve', () => {
+    expect(periodSubsetBody(VERSIONS[2].metrics.map((m) => m.id))).toBe(financeViewBody(2));
+    expect(body).toContain(periodSubsetBody(DERIVED_INPUTS));
+    expect(() => periodSubsetBody(['m:online.mer'])).toThrow(/not a version 2 period metric: m:online.mer/);
   });
 
   it('reads only period metrics version 2 serves', () => {

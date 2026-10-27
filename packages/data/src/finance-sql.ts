@@ -333,11 +333,14 @@ export function groupedParts(d: MetricDef, s: SourceSpec, i: number): { inner: s
   }
 }
 
-/** One source: aggregate every metric per period in one scan, then unpivot to (period, metric_id, value). */
-function sourceSelect(source: Source, version: DataVersion): string {
+/**
+ * One source: aggregate every metric per period in one scan, then unpivot to (period, metric_id, value).
+ * With `only`, just those of the source's metrics (a layer that needs a few period numbers).
+ */
+function sourceSelect(source: Source, version: DataVersion, only?: ReadonlySet<string>): string {
   const s = specOf(source, version);
   const { periods, container, metrics } = VERSIONS[version];
-  const defs = metrics.filter((d) => d.source === source);
+  const defs = metrics.filter((d) => d.source === source && (!only || only.has(d.id)));
   const period = periodCase(s.date, periods);
   const [first, last] = [PERIODS[periods[0]!].from, PERIODS[periods[periods.length - 1]!].to];
   const table = `${container}.${s.table}`;
@@ -361,6 +364,19 @@ export function unpivot(defs: readonly { id: string }[], wide: string, name: str
 /** The body of a version's period view (version 1: fortune_hq.finance_metrics): one row per (period, metric). */
 export function financeViewBody(version: DataVersion = 1): string {
   return VERSIONS[version].sources.map((s) => sourceSelect(s, version)).join('\nUNION ALL\n');
+}
+
+/**
+ * Version 2's period totals of only the named metrics, from only the sources they come from: what a layer built
+ * on a few period numbers reads in place of the whole period view, so it never pays for the other sources (the
+ * inbox's window, the site's page days). Same SQL per metric as the period view, so the same values.
+ */
+export function periodSubsetBody(ids: readonly string[]): string {
+  const want = new Set(ids);
+  const defs = VERSIONS[2].metrics.filter((m) => want.has(m.id));
+  const unknown = ids.filter((id) => !defs.some((m) => m.id === id));
+  if (unknown.length > 0) throw new Error(`not a version 2 period metric: ${unknown.join(', ')}`);
+  return VERSIONS[2].sources.filter((s) => defs.some((m) => m.source === s)).map((s) => sourceSelect(s, 2, want)).join('\nUNION ALL\n');
 }
 
 const servedPeriod = (period: Period, version: DataVersion) => {

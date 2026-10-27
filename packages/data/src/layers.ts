@@ -1,6 +1,6 @@
 import { PERIOD_KEYS, type Period } from '@fahq/contracts';
 import {
-  CHANNEL_LABEL, CONTAINER_V2, PERIOD_VIEW_V2, aggSql, aggregate, computeAll, groupedParts, quoted, round, sourceRows, specOf, unpivot,
+  CHANNEL_LABEL, CONTAINER_V2, aggSql, aggregate, computeAll, groupedParts, periodSubsetBody, quoted, round, sourceRows, specOf, unpivot,
   type MetricAbout, type MetricDef, type Source, type SourceRows,
 } from './finance-sql.ts';
 import { CHANNEL_STANDING } from './channels.ts';
@@ -11,8 +11,9 @@ import { AD_CHANNELS, AS_OF, LAST_WEEK } from './synthetic.ts';
 
 // Version 2's two layers above the period totals, each its own Zetaris view and its own statement:
 // - derived: numbers made from other metrics: the budget left and used, revenue per ad dollar (same
-//   period), and the season index (the month against the year around it). One view that reads the period
-//   view once, never UNION'd with it (Spark rejects a statement that reads one exploded view twice).
+//   period), and the season index (the month against the year around it). One view that reads its inputs'
+//   sources once each, never UNION'd with the period view (Spark rejects a statement that reads one exploded
+//   view twice).
 // - standing: numbers as of the data date, whatever period is asked (period key 'standing').
 // The oracle computes both again in TypeScript from the same rows, so setup can prove the views.
 
@@ -137,15 +138,17 @@ function formulaSql(f: Exclude<Formula, { op: 'last_year' }>, col: (id: string) 
 }
 
 /**
- * The derived view's body: the period view read once and pivoted to one row per period (i0, i1, ...), the
- * formulas over it (the season index's average is a window over all thirteen rows, so asking one period
- * still averages the year), then the last-year indexes as LAG(…, 12) in a layer of their own (a window
- * cannot sit inside another), then unpivoted.
+ * The derived view's body: its inputs' period totals, read from only the sources they come from (never the
+ * whole period view: that paid for every source and passed Zetaris's five minutes live), pivoted to one row per
+ * period (i0, i1, ...), the formulas over it (the season index's average is a window over all thirteen rows, so
+ * asking one period still averages the year), then the last-year indexes as LAG(…, 12) in a layer of their own
+ * (a window cannot sit inside another), then unpivoted.
  */
 export function derivedViewBody(): string {
   const col = (id: string) => `i${DERIVED_INPUTS.indexOf(id)}`;
   const at = (id: string) => `m${DERIVED.findIndex((d) => d.id === id)}`;
-  const pivot = `SELECT period, ${DERIVED_INPUTS.map((id, i) => `MAX(CASE WHEN metric_id = '${id}' THEN value END) AS i${i}`).join(', ')} FROM ${PERIOD_VIEW_V2} GROUP BY period`;
+  const inputs = periodSubsetBody(DERIVED_INPUTS);
+  const pivot = `SELECT period, ${DERIVED_INPUTS.map((id, i) => `MAX(CASE WHEN metric_id = '${id}' THEN value END) AS i${i}`).join(', ')} FROM (${inputs}) c GROUP BY period`;
   const own = `SELECT period, ${DERIVED.flatMap((d, i) => (d.formula.op === 'last_year' ? [] : [`CAST(${formulaSql(d.formula, col)} AS DOUBLE) AS m${i}`])).join(', ')} FROM (${pivot}) p`;
   const lagged = `SELECT period, ${DERIVED.map((d, i) => (d.formula.op === 'last_year' ? `LAG(${at(d.formula.index)}, 12) OVER (ORDER BY period) AS m${i}` : `m${i}`)).join(', ')} FROM (${own}) o`;
   return unpivot(DERIVED, lagged, 'derived');
