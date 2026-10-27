@@ -27,7 +27,7 @@ describe('no medical or hair-loss data anywhere', () => {
       }
     }
     for (const t of V2_TABLES) for (const c of t.cols) expect(c, t.table).not.toMatch(BANNED);
-  });
+  }, 60_000); // every value of every row: the site's 14,077 page days alone are 140,000 checks
 
   it('in any allowed value of any enumerated column, and every good row keeps to those values', () => {
     for (const [column, values] of Object.entries(SOURCE_ENUMS)) for (const v of values) expect(v, column).not.toMatch(BANNED);

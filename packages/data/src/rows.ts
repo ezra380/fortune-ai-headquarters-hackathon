@@ -262,16 +262,18 @@ function returnCases(read: Extract<RowRead, { table: 'return_cases' }>): RowQuer
     column('reviews', 'reviews'), { ...column('lowestRating', 'lowest_rating'), nullable: true }, text('reviewTopics', 'review_topics'),
     column('messages', 'messages'), text('messageTopics', 'message_topics'),
   ];
+  // The refunds are read once (Spark refuses one exploded row view joined with itself): the customer's year is a window
+  // over that read, and the period is chosen after it.
   const sql = 'SELECT f.refund_id AS c0, f.order_id AS c1, f.customer_id AS c2, l.skus AS c3, f.reason AS c4, f.amount_usd AS c5, f.refund_date AS c6, '
-    + 'DATEDIFF(f.refund_date, o.order_date) AS c7, COALESCE(y.refunds_365d, 0) AS c8, COALESCE(v.reviews, 0) AS c9, v.lowest_rating AS c10, v.review_topics AS c11, '
+    + 'DATEDIFF(f.refund_date, o.order_date) AS c7, f.refunds_365d AS c8, COALESCE(v.reviews, 0) AS c9, v.lowest_rating AS c10, v.review_topics AS c11, '
     + 'COALESCE(m.messages, 0) AS c12, m.message_topics AS c13 '
-    + `FROM (SELECT refund_id, order_id, customer_id, reason, amount_usd, refund_date FROM ${REFUNDS} WHERE ${valid('refunds')} AND refund_date BETWEEN '${from}' AND '${to}') f `
+    + `FROM (SELECT refund_id, order_id, customer_id, reason, amount_usd, refund_date, COUNT(CASE WHEN refund_date BETWEEN '${YEAR_TO_DATE.from}' AND '${YEAR_TO_DATE.to}' THEN 1 END) `
+    + `OVER (PARTITION BY customer_id) AS refunds_365d FROM ${REFUNDS} WHERE ${valid('refunds')}) f `
     + `JOIN (SELECT order_id AS placed_id, order_date FROM ${ORDERS} WHERE ${valid('orders')}) o ON o.placed_id = f.order_id `
     + `LEFT JOIN (SELECT order_id AS lined_id, ${joinedSql('sku')} AS skus FROM ${LINES} WHERE ${valid('order_lines')} GROUP BY order_id) l ON l.lined_id = f.order_id `
-    + `LEFT JOIN (SELECT customer_id AS refunded_id, COUNT(*) AS refunds_365d FROM ${REFUNDS} WHERE ${valid('refunds')} AND refund_date BETWEEN '${YEAR_TO_DATE.from}' AND '${YEAR_TO_DATE.to}' GROUP BY customer_id) y ON y.refunded_id = f.customer_id `
     + `LEFT JOIN (SELECT customer_id AS reviewer_id, COUNT(*) AS reviews, MIN(rating) AS lowest_rating, ${joinedSql('topic')} AS review_topics FROM ${REVIEWS} WHERE ${valid('reviews')} GROUP BY customer_id) v ON v.reviewer_id = f.customer_id `
     + `LEFT JOIN (SELECT customer_id AS writer_id, COUNT(*) AS messages, ${joinedSql('intent')} AS message_topics FROM ${MESSAGES} WHERE ${valid('messages')} AND direction = 'inbound' GROUP BY customer_id) m ON m.writer_id = f.customer_id `
-    + 'ORDER BY c6, c0';
+    + `WHERE f.refund_date BETWEEN '${from}' AND '${to}' ORDER BY c6, c0`;
   const rows = (b: SourceRows): Out[] => {
     const all = sourceRows(b);
     const ok = (source: Source) => (r: Row) => specOf(source, 2).valid(r);

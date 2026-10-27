@@ -201,7 +201,11 @@ describe('row reads: the rows behind the standing numbers', () => {
     expect(bad({ table: 'return_cases', period: "2026-09' --" })).toThrow('period must be one of');
     expect(bad({ table: 'journey', period: '2026' })).toThrow('period must be one of');
     expect(rowSql(rowQuery({ table: 'journey', period: '2026-09' }))).toMatch(/visit_date BETWEEN '2026-09-01' AND '2026-09-30' GROUP BY source ORDER BY c1 DESC, c0$/);
-    expect(rowSql(rowQuery({ table: 'return_cases', period: '2026-09' }))).toMatch(/refund_date BETWEEN '2026-09-01' AND '2026-09-30'.* refund_date BETWEEN '2025-10-27' AND '2026-10-26'.* ORDER BY c6, c0$/);
+    // The refunds are read once (Spark refuses an exploded row view joined with itself, seen live 13:44 ET): the
+    // customer's year is a window over that read, and the period is chosen after it.
+    const cases = rowSql(rowQuery({ table: 'return_cases', period: '2026-09' }));
+    expect(cases).toMatch(/refund_date BETWEEN '2025-10-27' AND '2026-10-26' THEN 1 END\) OVER \(PARTITION BY customer_id\).* WHERE f\.refund_date BETWEEN '2026-09-01' AND '2026-09-30' ORDER BY c6, c0$/);
+    for (const view of ['online_refunds', 'online_orders', 'online_order_lines', 'online_reviews', 'support_messages']) expect(cases.split(`fortune_hq_v2.${view} `).length - 1, view).toBe(1);
     // The products read takes its period from the fixed list, and its order is one of two.
     expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'worst' }))).toMatch(/order_date BETWEEN '2026-09-01' AND '2026-09-30'.* snapshot_date = '2026-09-30'.* ORDER BY c6, c0$/);
     expect(rowSql(rowQuery({ table: 'products', period: '2026-09', sort: 'best' }))).toMatch(/ORDER BY c6 DESC, c0$/);
