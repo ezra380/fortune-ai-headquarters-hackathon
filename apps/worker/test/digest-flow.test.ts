@@ -541,7 +541,8 @@ describe.skipIf(!api)('BRIEF, the CEO digest, STATUS and the daily clock (real d
     const first = deps.brain.record.explainProposal(`${doc.id}:1`);
     expect(first.proposal).toMatchObject({ titles: ['Hold Google spend'], dataSource: row.data_source });
     expect(first.cites).toEqual(['m:online.ads.google.roas']);
-    expect(first.decisions).toMatchObject([{ by: 'Demo Finance Owner', action: 'approved', planRank: 1 }]);
+    const financeName = (await rows('select name from public.people where id = $1', [PERSON.finance]))[0].name; // the seed's stand-in, or a demo's name
+    expect(first.decisions).toMatchObject([{ by: financeName, action: 'approved', planRank: 1 }]);
     expect(deps.brain.record.explainProposal(`${doc.id}:3`).decisions).toMatchObject([{ action: 'approved', planRank: 3 }]);
     expect(deps.brain.record.explainProposal(`${doc.id}:2`).proposal).toBeNull();
     expect((await stepsOf(approved.task.id)).map((s) => [s.step, s.outcome, s.detail])).toEqual([

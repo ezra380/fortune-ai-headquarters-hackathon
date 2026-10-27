@@ -50,11 +50,14 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
   let model: ReturnType<typeof scriptedModel>;
   let ownerPhone = '';
   let financePhone = '';
+  // The names as the database holds them (the seed's stand-ins, or names registered for a demo).
+  let ownerName = '';
+  let financeName = '';
 
   beforeAll(async () => {
-    const phones = await pool.query(`select assistant_id, phone from public.people where assistant_id in ('owner','finance')`);
-    for (const r of phones.rows as { assistant_id: string; phone: string }[]) {
-      if (r.assistant_id === 'owner') ownerPhone = r.phone; else financePhone = r.phone;
+    const phones = await pool.query(`select assistant_id, phone, name from public.people where assistant_id in ('owner','finance')`);
+    for (const r of phones.rows as { assistant_id: string; phone: string; name: string }[]) {
+      if (r.assistant_id === 'owner') { ownerPhone = r.phone; ownerName = r.name; } else { financePhone = r.phone; financeName = r.name; }
     }
     deps = {
       store: createStore(api!.url, api!.key),
@@ -130,7 +133,7 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     expect(proposalSms).toContain('3. [Finance] Push Google ads on Mazali (Google spend after the raise: $2,160)');
     expect(proposalSms).not.toContain("couldn't produce");
     expect(proposalSms).not.toContain('picked by rule');
-    expect(proposalSms.endsWith(`Reply SEND <1-3> ${code} to send one to Demo Finance Owner. The code expires in 15 minutes.`)).toBe(true);
+    expect(proposalSms.endsWith(`Reply SEND <1-3> ${code} to send one to ${financeName}. The code expires in 15 minutes.`)).toBe(true);
 
     // One request to each department, one proposal back from each, and the final three from Owner HQ.
     const rows = await messages(roundId);
@@ -214,9 +217,9 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     expect(why.plans[0]!.why).toBe('Ads already return 2.4x, so more spend has room.');
     expect(why.cited).toContainEqual({ id: 'm:online.ads.google.roas', label: 'Google ad return', value: 2.4, unit: 'ratio', business: 'online' });
     expect(why.cited).toContainEqual({ id: 'm:salon.revenue.wash_set', label: 'Salon wash and set revenue', value: 6200, unit: 'usd', business: 'salon' });
-    expect(why.record).toMatchObject({ askedBy: 'Demo Owner', request: { text: 'Give me three plans to grow profit.', from: 'owner' } });
+    expect(why.record).toMatchObject({ askedBy: ownerName, request: { text: 'Give me three plans to grow profit.', from: 'owner' } });
     expect(why.record!.cites).toHaveLength(4);
-    expect(why.decisions.map((d) => [d.by, d.action, d.planRank])).toEqual([['Demo Owner', 'forwarded', 1], ['Demo Finance Owner', 'approved', 1]]);
+    expect(why.decisions.map((d) => [d.by, d.action, d.planRank])).toEqual([[ownerName, 'forwarded', 1], [financeName, 'approved', 1]]);
     expect(why.approvals.map((a) => [a.action, a.status])).toEqual([['forward_plan', 'signed'], ['decide_plan', 'signed']]);
     expect(why.notes).toEqual([]);
     expect(JSON.stringify(why)).not.toMatch(/\b\d{6}\b/);
@@ -243,7 +246,7 @@ describe.skipIf(!api)('plans from every department, end to end (real DB + real M
     expect(proposalSms).toContain('3. [Salon] Fill the quiet weekday gaps');
     expect(proposalSms).not.toContain('[Online]');
     expect(proposalSms).toContain("Online couldn't produce checked plans.");
-    expect(proposalSms.endsWith(`Reply SEND <1-3> ${code} to send one to Demo Finance Owner. The code expires in 15 minutes.`)).toBe(true);
+    expect(proposalSms.endsWith(`Reply SEND <1-3> ${code} to send one to ${financeName}. The code expires in 15 minutes.`)).toBe(true);
 
     expect(model.of('online.plans')).toHaveLength(2); // its one correction round, then a plain failure
     expect(JSON.parse(model.of('online.plans')[1]!.user).previousAttemptRejectedBecause[0]).toContain('says 99999');
