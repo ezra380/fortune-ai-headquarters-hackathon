@@ -705,6 +705,26 @@ describe.skipIf(!api)('division briefs (real database and Meterless; models, Cod
     }
   });
 
+  // Second-key review of merge wave 1: the spend is bound to the look. A code spent for another brief than the one the look
+  // checked records nothing (one rule with ADOPT: a command is applied whole or not at all).
+  it('records nothing when the code spent is not the one the look checked', async () => {
+    const first = await finished();
+    const second = await finished();
+    const store = deps.store;
+    deps.store = { ...store, peekApprovalCode: (a) => store.peekApprovalCode({ ...a, code: first.code }) };
+    try {
+      const asked = await text(HEAD.finance, `APPROVE 1 ${second.code}`);
+      expect(asked.outcome).toEqual({ status: 'failed', error: 'the code was spent for another message than the one checked before spending: nothing was recorded' });
+      expect(asked.reply).toBe('Your code was used up, but not for the brief it was checked against, so nothing was recorded. Text BRIEF for a new brief and a new code.');
+      for (const { key } of [first, second]) {
+        const doc = await message(`briefdoc:${key}`);
+        expect(await rows(`select id from public.assistant_messages where dedupe_key like $1`, [`action-decision:${doc.id}:%`]), key).toEqual([]);
+      }
+    } finally {
+      deps.store = store;
+    }
+  });
+
   it('looks at a code without spending it: nothing is changed or counted, and only the right person, action and time see it', async () => {
     const { key, code } = await finished();
     const doc = await message(`briefdoc:${key}`);

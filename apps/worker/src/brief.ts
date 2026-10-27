@@ -737,16 +737,22 @@ export async function approveAction(
     return done;
   }
   const { person, answer } = await approverOf(used.approver_person_id, sender, task, deps);
+  // States the look rules out, asserted after the spend (reachable only by a replayed task or a hash collision; a code
+  // taken between the look and the spend makes the spend refuse): nothing is recorded, the receipt and the task say why.
+  const nothing = async (error: string, head: string, assistant: AssistantId) => {
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant, started, outcome: 'failed', detail: error });
+    await answer(`${head}, so nothing was recorded. Text BRIEF for a new brief and a new code.`);
+    return fail(error);
+  };
+  if (pending && pending.message_id !== used.message_id) {
+    return nothing('the code was spent for another message than the one checked before spending: nothing was recorded', 'Your code was used up, but not for the brief it was checked against', sender.assistant_id);
+  }
   const behind = await briefBehind(deps, used.message_id);
   if (!behind) return fail('the approval does not point at a brief');
   const { doc, row } = behind;
   const lacking = missingRanks(row, command.ranks);
   if (lacking.length > 0) {
-    // The look before spending rules this out; if the code was taken a moment earlier, this says so instead of recording half.
-    const error = `the brief has no action ${lacking.join(', ')}, though the code was spent for it: nothing was recorded`;
-    await receipt(deps, { runId, taskId: task.id, step: 'approval.action', assistant: row.division, started, outcome: 'failed', detail: error });
-    await answer(`This brief has no action ${lacking.join(' or ')}, and the code was already used up, so nothing was recorded. Text BRIEF for a new brief and a new code.`);
-    return fail(error);
+    return nothing(`the brief has no action ${lacking.join(', ')}, though the code was spent for it: nothing was recorded`, `This brief has no action ${lacking.join(' or ')}, and the code was already used up`, row.division);
   }
   const assistant = DIVISION_ASSISTANT[row.division];
   // The text's own arrival time, so a task that runs again records the same moment.

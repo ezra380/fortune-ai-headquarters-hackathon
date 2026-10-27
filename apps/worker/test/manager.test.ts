@@ -573,13 +573,13 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     // peek_approval_code), so one wrong digit never costs the owner his code.
     const { code } = await askForReview();
     const adoptSid = await textIn(ownerPhone, `ADOPT 2,3 ${code}`);
-    expect(lastTo(ownerPhone)).toBe('This review has no recommendation 3. Nothing was adopted, and your code still works.');
-    expect((await stepsOf((await taskOfText(adoptSid)).id)).map((s) => [s.step, s.outcome, s.detail])).toEqual([['approval.adopt', 'refused', 'the review has no recommendation 3; the code was not spent']]);
+    expect(lastTo(ownerPhone)).toBe('This review has no open recommendation 3. Nothing was adopted, and your code still works.');
+    expect((await stepsOf((await taskOfText(adoptSid)).id)).map((s) => [s.step, s.outcome, s.detail])).toEqual([['approval.adopt', 'refused', 'the review has no open recommendation 3; the code was not spent']]);
     await textIn(ownerPhone, `ADOPT 2 ${code}`); // the same code still works
     expect(lastTo(ownerPhone)).toBe("Adopted: 2 (online). They're now in place.");
     const again = await askForReview();
     await textIn(ownerPhone, `ADOPT 3 ${again.code}`);
-    expect(lastTo(ownerPhone)).toBe('This review has no recommendation 3. Nothing was adopted, and your code still works.');
+    expect(lastTo(ownerPhone)).toBe('This review has no open recommendation 3. Nothing was adopted, and your code still works.');
     // With the rule on, rank 1 is a lesson the manager applied without a code: the owner's code does not need to, and does not, redo it.
     use.rule = true;
     const third = await askForReview();
@@ -589,6 +589,66 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect(profileTables.history).toHaveLength(versions); // online already reads it (rank 2 above): nothing is written, and rank 1 is not redone
     const latest = (await pool.query(`select status, applied_by, applied_version from public.recommendations where rank = 2 and assistant_id = 'online' order by created_at desc limit 1`)).rows[0];
     expect(latest).toEqual({ status: 'adopted', applied_by: 'owner', applied_version: null }); // in force, and no version was needed
+  });
+
+  // Second-key review of merge wave 1. A recommendation the program closed (listed under "I did not apply") passed the
+  // look before the spend, so ADOPT 1,2 spent the code on a half approval. And after the spend, ADOPT adopted the ranks
+  // that existed where APPROVE records nothing: the same text got two outcomes depending on timing.
+  describe('ADOPT is applied whole or not at all', () => {
+    const recsOf = async (task: TaskRow) => (await pool.query(
+      `select r.rank, r.status from public.recommendations r join public.manager_reviews m on m.id = r.review_id where m.review_key = $1 order by r.rank`, [`review:${task.id}`])).rows;
+    const approvalOf = async (task: TaskRow) => (await pool.query(
+      `select a.status, a.failed_attempts from public.approvals a join public.manager_reviews m on m.message_id = a.message_id where m.review_key = $1`, [`review:${task.id}`])).rows;
+    const outcomeOf = async (messageSid: string) => (await pool.query('select status, last_error from public.tasks where idempotency_key = $1', ['sms:' + messageSid])).rows[0];
+
+    it('refuses a rank the program closed before the code is spent, and the same code then adopts an open one', async () => {
+      const { code, task } = await askForReview();
+      await pool.query(
+        `update public.recommendations set status = 'expired', detail = detail || '{"refused":"closed by the test"}'::jsonb
+          where rank = 1 and review_id = (select id from public.manager_reviews where review_key = $1)`, [`review:${task.id}`]);
+      const sid = await textIn(ownerPhone, `ADOPT 1,2 ${code}`);
+      expect(lastTo(ownerPhone)).toBe('This review has no open recommendation 1. Nothing was adopted, and your code still works.');
+      expect((await stepsOf((await taskOfText(sid)).id)).map((s) => [s.outcome, s.detail])).toEqual([['refused', 'the review has no open recommendation 1; the code was not spent']]);
+      expect(await recsOf(task)).toEqual([{ rank: 1, status: 'expired' }, { rank: 2, status: 'proposed' }]);
+      expect(await approvalOf(task)).toEqual([{ status: 'pending', failed_attempts: 0 }]);
+      await textIn(ownerPhone, `ADOPT 2 ${code}`);
+      expect(lastTo(ownerPhone)).toBe("Adopted: 2 (online). They're now in place.");
+    });
+
+    it('adopts nothing when a spent code finds a rank missing (a state the look before spending prevents)', async () => {
+      const { code, task } = await askForReview();
+      const store = deps.store;
+      deps.store = { ...store, peekApprovalCode: async () => null }; // as if the look found nothing: the spend goes ahead
+      try {
+        const sid = await textIn(ownerPhone, `ADOPT 2,3 ${code}`);
+        const error = 'the review has no recommendation 3, though the code was spent for it: nothing was adopted';
+        expect(lastTo(ownerPhone)).toBe('This review has no recommendation 3, and the code was already used up, so nothing was adopted. Text REVIEW for a new review and code.');
+        expect(await outcomeOf(sid)).toEqual({ status: 'failed', last_error: error });
+        expect((await stepsOf((await taskOfText(sid)).id)).map((s) => [s.outcome, s.detail])).toEqual([['failed', error]]);
+        expect(await recsOf(task)).toEqual([{ rank: 1, status: 'proposed' }, { rank: 2, status: 'proposed' }]);
+        expect(await approvalOf(task)).toMatchObject([{ status: 'signed' }]);
+      } finally {
+        deps.store = store;
+      }
+    });
+
+    it('adopts nothing when the code spent is not the one the look checked', async () => {
+      const first = await askForReview();
+      const second = await askForReview();
+      const store = deps.store;
+      // The look sees the first review's code (rank 2 open there); the spend then finds the second review's.
+      deps.store = { ...store, peekApprovalCode: (a) => store.peekApprovalCode({ ...a, code: first.code }) };
+      try {
+        const sid = await textIn(ownerPhone, `ADOPT 2 ${second.code}`);
+        const error = 'the code was spent for another message than the one checked before spending: nothing was adopted';
+        expect(lastTo(ownerPhone)).toBe('Your code was used up, but not for the review it was checked against, so nothing was adopted. Text REVIEW for a new review and code.');
+        expect(await outcomeOf(sid)).toEqual({ status: 'failed', last_error: error });
+        expect(await recsOf(second.task)).toEqual([{ rank: 1, status: 'proposed' }, { rank: 2, status: 'proposed' }]);
+        expect(await recsOf(first.task)).toEqual([{ rank: 1, status: 'proposed' }, { rank: 2, status: 'proposed' }]);
+      } finally {
+        deps.store = store;
+      }
+    });
   });
 
   describe('questions answered through Code Mode', () => {

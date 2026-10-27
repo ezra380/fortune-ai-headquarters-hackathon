@@ -791,10 +791,11 @@ describe.skipIf(!api)('what changes a profile (real database and Meterless; prof
         expect(text).not.toContain('I changed');
         expect(await recsOf(task.id)).toMatchObject([{ status: 'expired', applied_by: null, detail: { refused: 'its skill no longer says the assistant is read-only' } }]);
         expect(profileTables.history).toHaveLength(before);
-        // An expired recommendation is never adopted, not even with a code.
+        // An expired recommendation is never adopted, not even with a code; since the second-key review of merge wave 1
+        // it is refused before the code is spent, so the code still works for the open ones.
         const asked = await requestReview(review([{ kind: 'reads', reads: { add: ['usage_summary'] } }, { change: `Say the month second (${tag()}).` }]));
         await textIn(ownerPhone, `ADOPT 2 ${asked.code}`);
-        expect(lastTo(ownerPhone)).toContain('Not applied: 2 (finance)');
+        expect(lastTo(ownerPhone)).toBe('This review has no open recommendation 2. Nothing was adopted, and your code still works.');
       } finally {
         row.skill = saved;
       }

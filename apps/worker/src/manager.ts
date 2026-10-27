@@ -449,10 +449,16 @@ const WANTED: Record<string, string> = {
   approve_action: BRIEF_CODE_FOR,
 };
 
+/** The ranks asked for that are not open in a review: missing, or closed by the program (an open one waits for the code, or the manager already applied it). */
+const notOpen = (recs: readonly RecommendationRow[], ranks: readonly number[]) =>
+  ranks.filter((rank) => !recs.some((r) => r.rank === rank && (r.status === 'proposed' || (r.status === 'adopted' && r.applied_by === 'manager'))));
+
 /**
- * The owner replies ADOPT <ranks> <code>. Everything that can be checked is checked BEFORE the code is spent (as APPROVE
- * does, brief.ts): a rank the review does not have is refused whole with the code still usable, so one wrong digit never
- * costs the owner his code. A wrong code still falls through to the spend and is counted.
+ * The owner replies ADOPT <ranks> <code>. A command is applied whole or not at all, as APPROVE (brief.ts) is. Before the
+ * code is spent, each rank must be open in the review (manager.test.ts "ADOPT is applied whole or not at all"): one that
+ * is missing or closed is refused with the code still usable, so one wrong digit never costs the owner his code. A wrong
+ * code still falls through to the spend and is counted. After the spend, the code spent must be the one looked at and
+ * every rank must exist; either failing records nothing.
  */
 export async function adoptChanges(
   command: Extract<Command, { kind: 'adopt' }>, sender: PersonRow, task: TaskRow, deps: WorkerDeps,
@@ -462,12 +468,11 @@ export async function adoptChanges(
   if (pending) {
     const reviewId = await reviewBehind(deps, pending.message_id);
     if (!reviewId) return fail('the approval does not point at a review');
-    const present = await deps.store.recommendationsOf(reviewId, command.ranks);
-    const lacking = command.ranks.filter((rank) => !present.some((r) => r.rank === rank));
+    const lacking = notOpen(await deps.store.recommendationsOf(reviewId, command.ranks), command.ranks);
     if (lacking.length > 0) {
       const { answer } = await approverOf(pending.approver_person_id, sender, task, deps);
-      await receipt(deps, { runId, taskId: task.id, step: 'approval.adopt', assistant: 'manager', started, outcome: 'refused', detail: `the review has no recommendation ${lacking.join(', ')}; the code was not spent` });
-      await answer(`This review has no recommendation ${lacking.join(' or ')}. Nothing was adopted, and your code still works.`);
+      await receipt(deps, { runId, taskId: task.id, step: 'approval.adopt', assistant: 'manager', started, outcome: 'refused', detail: `the review has no open recommendation ${lacking.join(', ')}; the code was not spent` });
+      await answer(`This review has no open recommendation ${lacking.join(' or ')}. Nothing was adopted, and your code still works.`);
       return done;
     }
   }
@@ -487,13 +492,27 @@ export async function adoptChanges(
     return done;
   }
   const { person, answer } = await approverOf(used.approver_person_id, sender, task, deps);
+  // States the look rules out, asserted after the spend (reachable only by a replayed task or a hash collision): nothing
+  // is adopted, the receipt and the task say why.
+  const nothing = async (error: string, head: string) => {
+    await receipt(deps, { runId, taskId: task.id, step: 'approval.adopt', assistant: 'manager', started, outcome: 'failed', detail: error });
+    await answer(`${head}, so nothing was adopted. Text REVIEW for a new review and code.`);
+    return fail(error);
+  };
+  if (pending && pending.message_id !== used.message_id) {
+    return nothing('the code was spent for another message than the one checked before spending: nothing was adopted', 'Your code was used up, but not for the review it was checked against');
+  }
   const reviewId = await reviewBehind(deps, used.message_id);
   if (!reviewId) return fail('the approval does not point at a review');
+  const asked = await deps.store.recommendationsOf(reviewId, command.ranks);
+  const missing = command.ranks.filter((rank) => !asked.some((r) => r.rank === rank));
+  if (missing.length > 0) {
+    return nothing(`the review has no recommendation ${missing.join(', ')}, though the code was spent for it: nothing was adopted`, `This review has no recommendation ${missing.join(' or ')}, and the code was already used up`);
+  }
 
   // The code is the owner's yes to these ranks. Each open one is put into force in the assistant's stored profile (a
   // lesson, a note, its read tools or a model: a new version made by the owner). A retried task finds what is already
   // in force and goes on, so nothing is written twice.
-  const asked = await deps.store.recommendationsOf(reviewId, command.ranks);
   const adopted: RecommendationRow[] = [];
   const inPlace: RecommendationRow[] = [];
   const notApplied: { rec: RecommendationRow; reason: string }[] = [];
@@ -523,12 +542,10 @@ export async function adoptChanges(
     runId, taskId: task.id, step: 'approval.adopt', assistant: 'manager', started, outcome: 'ok',
     detail: `adopted ${adopted.map(word).join(', ') || 'nothing'}; asked for ${command.ranks.join(', ')}${inPlace.length ? `; already in place ${inPlace.map(word).join(', ')}` : ''}${notApplied.length ? `; not applied ${notApplied.map((n) => `${word(n.rec)}: ${n.reason}`).join(', ')}` : ''}${refreshed}`,
   });
-  const missing = command.ranks.filter((rank) => !asked.some((r) => r.rank === rank));
   await answer([
     adopted.length > 0 ? `Adopted: ${adopted.map(word).join(', ')}.` : 'Nothing was adopted.',
     ...(inPlace.length > 0 ? [`Already in place, applied by the HQ Manager: ${inPlace.map(word).join(', ')}.`] : []),
     ...(notApplied.length > 0 ? [`Not applied: ${notApplied.map((n) => `${word(n.rec)} - ${n.reason}`).join('; ')}.`] : []),
-    ...(missing.length > 0 ? [`Not adopted: ${missing.join(', ')} (not an open recommendation in this review).`] : []),
     ...(adopted.length > 0 ? ["They're now in place."] : []),
   ].join(' '));
   return done;
