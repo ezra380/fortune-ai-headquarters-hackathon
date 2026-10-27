@@ -73,7 +73,7 @@ const deps: WorkerDeps = {
 
 let stopping = false;
 if (process.argv.includes('--once')) {
-  const cycles = await runConcurrently(deps, concurrency, () => stopping, { untilIdle: true });
+  const cycles = await runConcurrently(deps, concurrency, () => stopping, { untilIdle: true, maxCycles: 500 });
   console.error(`worker: drained the queue in ${cycles} cycles`);
 } else {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { stopping = true; });

@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { AssistantMemory } from '@fahq/brain';
 import { WorkReport, type Receipt } from '@fahq/contracts';
 import { parseCommand } from '../src/commands.ts';
-import { PlanError, planDigest, writePlans } from '../src/finance.ts';
+import { departmentLine } from '../src/departments.ts';
+import { PLAN_SYSTEM, PlanError, planDigest, writePlans } from '../src/finance.ts';
 import { checkReview, renderFacts } from '../src/manager.ts';
 import { buildWorkReport, codeModeDetail, numberTrace, summarizeUsage, type UsageRow } from '../src/reports.ts';
-import { dataMock, modelMock, validPlans } from './fixtures.ts';
+import { dataMock, mockMetrics, modelMock, onlinePlans, salonPlans, validPlans } from './fixtures.ts';
 
 describe('parseCommand', () => {
   it('reads approval commands exactly, case and spacing aside', () => {
@@ -100,6 +101,37 @@ describe('writePlans', () => {
     const none = modelMock();
     await writePlans({ ...base, model: none });
     expect(JSON.parse(none.inputs[0]!.user).ownerLessons).toEqual([]);
+  });
+
+  it('for a department: plans from its own slice only, under its own purpose, with one line added to the rules', async () => {
+    const model = modelMock([JSON.stringify(onlinePlans)]);
+    const result = await writePlans({ ...base, model, department: 'online' });
+    expect(result.metrics.map((m) => m.id)).toEqual(['m:online.revenue.mazali', 'm:online.ads.google.spend', 'm:online.ads.google.roas']);
+    expect(model.calls).toEqual(['online.plans']);
+    expect(model.inputs[0]!.system).toBe(`${PLAN_SYSTEM}\n${departmentLine('online')}`);
+    expect((JSON.parse(model.inputs[0]!.user).metrics as { business: string }[]).every((m) => m.business === 'online')).toBe(true);
+    // Another department's numbers are not in its slice, so plans that cite them fail on that slice alone.
+    const cross = modelMock([JSON.stringify(salonPlans)]);
+    await expect(writePlans({ ...base, model: cross, department: 'online' })).rejects.toThrow(/unknown metric m:salon/);
+  });
+
+  it('reads the metrics once for a whole round: with a source it never touches the data port', async () => {
+    const source = { metrics: mockMetrics, queryHash: 'd'.repeat(64), view: 'the_view' };
+    const result = await writePlans({ ...base, data: undefined, source, model: modelMock([JSON.stringify(salonPlans)]), department: 'salon' });
+    expect(result).toMatchObject({ view: 'the_view', queryHash: 'd'.repeat(64) });
+    await expect(writePlans({ ...base, data: undefined, model: modelMock() })).rejects.toThrow('business data is not connected');
+  });
+
+  it('fails plainly, with no model call, when a department has no metrics, and carries the tokens of a failed attempt', async () => {
+    const model = modelMock();
+    const onlineOnly = { metrics: mockMetrics.filter((m) => m.business === 'online'), queryHash: 'e'.repeat(64), view: 'v' };
+    await expect(writePlans({ ...base, source: onlineOnly, model, department: 'salon' })).rejects.toThrow('the data source returned no metrics for the Salon department');
+    expect(model.calls).toEqual([]);
+    const wrong = structuredClone(validPlans);
+    wrong.plans[1]!.summary = 'This adds $50,000.';
+    const error = await writePlans({ ...base, model: modelMock([JSON.stringify(wrong)]) }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PlanError);
+    expect((error as PlanError).usage).toEqual({ inputTokens: 200, outputTokens: 400 });
   });
 });
 

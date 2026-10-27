@@ -78,26 +78,38 @@ export async function planRound(task: TaskRow, deps: WorkerDeps, runId: string):
     return fail(`the final plans did not pass the number check: ${check.errors.slice(0, 3).join(' | ')}`);
   }
 
-  const cited = new Set(check.citedMetricIds);
+  const final = await postFinal(round, { answered, failed, chosen, plans: finalPlans, cited: new Set(check.citedMetricIds) });
+  return announce(round, final, departments);
+}
+
+/** Stores Owner HQ's three picks as the final proposal (keyed by the round) and records the step. */
+async function postFinal(
+  round: Round,
+  input: { answered: readonly Answered[]; failed: readonly Unanswered[]; chosen: Chosen; plans: ProfitPlans; cited: ReadonlySet<string> },
+): Promise<MessageRow> {
+  const { deps, task, runId, roundId, source } = round;
+  const { answered, failed, chosen } = input;
   const origins: Origin[] = chosen.picks.map((p, i) => {
     const c = chosen.candidates.find((x) => x.id === p.id)!;
     return { rank: i + 1, department: c.department, originalRank: c.plan.rank, proposalId: c.proposalId };
   });
+  // A plan that resembles a declined idea keeps that warning under its new rank.
+  const declinedEchoes = origins.flatMap((o) =>
+    (answered.find((a) => a.department === o.department)?.echoes ?? []).filter((e) => e.rank === o.originalRank).map((e) => ({ rank: o.rank, memoryId: e.memoryId, department: o.department })));
   const final = await deps.store.postMessage({
     from: 'owner', to: 'owner', kind: 'proposal', replyTo: null, dedupeKey: `final:${roundId}`,
     body: {
-      plans: finalPlans, metrics: source.metrics.filter((m) => cited.has(m.id)), origins,
+      plans: input.plans, metrics: source.metrics.filter((m) => input.cited.has(m.id)), origins,
       why: chosen.picks.flatMap((p, i) => (p.why ? [{ rank: i + 1, text: p.why }] : [])), note: chosen.note, pickedBy: chosen.pickedBy,
       view: source.view, queryHash: source.queryHash, requestText: round.requestText,
-      departments: answered.map((a) => a.department), failedDepartments: failed.map((f) => f.department),
-      declinedEchoes: origins.flatMap((o) => (answered.find((a) => a.department === o.department)?.echoes ?? []).filter((e) => e.rank === o.originalRank).map((e) => ({ rank: o.rank, memoryId: e.memoryId, department: o.department }))),
+      departments: answered.map((a) => a.department), failedDepartments: failed.map((f) => f.department), declinedEchoes,
     },
   });
   await receipt(deps, {
     runId, taskId: task.id, step: 'owner.final', assistant: 'owner', started: deps.now(), outcome: 'ok', dataSource: sourceTag(source.view, source.queryHash),
     detail: `3 plans from ${[...new Set(origins.map((o) => o.department))].join(', ')}; picked by ${chosen.pickedBy}${failed.length ? `; no checked plans from ${failed.map((f) => f.department).join(', ')}` : ''}`,
   });
-  return announce(round, final, departments);
+  return final;
 }
 
 // ---- One department -------------------------------------------------------------------------------

@@ -340,6 +340,19 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       expect(sms.filter((m) => m.to === ownerPhone && m.body.startsWith('Open items')).length).toBe(TASKS);
     });
 
+    it('stops after maxCycles, however much is queued', async () => {
+      const sids: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        const messageSid = sid();
+        sids.push(messageSid);
+        await pool.query('select * from public.enqueue_inbound_text($1, $2, $3, $4)', [messageSid, ownerPhone, '+15550100001', 'STATUS']);
+      }
+      expect(await runConcurrently(deps, 1, () => false, { untilIdle: true, maxCycles: 4 })).toBe(4);
+      const done = (await pool.query(`select count(*)::int as n from public.tasks where idempotency_key = any($1) and status = 'done'`, [sids.map((s) => 'sms:' + s)])).rows[0].n as number;
+      expect(done).toBe(4);
+      await runUntilIdle(deps); // the rest, so no other test finds them waiting
+    });
+
     it('stops when asked, and a loop that finds nothing waits and then looks again', async () => {
       expect(await runConcurrently(deps, 3, () => true, { untilIdle: false })).toBe(0);
       let stop = false;
