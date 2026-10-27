@@ -1,0 +1,138 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { z } from 'zod';
+import { AssistantId, type ReadTool } from '@fahq/contracts';
+
+// The assistants as data. Every assistant is read-only: its reads are a fixed list of tool names, and
+// proposals and work reports are fixed worker code paths that no model can call. A profile also says
+// which model does which job and where the assistant's own memory lives. The skill text is the same
+// rules in every way in: the Code Mode system prompt in the worker and the `skill` prompt of the MCP door.
+
+export type ModelJob = 'route' | 'code' | 'answer' | 'plan' | 'review';
+export type ModelSetting = { model: string; thinking: boolean; maxTokens: number; temperature: number };
+
+/** Every function an assistant can ever be given. None of them changes anything. */
+export const READ_TOOL_NAMES = [
+  'get_finance_metrics', 'get_online_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons',
+  'list_lessons', 'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal',
+] as const;
+export type ReadToolName = (typeof READ_TOOL_NAMES)[number];
+
+export type AssistantProfile = {
+  id: AssistantId;
+  /** The department's name, e.g. 'Finance Department'. */
+  title: string;
+  /** The person role it serves; null for the manager. */
+  serves: string | null;
+  status: 'live' | 'saves-requests' | 'placeholder';
+  /** The body of skills/<id>/SKILL.md, frontmatter removed. */
+  skill: string;
+  reads: readonly ReadToolName[];
+  /** Documentation of fixed worker code paths. A write is never a tool. */
+  writes: readonly ('propose' | 'report')[];
+  models: Partial<Record<ModelJob, ModelSetting>>;
+  /** Its own Meterless H-MEM folder. */
+  memory: AssistantId;
+};
+
+type Shape = Omit<AssistantProfile, 'skill' | 'models'> & { jobs: readonly ModelJob[] };
+
+const SHAPES: Record<AssistantId, Shape> = {
+  owner: {
+    id: 'owner', title: 'Owner HQ', serves: 'owner', status: 'live',
+    reads: ['get_finance_metrics', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary'],
+    writes: ['propose'], jobs: ['route', 'code', 'answer'], memory: 'owner',
+  },
+  finance: {
+    id: 'finance', title: 'Finance Department', serves: 'finance_owner', status: 'live',
+    reads: ['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal'],
+    writes: ['propose', 'report'], jobs: ['plan', 'code', 'answer'], memory: 'finance',
+  },
+  online: {
+    id: 'online', title: 'Online Customer Service', serves: 'online_staff', status: 'saves-requests',
+    reads: ['get_online_metrics', 'recall_my_decisions', 'my_lessons'],
+    writes: ['report'], jobs: ['code', 'answer'], memory: 'online',
+  },
+  salon: {
+    id: 'salon', title: 'Salon (Cindy)', serves: 'head_stylist', status: 'placeholder',
+    reads: [], writes: [], jobs: [], memory: 'salon',
+  },
+  manager: {
+    id: 'manager', title: 'HQ Manager', serves: null, status: 'live',
+    reads: ['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions'],
+    writes: ['report'], jobs: ['code', 'review'], memory: 'manager',
+  },
+};
+
+const DEFAULT_ROUTER_MODEL = 'nvidia/nemotron-3.5-lightning-30b-a3b';
+const DEFAULT_PLAN_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b';
+
+/** The settings for every job. Models already proven live on this key are the defaults. */
+function jobSettings(env: NodeJS.ProcessEnv): Record<ModelJob, ModelSetting> {
+  const named = (name: string, fallback: string) => env[name]?.trim() || fallback;
+  const router = named('NEMOTRON_ROUTER_MODEL', DEFAULT_ROUTER_MODEL);
+  return {
+    route: { model: router, thinking: false, maxTokens: 600, temperature: 0 },
+    plan: { model: named('NEMOTRON_PLAN_MODEL', DEFAULT_PLAN_MODEL), thinking: true, maxTokens: 16000, temperature: 0.4 },
+    code: { model: named('CODE_MODEL', router), thinking: false, maxTokens: 1200, temperature: 0 },
+    answer: { model: named('ANSWER_MODEL', router), thinking: false, maxTokens: 400, temperature: 0.2 },
+    review: { model: named('REVIEW_MODEL', router), thinking: true, maxTokens: 6000, temperature: 0.2 },
+  };
+}
+
+// ---- Skills ------------------------------------------------------------------------------------
+
+const SKILLS_DIR = path.join(import.meta.dirname, '..', 'skills');
+const Frontmatter = z.object({ name: z.string().min(1), description: z.string().min(1) });
+const skills = new Map<AssistantId, { frontmatter: z.infer<typeof Frontmatter>; body: string }>();
+
+function readSkill(id: AssistantId) {
+  const cached = skills.get(id);
+  if (cached) return cached;
+  const text = fs.readFileSync(path.join(SKILLS_DIR, id, 'SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
+  const match = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  if (!match) throw new Error(`skill ${id} has no frontmatter`);
+  const fields: Record<string, string> = {};
+  for (const line of match[1]!.split('\n')) {
+    const colon = line.indexOf(':');
+    if (colon > 0) fields[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+  }
+  const parsed = Frontmatter.safeParse(fields);
+  if (!parsed.success || parsed.data.name !== `fortune-hq-${id}`) {
+    throw new Error(`skill ${id} needs frontmatter with name "fortune-hq-${id}" and a description`);
+  }
+  const entry = { frontmatter: parsed.data, body: text.slice(match[0].length).trim() };
+  skills.set(id, entry);
+  return entry;
+}
+
+export function skillFrontmatter(id: AssistantId): { name: string; description: string } {
+  return { ...readSkill(id).frontmatter };
+}
+
+// ---- Profiles ----------------------------------------------------------------------------------
+
+export function loadProfiles(env: NodeJS.ProcessEnv): Record<AssistantId, AssistantProfile> {
+  const settings = jobSettings(env);
+  const profiles = {} as Record<AssistantId, AssistantProfile>;
+  for (const id of AssistantId.options) {
+    const { jobs, ...shape } = SHAPES[id];
+    const models: Partial<Record<ModelJob, ModelSetting>> = {};
+    for (const job of jobs) models[job] = { ...settings[job] };
+    profiles[id] = { ...shape, reads: [...shape.reads], writes: [...shape.writes], skill: readSkill(id).body, models };
+  }
+  return profiles;
+}
+
+/**
+ * Exactly the profile's tools, in its order. A name missing from `all` stops the start-up instead of
+ * quietly leaving a hole; a tool that is not on the list is never returned.
+ */
+export function pickTools(all: Record<string, ReadTool>, profile: AssistantProfile): ReadTool[] {
+  return profile.reads.map((name) => {
+    const tool = Object.hasOwn(all, name) ? all[name] : undefined;
+    if (!tool) throw new Error(`read tool ${name} is not available for ${profile.id}`);
+    if (tool.name !== name) throw new Error(`read tool ${name} is registered under the name ${tool.name}`);
+    return tool;
+  });
+}
