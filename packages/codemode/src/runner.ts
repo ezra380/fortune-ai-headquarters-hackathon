@@ -1,4 +1,4 @@
-import type { CodeModeResult, CodeModeRunner, ModelPort, ReadTool } from '@fahq/contracts';
+import type { CodeModeResult, CodeModeRunner, ModelPort, ReadTool, ToolOutput } from '@fahq/contracts';
 import { ModelError, stripReasoning } from '@fahq/models';
 import { QuickJsExecutor, type ExecuteResult } from './quickjs-executor.ts';
 
@@ -6,6 +6,11 @@ import { QuickJsExecutor, type ExecuteResult } from './quickjs-executor.ts';
 // read API; the QuickJS sandbox runs it with only those tools; only the script's small result goes on
 // to the next model. The raw tool output (hundreds of metrics, whole timelines) never reaches a prompt.
 // One retry with the sandbox's own error, then a plain failure. This function never throws.
+//
+// A script that read nothing has typed its own numbers, so a run in which no tool returned data is
+// refused. The runner also keeps what each tool returned (`toolOutputs`) so the worker can check the
+// result and the reply against it: it cannot tell arithmetic from a typed constant, but it can show
+// which numbers no tool returned (`untracedResultNumbers`).
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 // `async (`, `async function name(` or `async x =>`: not the word "async" in a sentence.
@@ -66,12 +71,28 @@ const isEmpty = (v: unknown) =>
 
 type Verdict = { ok: true; chars: number } | { ok: false; error: string; chars: number };
 
-function judge(run: ExecuteResult, maxChars: number): Verdict {
+const NEEDS_TOOL_DATA = 'the script used no tool data: call at least one codemode function; every number must come from it';
+
+/** `reads` is how many tool calls returned data to the script (a refused or failed call is not one). */
+function judge(run: ExecuteResult, reads: number, maxChars: number): Verdict {
   if (run.error) return { ok: false, error: run.error, chars: 0 };
   if (isEmpty(run.result)) return { ok: false, error: 'the script returned nothing: return an object with the values needed', chars: 0 };
   const chars = JSON.stringify(run.result).length;
+  if (reads === 0) return { ok: false, error: NEEDS_TOOL_DATA, chars };
   if (chars > maxChars) return { ok: false, error: `result too large: return fewer values (${chars} characters, the limit is ${maxChars})`, chars };
   return { ok: true, chars };
+}
+
+/**
+ * The functions the sandbox gets: ONLY the tools passed in. Each one also records what it returned,
+ * as the sandbox receives it (JSON), so a call that failed or could not be written as JSON leaves nothing.
+ */
+function sandboxFunctions(tools: readonly ReadTool[], seen: ToolOutput[]) {
+  return Object.fromEntries(tools.map((t) => [t.name, async (args: unknown) => {
+    const output = await t.run(args);
+    seen.push({ tool: t.name, output: JSON.parse(JSON.stringify(output ?? null) ?? 'null') as unknown });
+    return output;
+  }]));
 }
 
 export function createCodeModeRunner(deps: {
@@ -84,15 +105,13 @@ export function createCodeModeRunner(deps: {
 
   return async (input) => {
     const tally = { attempts: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, model: input.model };
-    const finish = (ok: boolean, result: unknown, error: string | null, script: string | null, resultChars: number): CodeModeResult =>
-      ({ ok, result: ok ? result : null, error, script, resultChars, ...tally });
+    const finish = (ok: boolean, result: unknown, error: string | null, script: string | null, resultChars: number, outputs: ToolOutput[] = []): CodeModeResult =>
+      ({ ok, result: ok ? result : null, error, script, resultChars, toolOutputs: ok ? outputs : [], ...tally });
 
     const problem = toolProblem(input.tools);
     if (problem) return finish(false, null, problem, null, 0);
 
     const system = systemPrompt(input.skill, input.tools);
-    // Only the tools passed in exist inside the sandbox; anything else fails there as an unknown tool.
-    const fns = Object.fromEntries(input.tools.map((t) => [t.name, (args: unknown) => t.run(args)]));
     let retry: { previousScript: string; error: string } | null = null;
     let script: string | null = null;
     let error = '';
@@ -119,13 +138,16 @@ export function createCodeModeRunner(deps: {
         retry = { previousScript: reply.text.slice(0, 2000), error };
         continue;
       }
-      const run: ExecuteResult = await executor.execute(script, fns).catch(
+      // Only the tools passed in exist inside the sandbox; anything else fails there as an unknown tool.
+      const seen: ToolOutput[] = [];
+      const run: ExecuteResult = await executor.execute(script, sandboxFunctions(input.tools, seen)).catch(
         (): ExecuteResult => ({ result: undefined, error: 'the sandbox could not run the script', toolCalls: 0 }),
       );
       tally.toolCalls += run.toolCalls;
-      const verdict = judge(run, maxChars);
+      const verdict = judge(run, seen.length, maxChars);
       resultChars = verdict.chars;
-      if (verdict.ok) return finish(true, run.result, null, script, verdict.chars);
+      // A copy: a call the script never awaited can still finish after the run, and must not change the result.
+      if (verdict.ok) return finish(true, run.result, null, script, verdict.chars, [...seen]);
       error = verdict.error;
       retry = { previousScript: script, error };
     }

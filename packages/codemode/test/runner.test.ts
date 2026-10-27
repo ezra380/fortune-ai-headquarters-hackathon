@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ReadTool } from '@fahq/contracts';
 import { ModelError } from '@fahq/models';
-import { createCodeModeRunner, declarations, QuickJsExecutor } from '../src/index.ts';
+import { createCodeModeRunner, declarations, QuickJsExecutor, untracedResultNumbers } from '../src/index.ts';
 import { extractScript } from '../src/runner.ts';
 import { fakeTool, mockModel } from './model.mock.ts';
 
@@ -201,5 +201,79 @@ describe('createCodeModeRunner', () => {
     const r = await t.ask([flaky]);
     expect(r.ok).toBe(false); // the second script also hits the failing tool
     expect(JSON.parse(t.calls[1]!.user).error).toBe('period must be 2026-09');
+  });
+});
+
+// A result is only as good as the data behind it: a script that never read anything has typed its own numbers.
+describe('a result must rest on tool data', () => {
+  const NEEDS_TOOL = 'call at least one codemode function; every number must come from it';
+  const INVENTED = 'async () => ({ googleRoas: 3.6, revenue: 99999 })';
+
+  it('refuses a script that called no tool, and retries with the reason', async () => {
+    const t = setup([INVENTED, GOOD]);
+    const r = await t.ask();
+    expect(r).toMatchObject({ ok: true, attempts: 2, toolCalls: 1, result: { spend: 4100, revenue: 14760, roas: 3.6 } });
+    const second = JSON.parse(t.calls[1]!.user) as { previousScript: string; error: string };
+    expect(second.previousScript).toBe(INVENTED);
+    expect(second.error).toContain(NEEDS_TOOL);
+  });
+
+  it('fails plainly when the retry invents its result too, and hands back no result and no tool data', async () => {
+    const t = setup([INVENTED, INVENTED, GOOD]);
+    const r = await t.ask();
+    expect(r).toMatchObject({ ok: false, result: null, attempts: 2, toolCalls: 0, toolOutputs: [], script: INVENTED });
+    expect(r.error).toContain(NEEDS_TOOL);
+    expect(t.financeArgs).toEqual([]);
+    expect(t.calls).toHaveLength(2);
+  });
+
+  it('refuses a script whose only tool calls failed, even if it carries on with constants', async () => {
+    const swallowed = 'async () => { try { await codemode.not_a_tool({}); } catch (e) {} return { revenue: 99999 }; }';
+    const t = setup([swallowed, swallowed]);
+    const r = await t.ask();
+    expect(r).toMatchObject({ ok: false, result: null, toolCalls: 2, toolOutputs: [] }); // the refused call still counts as a call
+    expect(r.error).toContain(NEEDS_TOOL);
+
+    const flaky = fakeTool('get_finance_metrics', async () => { throw new Error('Zetaris is down'); });
+    const caught = 'async () => { try { await codemode.get_finance_metrics({}); } catch (e) {} return { revenue: 99999 }; }';
+    const t2 = setup([caught, caught]);
+    const r2 = await t2.ask([flaky]);
+    expect(r2).toMatchObject({ ok: false, result: null, toolOutputs: [] });
+    expect(r2.error).toContain(NEEDS_TOOL);
+  });
+
+  it('hands back what each tool returned, as the script saw it', async () => {
+    const t = setup([GOOD]);
+    const r = await t.ask();
+    expect(r.toolOutputs).toEqual([{ tool: 'get_finance_metrics', output: { metrics } }]);
+
+    const odd = fakeTool('get_finance_metrics', async () => ({ kept: 1, dropped: undefined, nested: [{ n: 2 }] }));
+    const script = 'async () => { const r = await codemode.get_finance_metrics({}); return { kept: r.kept }; }';
+    const r2 = await setup([script]).ask([odd]);
+    expect(r2.toolOutputs).toEqual([{ tool: 'get_finance_metrics', output: { kept: 1, nested: [{ n: 2 }] } }]);
+    expect(Object.hasOwn((r2.toolOutputs[0]!.output as object), 'dropped')).toBe(false); // JSON drops undefined, in the sandbox and here
+
+    const none = fakeTool('open_items', async () => undefined, '() => Promise<unknown>');
+    const r3 = await setup(['async () => ({ n: (await codemode.open_items()) === null ? 1 : 0 })']).ask([none]);
+    expect(r3).toMatchObject({ ok: true, result: { n: 1 }, toolOutputs: [{ tool: 'open_items', output: null }] });
+  });
+
+  it('keeps the tool data of the run that produced the result, not of the attempt before it', async () => {
+    const first = 'async () => { await codemode.recall_my_decisions({ query: "ads" }); throw new Error("first"); }';
+    const t = setup([first, GOOD]);
+    const r = await t.ask();
+    expect(r).toMatchObject({ ok: true, attempts: 2, toolCalls: 2 });
+    expect(r.toolOutputs.map((o) => o.tool)).toEqual(['get_finance_metrics']);
+  });
+
+  it('leaves a number typed in beside a real call visible: no tool returned it', async () => {
+    const smuggled = 'async () => { const r = await codemode.get_finance_metrics({ period: "2026-09" }); return { spend: r.metrics[0].value, revenue: 99999 }; }';
+    const t = setup([smuggled]);
+    const r = await t.ask();
+    // The runner cannot tell a typed constant from arithmetic, so it passes the run; what it can do is show what no tool returned.
+    expect(r).toMatchObject({ ok: true, result: { spend: 4100, revenue: 99999 } });
+    expect(JSON.stringify(r.toolOutputs)).not.toContain('99999');
+    expect(untracedResultNumbers(r.result, r.toolOutputs)).toEqual(['result.revenue (99999) was not returned by any tool']);
+    expect(untracedResultNumbers(r.result, r.toolOutputs)).not.toContainEqual(expect.stringContaining('spend'));
   });
 });

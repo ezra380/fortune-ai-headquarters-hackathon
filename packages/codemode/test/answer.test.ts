@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ANSWER_RULES, mentions, traceNumbers, writeAnswer } from '../src/answer.ts';
+import { ANSWER_RULES, mentions, traceNumbers, untracedResultNumbers, writeAnswer } from '../src/answer.ts';
 import { mockModel } from './model.mock.ts';
 
 const facts = { google: { spend: 4100, revenue: 14760, roas: 3.6071 }, ratio: 0.4231, services: [{ name: 'Wash and set', revenue: 6200 }], noShows: 3, period: '2026-09' };
@@ -15,6 +15,7 @@ describe('writeAnswer', () => {
     expect(ANSWER_RULES).toMatch(/at most 3 short sentences/);
     expect(ANSWER_RULES).toMatch(/Use only the facts given\. Every number must come from the facts/);
     expect(ANSWER_RULES).toMatch(/say so plainly/);
+    expect(ANSWER_RULES).toMatch(/digits, never in words/);
     expect(JSON.parse(calls[0]!.user)).toEqual({ question: 'How did Google do?', facts });
   });
 
@@ -76,8 +77,8 @@ describe('traceNumbers', () => {
     expect(traceNumbers('Revenue is $1.5k\n2. next', { r: 1500 })).toEqual([]);
   });
 
-  it('ignores years, dates, digits inside words and minutes', () => {
-    expect(traceNumbers('In September 2026 (2026-09-15) the 2nd and 3rd were busy at 4pm, 30m each.', { none: 0 })).toEqual([]);
+  it('ignores years, dates, digits inside words and minutes written as min', () => {
+    expect(traceNumbers('In September 2026 (2026-09-15) the 2nd and 3rd were busy at 4pm, 30min each.', { none: 0 })).toEqual([]);
     expect(traceNumbers('Revenue was 2026 dollars.', { none: 0 })).toEqual(['"2026" is not in the facts']);
     expect(traceNumbers('Revenue was $2026.', { none: 0 })).toEqual(['"$2026" is not in the facts']);
   });
@@ -98,5 +99,127 @@ describe('traceNumbers', () => {
   it('gives no objections for an empty reply', () => {
     expect(traceNumbers('', facts)).toEqual([]);
     expect(traceNumbers('I do not have that information.', facts)).toEqual([]);
+  });
+});
+
+// ---- Review round: ways of writing a number that used to slip through -----------------------------
+
+describe('traceNumbers: numbers written in words', () => {
+  const probeFacts = { noShows: 7, washSet: 6200, amazonSpend: 2000 };
+  const words = (w: string) => `"${w}" is a number written in words; write it in digits so it can be checked`;
+
+  it.each([
+    ['There were seven no-shows.', [words('seven')]],
+    ['There were three no-shows and twelve cancellations.', [words('three'), words('twelve')]],
+    ['Wash and set made sixty-two hundred dollars.', [words('sixty-two hundred')]],
+    ['Amazon spent two thousand and fifty.', [words('two thousand and fifty')]],
+    ['It was a dozen orders.', [words('dozen')]],
+    ['Zero no-shows came back.', [words('Zero')]],
+    ['Only one service sold.', [words('one')]],
+  ])('objects to %j', (reply, objections) => {
+    expect(traceNumbers(reply, probeFacts)).toEqual(objections);
+  });
+
+  it('does not mistake a scale word after a figure, or an ordinary use of "one", for a claim', () => {
+    expect(traceNumbers('Revenue was $14.8 thousand, or $1.2 million.', { r: 14800, s: 1_200_000 })).toEqual([]);
+    expect(traceNumbers('Revenue was 2 hundred.', { r: 200 })).toEqual([]);
+    expect(traceNumbers('Revenue was 3 hundred.', { r: 3 })).toEqual(['"3 hundred" is not in the facts']);
+    for (const idiom of [
+      'No one called.', 'Which one sold best?', 'The one with the most revenue was color.', 'One of the services was color.', 'It is a one-time fee.',
+      'Everyone phoned, someone left, nobody came, and the stone was none the worse.',
+    ]) {
+      expect(traceNumbers(idiom, probeFacts), idiom).toEqual([]);
+    }
+  });
+});
+
+describe('traceNumbers: a year is not a way round the facts', () => {
+  const probeFacts = { noShows: 7, washSet: 6200, amazonSpend: 2000 };
+
+  it('objects to an amount that only looks like a year', () => {
+    expect(traceNumbers('Amazon had a spend of 1950 in September.', probeFacts)).toEqual(['"1950" is not in the facts']);
+    expect(traceNumbers('Wash and set brought in 1999 last month.', probeFacts)).toEqual(['"1999" is not in the facts']);
+    expect(traceNumbers('Orders for 1999 came in.', probeFacts)).toEqual(['"1999" is not in the facts']);
+    // Even when the facts do name that year: there it is a date, not an amount.
+    const dated = { ...probeFacts, period: '2026-09' };
+    expect(traceNumbers('Wash and set brought in 2026 last month.', dated)).toEqual(['"2026" is not in the facts']);
+    expect(traceNumbers('Amazon had a spend of 2026.', dated)).toEqual(['"2026" is not in the facts']);
+  });
+
+  it('accepts a year only in a real date context', () => {
+    expect(traceNumbers('In September 2026 and Sept. 2026 and in May 2026 and Q3 2026.', { none: 0 })).toEqual([]);
+    expect(traceNumbers('Sales in 2026 were steady.', { period: '2026-09' })).toEqual(['"2026" is not in the facts']); // "in" in the middle of a sentence is not a date
+    expect(traceNumbers('In 2026, sales were steady.', { period: '2026-09' })).toEqual([]);
+    expect(traceNumbers('Sales have grown since 2026.', { period: '2026-09' })).toEqual([]);
+    expect(traceNumbers('In 2026, sales were steady.', { none: 0 })).toEqual(['"2026" is not in the facts']); // the facts never name that year
+    expect(traceNumbers('Sales have grown since 2024.', { none: 0 }, 'How have sales done since 2024?')).toEqual([]); // the question names it
+    expect(traceNumbers('The shop may 1950 times.', { none: 0 })).toEqual(['"1950" is not in the facts']); // the verb "may", not the month
+  });
+});
+
+describe('traceNumbers: other ways of writing a number', () => {
+  const probeFacts = { noShows: 7, washSet: 6200, amazonSpend: 2000 };
+
+  it('reads a figure that starts with a decimal point', () => {
+    expect(traceNumbers('Conversion was .9% for the month.', probeFacts)).toEqual(['".9%" is not in the facts']);
+    expect(traceNumbers('Conversion was .9% for the month.', { conversion: 0.9 })).toEqual([]);
+    expect(traceNumbers('Conversion was $.50 a click.', { cpc: 0.5 })).toEqual([]);
+    expect(traceNumbers('ROAS was 3.6x, not .6x.', { roas: 3.6 })).toEqual(['".6x" is not in the facts']); // "3.6" is one figure, not "3" and ".6"
+  });
+
+  it('reads a lowercase m after a number as millions; minutes must be spelled min or minutes', () => {
+    expect(traceNumbers('Revenue reached 30m this month.', probeFacts)).toEqual(['"30m" is not in the facts']);
+    expect(traceNumbers('Revenue reached 30m this month.', { revenue: 30_000_000 })).toEqual([]);
+    expect(traceNumbers('Revenue reached 3M and $4m.', { a: 3_000_000, b: 4_000_000 })).toEqual([]);
+    expect(traceNumbers('Each takes 30min or 45minutes.', { none: 0 })).toEqual([]);
+  });
+
+  it('does not let a range hide inside something that looks like a date', () => {
+    expect(traceNumbers('Spend ran 1000-20 last week.', probeFacts)).toEqual(['"1000" is not in the facts', '"20" is not in the facts']);
+    expect(traceNumbers('Counts were 1500-12 and 2026-13.', { none: 0 })).toEqual([
+      '"1500" is not in the facts', '"12" is not in the facts', '"2026" is not in the facts', '"13" is not in the facts',
+    ]);
+    expect(traceNumbers('Period 2026-09 and 2026-09-15 and 1999-12-31.', { none: 0 })).toEqual([]);
+  });
+});
+
+describe('traceNumbers: list numbers after any punctuation', () => {
+  const listFacts = { google: { spend: 4100, revenue: 14760 }, amazon: { spend: 2000, revenue: 5000 } };
+
+  it('ignores a list number on the line after a colon, an exclamation mark, a question mark or a bracket', () => {
+    for (const lead of ['September ads:', 'Here you go!', 'Which did best?', 'Both did well (see below)', 'September ads.', 'September ads']) {
+      const reply = `${lead}\n1. Google: $4,100 spend, $14,760 revenue\n2. Amazon: $2,000 spend, $5,000 revenue`;
+      expect(traceNumbers(reply, listFacts), lead).toEqual([]);
+    }
+    expect(traceNumbers('Here you go!\n1) Google $4,100', listFacts)).toEqual([]);
+    expect(traceNumbers('Ads:\n  - 1. Google $4,100\n\t2) Amazon $2,000', listFacts)).toEqual([]);
+  });
+
+  it('still objects to a number in a sentence, and to a figure that is not a list number', () => {
+    expect(traceNumbers('September ads:\nThe top 2 were Google and Amazon.', listFacts)).toEqual(['"2" is not in the facts']);
+    expect(traceNumbers('Ads:\n1.5 million views', listFacts)).toEqual(['"1.5 million" is not in the facts']);
+    expect(traceNumbers('Ads:\n$ 4,100 and $ 17', listFacts)).toEqual(['"$ 17" is not in the facts']);
+  });
+});
+
+describe('untracedResultNumbers', () => {
+  const returned = [{ output: { metrics: [{ id: 'm:online.ads.google.spend', value: 4100 }, { id: 'm:online.ads.google.roas', value: 3.6071 }] } }];
+
+  it('names each number in a script result that no tool returned', () => {
+    expect(untracedResultNumbers({ spend: 4100, roas: 3.61, revenue: 99999 }, returned)).toEqual(['result.revenue (99999) was not returned by any tool']);
+    expect(untracedResultNumbers({ rows: [{ value: 4100 }, { value: 7 }], note: 'about 12 of them' }, returned)).toEqual([
+      'result.rows[1].value (7) was not returned by any tool',
+      'result.note (12) was not returned by any tool',
+    ]);
+  });
+
+  it('counts a tool number rounded to 0 to 2 decimals as returned, and nothing else', () => {
+    expect(untracedResultNumbers({ roas: 3.6, again: 3.61, whole: 4, off: 3.7 }, returned)).toEqual(['result.off (3.7) was not returned by any tool']);
+  });
+
+  it('flags every number when no tool returned anything, and ignores text, booleans and null', () => {
+    expect(untracedResultNumbers({ a: 1 }, [])).toEqual(['result.a (1) was not returned by any tool']);
+    expect(untracedResultNumbers({ a: 'text only', b: true, c: null }, returned)).toEqual([]);
+    expect(untracedResultNumbers(42, returned)).toEqual(['result (42) was not returned by any tool']);
   });
 });
