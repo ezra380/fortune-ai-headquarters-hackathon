@@ -1,6 +1,6 @@
 import type { Division } from '@fahq/contracts';
 import type { MetricDef } from './finance-sql.ts';
-import { counted, isNull, num, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
+import { counted, isNull, num, oneOf, qualified, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
 import { AS_OF, EMAIL_NAMES, MARKETPLACES, PRODUCT_LINES } from './synthetic.ts';
 
 // The channels wave 2 adds for Finance (docs/wave2.md, items 1 to 3), each its own source with its data-quality rule
@@ -90,7 +90,7 @@ export const CHANNEL_METRICS: MetricDef[] = [
     const mine = { divisions: FINANCE_HQ, source: 'marketplace_sales', where: { marketplace: m } } as const;
     return [
       period({ id: `m:online.${m}.revenue`, label: `${NAME[m]} marketplace sales`, unit: 'usd', ...mine, agg: { kind: 'sum', field: 'revenue_usd' }, about: `Orders sold and shipped from ${NAME[m]}'s warehouse, by the order day; not part of the online store's revenue.` }),
-      period({ id: `m:online.${m}.orders.count`, label: `${NAME[m]} marketplace orders`, unit: 'count', ...mine, agg: { kind: 'count' }, nouns: counted(ORDERS, [`${m} marketplace`]) }),
+      period({ id: `m:online.${m}.orders.count`, label: `${NAME[m]} marketplace orders`, unit: 'count', ...mine, agg: { kind: 'count' }, nouns: qualified(ORDERS, [`${m} marketplace`]) }),
       period({ id: `m:online.${m}.fees`, label: `${NAME[m]} marketplace fees (referral and warehouse)`, unit: 'usd', ...mine, agg: { kind: 'sum', field: 'fees_usd' }, about: 'The referral fee and the warehouse fee per unit the marketplace kept from those orders.' }),
     ];
   }),
@@ -99,12 +99,12 @@ export const CHANNEL_METRICS: MetricDef[] = [
   period({ id: 'm:online.ads.walmart.spend', label: 'Walmart ad spend', unit: 'usd', ...WALMART_AD, agg: { kind: 'sum', field: 'spend_usd' }, about: 'Not in the all-channel ad spend, the revenue per ad dollar or the contribution, which cover Google, Meta and Amazon.' }),
   period({ id: 'm:online.ads.walmart.revenue', label: 'Walmart ad revenue', unit: 'usd', ...WALMART_AD, agg: { kind: 'sum', field: 'revenue_usd' } }),
   period({ id: 'm:online.ads.walmart.roas', label: 'Walmart ad return (revenue / spend)', unit: 'ratio', ...WALMART_AD, agg: { kind: 'ratio', num: 'revenue_usd', den: 'spend_usd' } }),
-  period({ id: 'm:online.ads.walmart.conversions', label: 'Walmart ad orders', unit: 'count', ...WALMART_AD, agg: { kind: 'sum', field: 'conversions' }, nouns: counted(ORDERS, ['walmart ad']) }),
+  period({ id: 'm:online.ads.walmart.conversions', label: 'Walmart ad orders', unit: 'count', ...WALMART_AD, agg: { kind: 'sum', field: 'conversions' }, nouns: qualified(ORDERS, ['walmart ad']) }),
   period({ id: 'm:online.dq.rejected_marketplace_ads', label: 'Walmart ad rows rejected by data checks', unit: 'count', divisions: ['online', 'finance', 'hq'], source: 'marketplace_ads', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['walmart ad']) }),
   period({ id: 'm:online.dq.rejected_marketplace_stock', label: 'Marketplace stock rows rejected by data checks', unit: 'count', divisions: FINANCE_HQ, source: 'marketplace_stock', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['marketplace stock', 'stock report']) }),
   // The email rows split by flow and campaign: the sends add up to the emails sent, the revenue to the email revenue.
-  period({ id: 'm:online.email.flow.sends', label: 'Flow emails sent', unit: 'count', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'sum', field: 'sends' }, where: { kind: 'flow' }, nouns: counted(EMAILS, ['flow']) }),
-  period({ id: 'm:online.email.campaign.sends', label: 'Campaign emails sent', unit: 'count', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'sum', field: 'sends' }, where: { kind: 'campaign' }, nouns: counted(EMAILS, ['campaign']) }),
+  period({ id: 'm:online.email.flow.sends', label: 'Flow emails sent', unit: 'count', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'sum', field: 'sends' }, where: { kind: 'flow' }, nouns: qualified(EMAILS, ['flow']) }),
+  period({ id: 'm:online.email.campaign.sends', label: 'Campaign emails sent', unit: 'count', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'sum', field: 'sends' }, where: { kind: 'campaign' }, nouns: qualified(EMAILS, ['campaign']) }),
   period({ id: 'm:online.email.flow.revenue', label: 'Flow email revenue', unit: 'usd', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'sum', field: 'revenue_usd' }, where: { kind: 'flow' } }),
   period({ id: 'm:online.email.campaign.revenue', label: 'Campaign email revenue', unit: 'usd', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'sum', field: 'revenue_usd' }, where: { kind: 'campaign' } }),
   period({ id: 'm:online.email.campaign.count', label: 'Email campaigns sent', unit: 'count', divisions: ONLINE_MONEY, source: 'email_messages', agg: { kind: 'count' }, where: { kind: 'campaign' }, nouns: counted(['campaign', 'campaigns'], ['email']) }),
@@ -114,7 +114,7 @@ export const CHANNEL_METRICS: MetricDef[] = [
   period({ id: 'm:online.products.cogs', label: 'Cost of the store products sold', unit: 'usd', divisions: ONLINE_MONEY, source: 'order_lines', agg: { kind: 'sum', field: LINE_COST }, about: 'From the order lines, by order date; it adds up to the cost on the store orders.' }),
   period({
     id: 'm:online.products.negative_margin.count', label: 'Store products that lost money after refunds', unit: 'count', divisions: ['online', 'hq'], source: 'order_lines',
-    agg: { kind: 'losing', by: 'sku', field: LINE_PROFIT }, nouns: counted(['product', 'products'], ['money-losing', 'losing', 'loss-making']),
+    agg: { kind: 'losing', by: 'sku', field: LINE_PROFIT }, nouns: qualified(['product', 'products'], ['money-losing', 'losing', 'loss-making']),
     about: "Products whose order lines in the period brought in less than they cost once the refunds on those orders, to the data date, are taken off. A returned piece's cost is not added back.",
   }),
   period({ id: 'm:online.dq.rejected_order_lines', label: 'Order line rows rejected by data checks', unit: 'count', divisions: ['online', 'finance', 'hq'], source: 'order_lines', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['order line', 'line']) }),
@@ -127,12 +127,12 @@ export const CHANNEL_STANDING: MetricDef[] = [
     return [
       standing({
         id: `m:online.${m}.stock.low_cover.count`, label: `${NAME[m]} warehouse listings running low`, unit: 'count', ...mine, test: LOW_COVER,
-        nouns: counted(LISTED, [`${m} low-cover`, `${m} low cover`]),
+        nouns: qualified(LISTED, [`${m} low-cover`, `${m} low cover`]),
         about: `In stock at ${NAME[m]}'s warehouse on the data date, ${AS_OF}, with fewer than ${COVER_DAYS} days of cover at the last 28 days' pace. Out of stock is counted on its own.`,
       }),
       standing({
         id: `m:online.${m}.stock.out.count`, label: `${NAME[m]} warehouse listings out of stock`, unit: 'count', ...mine, test: STOCK_OUT,
-        nouns: counted(LISTED, [`${m} out-of-stock`, `${m} sold-out`]),
+        nouns: qualified(LISTED, [`${m} out-of-stock`, `${m} sold-out`]),
         about: `None on hand at ${NAME[m]}'s warehouse on the data date, ${AS_OF}.`,
       }),
     ];

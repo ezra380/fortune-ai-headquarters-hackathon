@@ -219,8 +219,40 @@ describe('the asks of docs/wave2.md: who must not read what', () => {
     for (const m of readers(/^m:online\.(returns|reviews)\./)) expect(m.divisions, m.id).not.toContain('finance');
   });
 
-  it("Finance never reads the salon's client segments (George asks Cindy); Online never reads a salon number", () => {
-    for (const m of readers(/^m:salon\.clients\./)) expect(m.divisions, m.id).not.toContain('finance');
+  it('Online never reads a salon number', () => {
+    expect(readers(/^m:salon\./).length).toBeGreaterThan(0);
     for (const m of readers(/^m:salon\./)) expect(m.divisions, m.id).not.toContain('online');
+  });
+
+  // Review fix: this test passed only because no m:salon.clients.* metric exists (items 7 and 8 are not built).
+  // `it.fails` keeps the suite green and fails loud the day the segments land: then turn it into `it`.
+  it.fails("Finance never reads the salon's client segments (George asks Cindy): NOT BUILT, items 7 and 8", () => {
+    const clients = readers(/^m:salon\.clients\./);
+    expect(clients.length, 'no m:salon.clients.* metric yet').toBeGreaterThan(0);
+    for (const m of clients) expect(m.divisions, m.id).not.toContain('finance');
+  });
+});
+
+// Review fix: a count's bare noun ("products", "emails", "orders") belongs to the one metric that counts that thing
+// in general. The plan checker holds a small number before a metric's phrase to that metric, so a marketplace
+// listing count named "products" would hold "bundle 2 products" in a Finance plan to the warehouse counts.
+describe('the count phrases: the bare nouns stay with the metric that owns them', () => {
+  const BARE = ['product', 'products', 'listing', 'listings', 'order', 'orders', 'email', 'emails'];
+  const nounsOf = (id: string) => CATALOG_V2.find((m) => m.id === id)?.nouns ?? [];
+  const QUALIFIED_ONLY = [
+    ...MARKETPLACES.flatMap((m) => [`m:online.${m}.orders.count`, `m:online.${m}.stock.low_cover.count`, `m:online.${m}.stock.out.count`]),
+    'm:online.ads.walmart.conversions', 'm:online.email.flow.sends', 'm:online.email.campaign.sends', 'm:online.products.negative_margin.count',
+  ];
+
+  it("names the channels' counts with qualified phrases only", () => {
+    for (const id of QUALIFIED_ONLY) {
+      expect(nounsOf(id).length, id).toBeGreaterThan(0);
+      for (const n of nounsOf(id)) expect(BARE, `${id}: "${n}"`).not.toContain(n);
+    }
+  });
+
+  it('keeps the bare nouns on the store orders and the emails sent', () => {
+    expect(nounsOf('m:online.orders.count')).toEqual(expect.arrayContaining(['order', 'orders']));
+    expect(nounsOf('m:online.email.sends')).toEqual(expect.arrayContaining(['email', 'emails']));
   });
 });

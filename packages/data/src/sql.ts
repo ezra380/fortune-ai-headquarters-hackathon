@@ -33,4 +33,12 @@ export const ONE: Field = { sql: '1', js: () => 1 };
  * then the bare nouns. Counts that share a noun each need a qualifier of their own, so a plan can say which.
  */
 export const counted = (nouns: readonly string[], qualifiers: readonly string[] = []): string[] =>
-  [...qualifiers.flatMap((q) => nouns.map((n) => `${q} ${n}`)), ...nouns];
+  [...qualified(nouns, qualifiers), ...nouns];
+
+/**
+ * The qualified phrases only, never the bare nouns: for a count of one kind of a thing another metric counts in
+ * general ("amazon marketplace orders", not "orders", which are the store's). The checker holds a small number
+ * before a bare noun to every metric that names it, so a bare noun belongs to the metric that owns the word.
+ */
+export const qualified = (nouns: readonly string[], qualifiers: readonly string[]): string[] =>
+  qualifiers.flatMap((q) => nouns.map((n) => `${q} ${n}`));

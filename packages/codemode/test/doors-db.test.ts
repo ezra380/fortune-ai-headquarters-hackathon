@@ -266,10 +266,15 @@ describe('file_work_report at a door', () => {
 describe('serve.ts', () => {
   const tsx = path.join(root, 'node_modules/.bin/tsx');
   const serve = path.join(root, 'packages/codemode/src/serve.ts');
-  // The door serves the STORED profile's reads: the shared database may hold an older version than this branch's files.
+  // The door serves the STORED profile's reads: the shared database may hold an older version than this branch's files
+  // (lane D2 adds reads; the merge reseeds the profiles and compares with the file profile again). Drift the other way
+  // fails loud: a stored profile may lag the files, never serve a read this branch's files do not name.
   const storedDoorTools = async (assistant: AssistantId) => {
     const reads = (await pool.query('select reads from public.assistant_profiles where assistant_id = $1', [assistant])).rows[0].reads as AssistantProfile['reads'];
-    return ['file_work_report', ...doorReads({ ...loadProfiles({})[assistant], reads })].sort();
+    const stored = ['file_work_report', ...doorReads({ ...loadProfiles({})[assistant], reads })].sort();
+    const files = ['file_work_report', ...doorReads(loadProfiles({})[assistant])];
+    for (const t of stored) expect(files, `the stored ${assistant} profile serves ${t}, which this branch's files do not: reseed profiles`).toContain(t);
+    return stored;
   };
   const run = (args: string[], env: Record<string, string>) =>
     spawnSync(tsx, [serve, ...args], { cwd: root, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...env }, encoding: 'utf8', timeout: 30_000, input: '' });
