@@ -70,7 +70,7 @@ export function buildWeeklyEmail(weekly: WeeklyReport, ctx: ReportContext): Repo
     preheader: weekly.summary, title, byline: `For ${ctx.head}  |  ${ctx.manager}'s report  |  week of ${longDate(weekly.weekOf)}`,
     status: weekly.status, blocks, attached: 'The full report is attached as a PDF: the summary and what to decide first, then one page for each worker.',
   });
-  return { subject: `For ${ctx.head}: ${ctx.manager}'s weekly report`, html, text, attachmentName: `${ctx.divisionTitle}-weekly-report-${weekly.weekOf}.pdf` };
+  return { subject: scrub(`For ${ctx.head}: ${ctx.manager}'s weekly report`), html, text, attachmentName: `${ctx.divisionTitle}-weekly-report-${weekly.weekOf}.pdf` };
 }
 
 export function buildWorkerEmail(report: WorkerReport, ctx: ReportContext): ReportEmail {
@@ -86,5 +86,5 @@ export function buildWorkerEmail(report: WorkerReport, ctx: ReportContext): Repo
     preheader: report.headline, title: `${label} daily report`, byline: `For ${ctx.head}  |  ${ctx.divisionTitle}  |  ${longDate(report.day)}`,
     status: report.status, blocks, attached: 'The full report, with its numbers and where they come from, is attached as a PDF.',
   });
-  return { subject: `For ${ctx.head}: ${label} daily report`, html, text, attachmentName: `${ctx.divisionTitle}-${report.workerId.split('.')[1]}-${report.day}.pdf` };
+  return { subject: scrub(`For ${ctx.head}: ${label} daily report`), html, text, attachmentName: `${ctx.divisionTitle}-${report.workerId.split('.')[1]}-${report.day}.pdf` };
 }

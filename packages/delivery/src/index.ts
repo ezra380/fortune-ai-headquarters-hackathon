@@ -7,6 +7,8 @@ export { renderProposalPdf, toWinAnsi } from './pdf.ts';
 export { keyMetrics, renderWeeklyPacketPdf, renderWorkerReportPdf, rowKey, rowValue, sourceText } from './report-pdf.ts';
 export { formatValue, longDate, money, projectionLine, WORKER_LABEL } from './format.ts';
 export { buildWeeklyEmail, buildWorkerEmail } from './report-email.ts';
+export { checkedWeeklyReport, checkedWorkerReport, packetWorkers, reportContext } from './packet.ts';
+export type { WorkerReportRow } from './packet.ts';
 
 // Texts, emails and printouts. Twilio, Postmark and PrintNode are called with server-side credentials only; a
 // recipient outside the registered set is refused before any network call; an outbox item is sent
@@ -101,6 +103,10 @@ export function createDeliveryPort(env: NodeJS.ProcessEnv, deps: DeliveryDeps): 
         });
       } catch {
         throw new DeliveryError('Postmark could not be reached; the message may not have been sent');
+      }
+      if (response.status >= 500 && response.status !== 503) {
+        // A gateway can fail after Postmark has taken the message, so this is never "safe to send again".
+        throw new DeliveryError(`Postmark failed (HTTP ${response.status}); the message may have been sent`);
       }
       if (response.status !== 200) throw new DeliveryError(`Postmark refused the message (HTTP ${response.status})`);
       const answer = (await response.json().catch(() => ({}))) as { MessageID?: unknown; ErrorCode?: unknown };

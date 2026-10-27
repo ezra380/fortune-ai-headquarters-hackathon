@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ProfitPlans, weeklyReportRef, workerReportRef, type DeliveryPort, type WeeklyReport, type WorkerReport } from '@fahq/contracts';
+import { ProfitPlans, weeklyReportRef, workerReportRef, type DeliveryPort, type ManagedDivision, type WeeklyReport, type WorkerReport } from '@fahq/contracts';
 import { createDeliveryPort } from '@fahq/delivery';
 import { pdfPages } from '../../../packages/delivery/test/pdf-text.ts';
 import { weeklyReport, workerReport, workerReportsOf } from '../../../packages/delivery/test/report-fixtures.ts';
@@ -23,12 +23,23 @@ const env = { POSTMARK_HQ_SERVER_TOKEN: 'pm-test-only-token', POSTMARK_HQ_FROM: 
 type Call = { url: string; body: Record<string, unknown> };
 type Row = OutboxRow & { claimed_at: string | null; last_error: string; provider_ref: string };
 
-function setup(rows: Partial<Row>[], o: { env?: NodeJS.ProcessEnv; reportTo?: string | null; printers?: WorkerDeps['printers']; postmark?: [number, unknown]; weekly?: WeeklyReport | null; workers?: WorkerReport[] } = {}) {
+type Options = {
+  env?: NodeJS.ProcessEnv; reportTo?: string | null; printers?: WorkerDeps['printers']; postmark?: [number, unknown]; weekly?: WeeklyReport | null; workers?: WorkerReport[];
+  /** How many times reading the weekly report fails (a short database failure) before it works. */
+  readFailures?: number;
+  /** How many times drawing the weekly packet fails before it works. */
+  renderFailures?: number;
+};
+
+function setup(rows: Partial<Row>[], o: Options = {}) {
   const table: Row[] = rows.map((r, i) => ({
     id: `row-${i}`, channel: 'email', to_person_id: 'demo-p-finance', from_assistant: 'finance', body: 'Reply APPROVE 1 123456',
     attachment_ref: weeklyReportRef(WEEKLY_ID), status: 'pending', attempts: 0, claimed_at: null, last_error: '', provider_ref: '', ...r,
   }));
   const calls: Call[] = [];
+  const packets: { division: ManagedDivision; ids: readonly string[] }[] = [];
+  let readFailures = o.readFailures ?? 0;
+  let renderFailures = o.renderFailures ?? 0;
   const weekly = o.weekly === undefined ? weeklyReport('finance') : o.weekly;
   const store = {
     strandedOutbox: async () => [] as Row[],
@@ -48,9 +59,15 @@ function setup(rows: Partial<Row>[], o: { env?: NodeJS.ProcessEnv; reportTo?: st
     retryOutbox: async (row: OutboxRow, error: string) => {
       Object.assign(table.find((x) => x.id === row.id)!, { status: 'pending', attempts: row.attempts + 1, last_error: error, claimed_at: null });
     },
-    weeklyReportById: async (id: string) => (id === WEEKLY_ID && weekly ? { id, report: weekly } : null),
+    weeklyReportById: async (id: string) => {
+      if (readFailures-- > 0) throw new Error('weekly report failed (57014)');
+      return id === WEEKLY_ID && weekly ? { id, report: weekly } : null;
+    },
     workerReportById: async (id: string) => (id === WORKER_ID ? workerReport('finance.meta') : null),
-    workerReportsByIds: async () => o.workers ?? workerReportsOf('finance'),
+    workerReportsByIds: async (division: ManagedDivision, ids: readonly string[]) => {
+      packets.push({ division, ids });
+      return o.workers ?? workerReportsOf('finance');
+    },
     message: async (id: string) => ({ id, from_assistant: 'finance', to_assistant: 'owner', kind: 'proposal', body: { plans: ProfitPlans.parse(validPlans), metrics: mockMetrics }, status: 'open', reply_to: null, created_at: '2026-10-26T12:00:00Z' }),
     personByAssistant: async () => ({ id: 'demo-p-owner', name: 'Demo Owner', role: 'owner', phone: '+15550111001', assistant_id: 'owner' }),
   };
@@ -61,13 +78,20 @@ function setup(rows: Partial<Row>[], o: { env?: NodeJS.ProcessEnv; reportTo?: st
   }) as unknown as typeof fetch;
   const port = createDeliveryPort(o.env ?? env, { fetch: fetchFake, now: () => new Date('2026-10-26T12:00:00Z'), sentLedger: new Set<string>() });
   const emails: Parameters<DeliveryPort['sendEmail']>[0][] = [];
-  const delivery = { ...port, sendEmail: (input: Parameters<DeliveryPort['sendEmail']>[0]) => { emails.push(input); return port.sendEmail(input); } } as DeliveryPort;
+  const delivery = {
+    ...port,
+    sendEmail: (input: Parameters<DeliveryPort['sendEmail']>[0]) => { emails.push(input); return port.sendEmail(input); },
+    renderWeeklyPacketPdf: (...args: Parameters<DeliveryPort['renderWeeklyPacketPdf']>) => {
+      if (renderFailures-- > 0) throw new Error('the report could not be drawn');
+      return port.renderWeeklyPacketPdf(...args);
+    },
+  } as DeliveryPort;
   const printDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-outbox-'));
   const deps = {
     store, delivery, smsLive: false, printers: o.printers ?? {}, printDir, now: () => new Date('2026-10-26T12:00:00Z'),
     reportTo: o.reportTo === undefined ? OWNER : o.reportTo ?? undefined,
   } as unknown as WorkerDeps;
-  return { table, calls, emails, deps, printDir };
+  return { table, calls, emails, deps, printDir, packets };
 }
 
 const postmarkCalls = (calls: Call[]) => calls.filter((c) => c.url.includes('postmarkapp'));
@@ -143,12 +167,59 @@ describe('report emails', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('fails plainly when the report is gone, and when the reference is not a report id', async () => {
+  it('fails plainly when the report is gone (after the tries every read before a send gets), and skips a reference that is not a report id', async () => {
     const { table, calls, deps } = setup([{ attachment_ref: weeklyReportRef(MISSING_ID) }, { attachment_ref: 'weekly_report:../../etc/passwd' }]);
-    await flushOutbox(deps);
-    expect(table[0]).toMatchObject({ status: 'failed', last_error: 'the weekly report was not found' });
+    for (let i = 0; i < 4; i++) await flushOutbox(deps);
+    expect(table[0]).toMatchObject({ status: 'failed', attempts: 2, last_error: 'the weekly report was not found' });
     expect(table[1]).toMatchObject({ status: 'skipped' });
     expect(calls).toHaveLength(0);
+  });
+
+  it('tries again when reading the report fails for a moment, and sends exactly one email once it works', async () => {
+    const { table, calls, deps } = setup([{}], { readFailures: 1 });
+    await flushOutbox(deps);
+    expect(table[0]).toMatchObject({ status: 'pending', attempts: 1, last_error: 'weekly report failed (57014)' });
+    expect(calls).toHaveLength(0);
+    await flushOutbox(deps);
+    await flushOutbox(deps);
+    expect(table[0]).toMatchObject({ status: 'sent', provider_ref: 'pm-message-1' });
+    expect(postmarkCalls(calls)).toHaveLength(1);
+  });
+
+  it('tries again when drawing the report fails once, and gives up after three tries without calling any provider', async () => {
+    const once = setup([{}], { renderFailures: 1 });
+    await flushOutbox(once.deps);
+    await flushOutbox(once.deps);
+    expect(once.table[0]?.status).toBe('sent');
+    expect(postmarkCalls(once.calls)).toHaveLength(1);
+
+    const always = setup([{}], { readFailures: 99 });
+    for (let i = 0; i < 5; i++) await flushOutbox(always.deps);
+    expect(always.table[0]).toMatchObject({ status: 'failed', attempts: 2, last_error: 'weekly report failed (57014)' });
+    expect(always.calls).toHaveLength(0);
+  });
+
+  it("builds the packet from the weekly report's own division and worker ids, and names the people from the registry, not from stored words", async () => {
+    const weekly = weeklyReport('finance', { head: 'Alan 482913', manager: 'George 482913' });
+    const { table, calls, packets, deps } = setup([{}], { weekly });
+    await flushOutbox(deps);
+    expect(table[0]?.status).toBe('sent');
+    expect(packets).toEqual([{ division: 'finance', ids: weekly.workerReportIds }]);
+    const sent = postmarkCalls(calls)[0]!.body as { Subject: string; Attachments: { Content: string }[]; TextBody: string };
+    expect(sent.Subject).toBe("For Alan: George's weekly report");
+    expect(sent.TextBody).not.toContain('482913');
+    const pages = await pdfPages(new Uint8Array(Buffer.from(sent.Attachments[0]!.Content, 'base64')));
+    expect(pages[0]).toContain("George's report to Alan");
+    expect(pages[0]).not.toContain('482913');
+  });
+
+  it('says on the cover how many worker reports could not be loaded, and still sends the packet', async () => {
+    const { table, calls, deps } = setup([{}], { workers: workerReportsOf('finance').slice(0, 4) });
+    await flushOutbox(deps);
+    expect(table[0]?.status).toBe('sent');
+    const sent = postmarkCalls(calls)[0]!.body as { Attachments: { Content: string }[] };
+    const pages = await pdfPages(new Uint8Array(Buffer.from(sent.Attachments[0]!.Content, 'base64')));
+    expect(pages[0]).toMatch(/3 of 7 worker reports could not be loaded/);
   });
 
   it('keeps the provider body out of the row when Postmark refuses, and does not retry a refusal that means the message is wrong', async () => {
@@ -159,11 +230,18 @@ describe('report emails', () => {
     expect(table[0]).toMatchObject({ status: 'failed', last_error: 'Postmark refused the message (HTTP 422)' });
   });
 
-  it('tries again, at most three times, when Postmark is down', async () => {
-    const { table, calls, deps } = setup([{}], { postmark: [503, 'down'] });
+  it.each([429, 503])('tries again, at most three times, when Postmark says it is busy or down (HTTP %i)', async (status) => {
+    const { table, calls, deps } = setup([{}], { postmark: [status, 'down'] });
     for (let i = 0; i < 4; i++) await flushOutbox(deps);
     expect(postmarkCalls(calls)).toHaveLength(3);
-    expect(table[0]).toMatchObject({ status: 'failed', last_error: 'Postmark refused the message (HTTP 503)' });
+    expect(table[0]).toMatchObject({ status: 'failed', last_error: `Postmark refused the message (HTTP ${status})` });
+  });
+
+  it.each([500, 502, 504])('never sends again after Postmark fails with HTTP %i, because it may already have taken the message', async (status) => {
+    const { table, calls, deps } = setup([{}], { postmark: [status, 'gateway timeout'] });
+    for (let i = 0; i < 4; i++) await flushOutbox(deps);
+    expect(postmarkCalls(calls)).toHaveLength(1);
+    expect(table[0]).toMatchObject({ status: 'failed', attempts: 0, last_error: `Postmark failed (HTTP ${status}); the message may have been sent` });
   });
 });
 

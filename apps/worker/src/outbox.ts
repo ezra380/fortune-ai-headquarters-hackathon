@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { MANAGERS, workerDivision, type DeliveryPort, type ProfitPlans, type ProposalDocument, type ReportContext, type ReportEmail } from '@fahq/contracts';
+import { workerDivision, type DeliveryPort, type ProfitPlans, type ProposalDocument, type ReportEmail } from '@fahq/contracts';
+import { reportContext } from '@fahq/delivery';
 import { citedMetricsOf, type WorkerDeps } from './flows.ts';
 import type { OutboxRow, PersonRow } from './store.ts';
 
@@ -14,8 +15,21 @@ import type { OutboxRow, PersonRow } from './store.ts';
 
 const STRANDED_AFTER_MS = 5 * 60_000;
 const MAX_TRIES = 3;
-/** Twilio or Postmark said no before accepting the message (rate limit or their own outage): safe to try again. */
-const retryable = (message: string) => /\(HTTP (429|5\d\d)\)/.test(message);
+/**
+ * A failure while the report was being read or drawn. No provider had been called, so another try cannot send anything twice.
+ * (A report that is not there is tried again too: it costs three quick reads and ends as a plain "failed".)
+ */
+class BeforeSend extends Error {}
+/**
+ * Whether trying again cannot send twice. Twilio and PrintNode: a rate limit or their own outage. Postmark (email): only a rate
+ * limit (429) or "unavailable" (503), which come before it takes the message; any other 5xx (a gateway timeout, say) can arrive
+ * AFTER Postmark has accepted it, so that is settled as failed ("may have been sent") and never sent again.
+ */
+function retryable(error: unknown, channel: OutboxRow['channel']): boolean {
+  if (error instanceof BeforeSend) return true;
+  const message = error instanceof Error ? error.message : '';
+  return (channel === 'email' ? /\(HTTP (429|503)\)/ : /\(HTTP (429|5\d\d)\)/).test(message);
+}
 
 /** What one row came to: it went out, or it was left out for a plain reason (never a failure). */
 type Handled = { status: 'sent'; providerRef: string } | { status: 'skipped'; error: string };
@@ -66,7 +80,7 @@ export async function flushOutbox(deps: WorkerDeps): Promise<number> {
         console.error(`outbox.settle_failed id=${row.id.slice(0, 8)}`);
         continue;
       }
-      if (retryable(message) && row.attempts + 1 < MAX_TRIES) await deps.store.retryOutbox(row, message);
+      if (retryable(error, row.channel) && row.attempts + 1 < MAX_TRIES) await deps.store.retryOutbox(row, message);
       else await deps.store.settleOutbox(row, { status: 'failed', error: message, now });
     }
   }
@@ -77,21 +91,32 @@ export async function flushOutbox(deps: WorkerDeps): Promise<number> {
 
 type ReportDocument = { title: string; pdf: Uint8Array; email: ReportEmail };
 
-/** The stored report behind a ref, drawn as a PDF with its email. Throws a plain sentence when the report is gone. */
+/**
+ * The stored report behind a ref, drawn as a PDF with its email. Throws a plain sentence when the report is gone, and any failure
+ * on the way is a `BeforeSend` (nothing has gone out yet, so the row may be tried again).
+ */
 async function reportDocument(deps: WorkerDeps, delivery: DeliveryPort, ref: ReportRef): Promise<ReportDocument> {
+  try {
+    return await buildReportDocument(deps, delivery, ref);
+  } catch (error) {
+    throw new BeforeSend(error instanceof Error ? error.message : 'the report could not be prepared');
+  }
+}
+
+/** The people on a report come from the registry (never from words stored in the report), and a packet holds its own division's workers only. */
+async function buildReportDocument(deps: WorkerDeps, delivery: DeliveryPort, ref: ReportRef): Promise<ReportDocument> {
   if (ref.kind === 'weekly') {
     const row = await deps.store.weeklyReportById(ref.id);
     if (!row) throw new Error('the weekly report was not found');
     const weekly = row.report;
-    const ctx: ReportContext = { manager: weekly.manager, head: weekly.head, divisionTitle: MANAGERS[weekly.division].title };
-    const workers = await deps.store.workerReportsByIds(weekly.workerReportIds);
+    const ctx = reportContext(weekly.division);
+    const workers = await deps.store.workerReportsByIds(weekly.division, weekly.workerReportIds);
     return { title: `${ctx.divisionTitle} weekly report ${weekly.weekOf}`, pdf: await delivery.renderWeeklyPacketPdf(weekly, workers, ctx), email: delivery.weeklyReportEmail(weekly, ctx) };
   }
   const report = await deps.store.workerReportById(ref.id);
   if (!report) throw new Error('the worker report was not found');
-  const { manager, head, title } = MANAGERS[workerDivision(report.workerId)];
-  const ctx: ReportContext = { manager, head, divisionTitle: title };
-  return { title: `${title} daily report ${report.day}`, pdf: await delivery.renderWorkerReportPdf(report, ctx), email: delivery.workerReportEmail(report, ctx) };
+  const ctx = reportContext(workerDivision(report.workerId));
+  return { title: `${ctx.divisionTitle} daily report ${report.day}`, pdf: await delivery.renderWorkerReportPdf(report, ctx), email: delivery.workerReportEmail(report, ctx) };
 }
 
 /** The report email goes to HQ_REPORT_TO only: the allowed set is exactly that one address. */

@@ -3,8 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { openBrain } from '@fahq/brain';
-import { WeeklyReport, WORKER_IDS, WorkerReport, workerDivision } from '@fahq/contracts';
-import type { ManagedDivision } from '@fahq/contracts';
+import { WORKER_IDS, workerDivision } from '@fahq/contracts';
+import type { ManagedDivision, WeeklyReport, WorkerReport } from '@fahq/contracts';
+import { checkedWeeklyReport, checkedWorkerReport, packetWorkers } from '@fahq/delivery';
 import { weekStart } from './days.ts';
 import type {
   DepartmentId, ManagerPart, RawApproval, RawDepartment, RawManager, RawMessage, RawOutbox, RawReceipt, RawRecommendation, RawReview,
@@ -558,35 +559,32 @@ export class ReportUnreadable extends Error {
 
 /**
  * Reads the stored reports a PDF is made from, by id: a weekly report with the worker reports it was built from (the same
- * division only, in the registry's order), or one worker's report. Each is checked against its contract before it is used. A
- * worker report that is not in its shape is left out, so the packet says it could not be loaded, as the emailed one does.
- * READ ONLY, server side, named columns.
+ * division only, in the registry's order), or one worker's report. The checks are the delivery package's own (packet.ts), the same
+ * ones the worker applies to the packet it emails and prints, so the two are always the same packet: a report that is not in its
+ * shape, or is not the one its row says, is refused (a single report) or left out (a packet worker, so the cover says it could
+ * not be loaded). READ ONLY, server side, named columns.
  */
 export function createReportLoader(options: { db: Db }): (kind: 'weekly' | 'worker', id: string) => Promise<LoadedReport | null> {
   const { db } = options;
 
   return async (kind, id) => {
     if (kind === 'worker') {
-      const row = must<{ division: string; report: unknown } | null>(await db.from('worker_reports').select('division,report').eq('id', id).maybeSingle());
+      const row = must<{ worker_id: string; division: string; report: unknown } | null>(await db.from('worker_reports').select('worker_id,division,report').eq('id', id).maybeSingle());
       if (!row) return null;
-      const worker = WorkerReport.safeParse(row.report);
-      if (!worker.success || workerDivision(worker.data.workerId) !== row.division) throw new ReportUnreadable();
-      return { kind, division: row.division as ManagedDivision, worker: worker.data };
+      const worker = checkedWorkerReport(row);
+      if (!worker) throw new ReportUnreadable();
+      return { kind, division: workerDivision(worker.workerId), worker };
     }
 
     const row = must<{ id: string; division: string; report: unknown } | null>(await db.from('weekly_reports').select('id,division,report').eq('id', id).maybeSingle());
     if (!row) return null;
-    const weekly = WeeklyReport.safeParse(row.report);
-    if (!weekly.success || weekly.data.division !== row.division) throw new ReportUnreadable();
-    const stored = weekly.data.workerReportIds.length === 0
+    const weekly = checkedWeeklyReport(row);
+    if (!weekly) throw new ReportUnreadable();
+    const stored = weekly.workerReportIds.length === 0
       ? []
       : must<{ worker_id: string; report: unknown }[]>(
-          await db.from('worker_reports').select('worker_id,report').eq('division', weekly.data.division).in('id', weekly.data.workerReportIds),
+          await db.from('worker_reports').select('worker_id,report').eq('division', weekly.division).in('id', weekly.workerReportIds),
         );
-    const workers = stored
-      .map((r) => WorkerReport.safeParse(r.report))
-      .flatMap((r) => (r.success ? [r.data] : []))
-      .sort((a, b) => WORKER_IDS.indexOf(a.workerId) - WORKER_IDS.indexOf(b.workerId));
-    return { kind, division: weekly.data.division, weekly: weekly.data, workers };
+    return { kind, division: weekly.division, weekly, workers: packetWorkers(weekly.division, stored) };
   };
 }

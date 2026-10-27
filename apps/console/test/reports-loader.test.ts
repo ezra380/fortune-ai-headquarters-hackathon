@@ -246,10 +246,23 @@ describe('the report loader (what a PDF is made from)', () => {
   });
 
   it('reads one worker report by its id', async () => {
-    const r = recorder((call) => ({ data: { division: 'finance', report: workerReport('finance.meta') } }));
+    const r = recorder((call) => ({ data: { worker_id: 'finance.meta', division: 'finance', report: workerReport('finance.meta') } }));
     const doc = await createReportLoader({ db: r.db })('worker', workerRowId('finance.meta', '2026-10-27'));
     expect(doc).toMatchObject({ kind: 'worker', division: 'finance' });
-    expect(r.calls[0]).toMatchObject({ table: 'worker_reports', select: 'division,report' });
+    expect(r.calls[0]).toMatchObject({ table: 'worker_reports', select: 'worker_id,division,report' });
+  });
+
+  it("leaves out of a packet a report of another division (even if its id is listed), a report that is another worker's, and a bad row", async () => {
+    const rows = [
+      { worker_id: 'finance.email', report: workerReport('finance.email') },
+      { worker_id: 'salon.clients', report: workerReport('salon.clients') },
+      { worker_id: 'finance.meta', report: workerReport('finance.walmart') },
+      { worker_id: 'finance.amazon', report: { headline: 'nope' } },
+      { worker_id: 'finance.google_ads', report: workerReport('finance.google_ads') },
+    ];
+    const doc = await createReportLoader({ db: recorder((call) => (call.table === 'worker_reports' ? { data: rows } : packet(call))).db })('weekly', weeklyRowId('finance'));
+    if (doc?.kind !== 'weekly') throw new Error('expected a weekly packet');
+    expect(doc.workers.map((w) => w.workerId)).toEqual(['finance.email', 'finance.google_ads']);
   });
 
   it('returns null for an id with no report', async () => {
@@ -260,7 +273,9 @@ describe('the report loader (what a PDF is made from)', () => {
 
   it('refuses a report that is not in its shape, or whose division disagrees with its row, without showing it', async () => {
     await expect(createReportLoader({ db: recorder(() => ({ data: { id: 'x', division: 'finance', report: { summary: 'x' } } })).db })('weekly', weeklyRowId('finance'))).rejects.toThrow('not in the shape');
-    await expect(createReportLoader({ db: recorder(() => ({ data: { division: 'online', report: workerReport('finance.meta') } })).db })('worker', workerRowId('finance.meta', '2026-10-27'))).rejects.toThrow('not in the shape');
+    await expect(createReportLoader({ db: recorder(() => ({ data: { worker_id: 'finance.meta', division: 'online', report: workerReport('finance.meta') } })).db })('worker', workerRowId('finance.meta', '2026-10-27'))).rejects.toThrow('not in the shape');
+    // a report that is another worker's than its row says
+    await expect(createReportLoader({ db: recorder(() => ({ data: { worker_id: 'finance.email', division: 'finance', report: workerReport('finance.meta') } })).db })('worker', workerRowId('finance.meta', '2026-10-27'))).rejects.toThrow('not in the shape');
     await expect(createReportLoader({ db: recorder(() => ({ data: { id: 'x', division: 'online', report: finance } })).db })('weekly', weeklyRowId('finance'))).rejects.toThrow('not in the shape');
   });
 

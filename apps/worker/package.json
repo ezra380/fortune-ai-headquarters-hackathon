@@ -11,6 +11,7 @@
     "@fahq/brain": "*",
     "@fahq/codemode": "*",
     "@fahq/contracts": "*",
+    "@fahq/delivery": "*",
     "@fahq/models": "*",
     "@fahq/profiles": "*",
     "@supabase/supabase-js": "^2.118.0",

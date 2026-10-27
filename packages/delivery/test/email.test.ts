@@ -94,6 +94,17 @@ describe('sendEmail', () => {
     expect(error.message).toBe('Postmark could not be reached; the message may not have been sent');
   });
 
+  it('says the message may have been sent when Postmark fails after taking it (5xx), and keeps a rate limit or an outage plain', async () => {
+    for (const status of [500, 502, 504]) {
+      const error = (await port(status, 'gateway timeout owner@example.com', []).sendEmail(mail).then(() => null, (e: unknown) => e)) as Error;
+      expect(error.message).toBe(`Postmark failed (HTTP ${status}); the message may have been sent`);
+    }
+    for (const status of [429, 503]) {
+      const error = (await port(status, 'busy', []).sendEmail(mail).then(() => null, (e: unknown) => e)) as Error;
+      expect(error.message).toBe(`Postmark refused the message (HTTP ${status})`);
+    }
+  });
+
   it('keeps a subject and an attachment name to one safe line', async () => {
     const calls: Call[] = [];
     await port(200, OK, calls).sendEmail({ ...mail, subject: 'For Alan\r\nBcc: x@example.com', attachments: [{ name: '../weekly "report"\n.pdf', pdf }] });
@@ -140,6 +151,15 @@ describe('the email that carries a report', () => {
       for (const secret of ['555', '482913', 'boss@example.com', '0199']) expect(text).not.toContain(secret);
     }
     expect(out.text).toContain('[phone]');
+  });
+
+  it('puts no code, address or phone number in a subject, whatever the head or manager is called', () => {
+    const dirty = { manager: 'George 482913', head: 'Alan 482913 boss@example.com (555) 010-0199', divisionTitle: 'Finance' };
+    for (const out of [buildWeeklyEmail(weeklyReport('finance'), dirty), buildWorkerEmail(workerReport('finance.meta'), dirty)]) {
+      for (const secret of ['482913', 'boss@example.com', '555', '0199']) expect(out.subject).not.toContain(secret);
+      expect(out.subject).toContain('[code]');
+      expect(out.subject).toMatch(/^For Alan /);
+    }
   });
 
   it('builds a worker report email with its findings and the numbers they cite', () => {

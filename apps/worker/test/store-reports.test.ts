@@ -36,11 +36,11 @@ async function addWorkerReport(id: WorkerId, report: unknown = workerReport(id))
   return rows[0].id as string;
 }
 
-async function addWeeklyReport(report: unknown): Promise<string> {
+async function addWeeklyReport(report: unknown, division = 'finance'): Promise<string> {
   const { rows } = await pool.query(
     `insert into public.weekly_reports (division, report_key, week_of, period, status, written_by, report, ceo_line)
-     values ('finance', $1, $2, '2026-10-mtd', 'watch', 'model', $3::jsonb, 'Finance is healthy.') returning id`,
-    [`weekly:finance:${MONDAY}:${randomUUID()}`, MONDAY, JSON.stringify(report)],
+     values ($4, $1, $2, '2026-10-mtd', 'watch', 'model', $3::jsonb, 'Finance is healthy.') returning id`,
+    [`weekly:${division}:${MONDAY}:${randomUUID()}`, MONDAY, JSON.stringify(report), division],
   );
   weeklyIds.push(rows[0].id as string);
   return rows[0].id as string;
@@ -66,9 +66,24 @@ describe.skipIf(!api)('store: the reads delivery needs (real local database)', (
     const walmart = await addWorkerReport('finance.walmart');
     const email = await addWorkerReport('finance.email');
     const meta = await addWorkerReport('finance.meta');
-    const reports = await store.workerReportsByIds([walmart, randomUUID(), email, meta]);
+    const reports = await store.workerReportsByIds('finance', [walmart, randomUUID(), email, meta]);
     expect(reports.map((r) => r.workerId)).toEqual(['finance.email', 'finance.meta', 'finance.walmart']);
-    expect(await store.workerReportsByIds([])).toEqual([]);
+    expect(await store.workerReportsByIds('finance', [])).toEqual([]);
+  });
+
+  it("never reads another division's report into a packet, even when its id is listed", async () => {
+    const email = await addWorkerReport('finance.email');
+    const clients = await addWorkerReport('salon.clients');
+    expect((await store.workerReportsByIds('finance', [email, clients])).map((r) => r.workerId)).toEqual(['finance.email']);
+    expect((await store.workerReportsByIds('salon', [email, clients])).map((r) => r.workerId)).toEqual(['salon.clients']);
+  });
+
+  it("leaves out a worker report that is malformed or is another worker's, so the packet can say it could not be loaded", async () => {
+    const email = await addWorkerReport('finance.email');
+    const malformed = await addWorkerReport('finance.meta', { workerId: 'finance.meta', headline: 'secret words' });
+    const swapped = await addWorkerReport('finance.amazon', workerReport('finance.walmart'));
+    const reports = await store.workerReportsByIds('finance', [email, malformed, swapped]);
+    expect(reports.map((r) => r.workerId)).toEqual(['finance.email']);
   });
 
   it('refuses a stored report that no longer matches its contract, with a fixed sentence and none of its words', async () => {
@@ -77,5 +92,12 @@ describe.skipIf(!api)('store: the reads delivery needs (real local database)', (
     expect(error.message).toBe('the stored weekly report does not match its contract');
     const worker = await addWorkerReport('finance.email', { workerId: 'finance.email', headline: 'secret words' });
     expect(((await store.workerReportById(worker).then(() => null, (e: unknown) => e)) as Error).message).toBe('the stored worker report does not match its contract');
+  });
+
+  it("refuses a report that is not the one its row says it is (the row's division, the row's worker)", async () => {
+    const wrongDivision = await addWeeklyReport(weeklyReport('finance'), 'online');
+    expect(((await store.weeklyReportById(wrongDivision).then(() => null, (e: unknown) => e)) as Error).message).toBe('the stored weekly report does not match its contract');
+    const wrongWorker = await addWorkerReport('finance.meta', workerReport('finance.email'));
+    expect(((await store.workerReportById(wrongWorker).then(() => null, (e: unknown) => e)) as Error).message).toBe('the stored worker report does not match its contract');
   });
 });

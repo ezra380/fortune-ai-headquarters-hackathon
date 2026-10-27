@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
-import { WeeklyReport, WORKER_IDS, WorkerReport } from '@fahq/contracts';
+import type { ManagedDivision, WeeklyReport, WorkerReport } from '@fahq/contracts';
+import { checkedWeeklyReport, checkedWorkerReport, packetWorkers } from '@fahq/delivery';
 import type { AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagerReview, Receipt, Recommendation, RecommendationDetail, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
@@ -524,33 +525,37 @@ export function createStore(url: string, serviceKey: string) {
     },
 
     // ---- delivery reads (W2) -----------------------------------------------------------------
-    // What the outbox needs to print or email a report: the stored report, checked with its schema before it is used.
+    // What the outbox needs to print or email a report. Each report is checked the way the console's PDF link checks it
+    // (packages/delivery/src/packet.ts), so the emailed and printed packet is the packet the link opens.
 
-    /** One weekly report as stored, or null when there is no such row. A row that does not match its schema is an error. */
+    /** One weekly report as stored, or null when there is no such row. A row that is not what it says it is (its shape, its division) is an error. */
     async weeklyReportById(id: string): Promise<{ id: string; report: WeeklyReport } | null> {
-      const row = must(await db.from('weekly_reports').select('id, report').eq('id', id).maybeSingle(), 'weekly report') as { id: string; report: unknown } | null;
-      return row ? { id: row.id, report: parseReport(WeeklyReport, row.report, 'weekly report') } : null;
+      const row = must(await db.from('weekly_reports').select('id, division, report').eq('id', id).maybeSingle(), 'weekly report') as { id: string; division: string; report: unknown } | null;
+      if (!row) return null;
+      return { id: row.id, report: stored(checkedWeeklyReport(row), 'weekly report') };
     },
-    /** One worker report as stored, or null when there is no such row. */
+    /** One worker report as stored, or null when there is no such row. A row whose report is another worker's, or in another shape, is an error. */
     async workerReportById(id: string): Promise<WorkerReport | null> {
-      const row = must(await db.from('worker_reports').select('report').eq('id', id).maybeSingle(), 'worker report') as { report: unknown } | null;
-      return row ? parseReport(WorkerReport, row.report, 'worker report') : null;
+      const row = must(await db.from('worker_reports').select('worker_id, division, report').eq('id', id).maybeSingle(), 'worker report') as { worker_id: string; division: string; report: unknown } | null;
+      return row ? stored(checkedWorkerReport(row), 'worker report') : null;
     },
-    /** The worker reports with these ids, in the order of the registry (a packet always reads the same way). Ids with no row are left out. */
-    async workerReportsByIds(ids: readonly string[]): Promise<WorkerReport[]> {
+    /**
+     * The worker reports of one division's packet, from the ids its weekly report lists, in the order of the registry. Ids with no row,
+     * ids of another division, and rows that are not in their shape (or not the worker's they say) are left out: the packet's cover then
+     * says how many could not be loaded. One bad row never stops the packet.
+     */
+    async workerReportsByIds(division: ManagedDivision, ids: readonly string[]): Promise<WorkerReport[]> {
       if (ids.length === 0) return [];
-      const rows = must(await db.from('worker_reports').select('report').in('id', [...ids]), 'worker reports') as { report: unknown }[];
-      const reports = rows.map((r) => parseReport(WorkerReport, r.report, 'worker report'));
-      return reports.sort((a, b) => WORKER_IDS.indexOf(a.workerId) - WORKER_IDS.indexOf(b.workerId));
+      const rows = must(await db.from('worker_reports').select('worker_id, report').eq('division', division).in('id', [...ids]), 'worker reports') as { worker_id: string; report: unknown }[];
+      return packetWorkers(division, rows);
     },
   };
 }
 
-/** Checks a stored report with its schema. The error is a fixed sentence: the stored words never reach a log or an outbox row. */
-function parseReport<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } }, value: unknown, what: string): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new Error(`the stored ${what} does not match its contract`);
-  return parsed.data;
+/** A stored report that passed its check; otherwise a fixed sentence (the stored words never reach a log or an outbox row). */
+function stored<T>(report: T | null, what: string): T {
+  if (!report) throw new Error(`the stored ${what} does not match its contract`);
+  return report;
 }
 
 export type Store = ReturnType<typeof createStore>;
