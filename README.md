@@ -122,7 +122,7 @@ who asked, who proposed it, why it was picked, every metric it cited with its Ze
 | Data | **Synthetic.** Each source has exactly one planted bad row that must be rejected in its own month only | `packages/data/test/operations.test.ts`, `year.test.ts` |
 | Salon assistant | **Stand-in** for the head stylist's own app | No salon client segment, product sales or personalization feeds yet (see [Known limits](#known-limits)) |
 | Full-chain tests | **Mocked** models and data, real local database and real Meterless engines | `apps/worker/test/chain.test.ts` |
-| Live end-to-end run of the merged build | The live worker runs it (`38a3094`); today's 15 workers were queued on 2026-10-27 | [run: live end-to-end run: tasks run, outcome] |
+| Live end-to-end run of the merged build | The live worker runs it; today's 15 workers were queued on 2026-10-27 | [run: live end-to-end run: tasks run, outcome] |
 | Printing | PrintNode only when a printer is configured; otherwise skipped with a reason | No printed report recorded |
 | Money, customers, ads | **Nothing moves money, messages a customer, publishes or changes an ad** | `AGENTS.md`; no assistant has a write tool. The one write at a door is an end-of-work note to the HQ Manager |
 
