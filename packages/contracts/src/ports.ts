@@ -58,15 +58,28 @@ export type ReadTool = {
   run: (args: unknown) => Promise<unknown>;
 };
 
+/** What one read tool returned to a script, as the sandbox received it (plain JSON). */
+export type ToolOutput = { tool: string; output: unknown };
+
 export type CodeModeResult = {
   ok: boolean;
-  /** The script's return value (plain JSON) when ok. */
+  /**
+   * The script's return value (plain JSON) when ok. A result is only ok when at least one tool returned
+   * data to the script, but the runner cannot tell arithmetic from a number the script typed itself:
+   * check numbers against `toolOutputs` (see `untracedResultNumbers` in @fahq/codemode).
+   */
   result: unknown;
   /** Why it failed, in a plain sentence, when not ok. */
   error: string | null;
   script: string | null;
   attempts: number;
+  /** Calls made over all attempts, including refused ones. */
   toolCalls: number;
+  /**
+   * What each tool returned during the run that produced `result`, in call order (empty when not ok).
+   * Held in memory for number checks; it never reaches a prompt.
+   */
+  toolOutputs: ToolOutput[];
   /** Characters of the script's result (what reaches the next model instead of raw tool output). */
   resultChars: number;
   inputTokens: number;

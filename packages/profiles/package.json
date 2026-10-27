@@ -1,0 +1,14 @@
+{
+  "name": "@fahq/profiles",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The read-only assistant profiles: who reads what, which model does which job, and each assistant's skill. Owner: lane A (Claude).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fahq/contracts": "*",
+    "zod": "^4.6.7"
+  }
+}
