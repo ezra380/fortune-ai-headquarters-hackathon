@@ -77,7 +77,7 @@ happened yet (it is empty), and the support inbox's last moment is Oct 26, 23:59
 | `divisions` | who reads it (salon, finance, online, hq); the catalog passes it on as `MetricInfo.divisions` |
 | `layer` | `period` (a total over the period's rows), `derived` (from other metrics: `layers.ts`), `standing` (as of the data date, period key `standing`) |
 | `about` | thresholds and caveats, kept out of the label so a plan never echoes them |
-| `nouns` | for a count, the words that name what it counts (for the small-count check to come) |
+| `nouns` | for a count, the phrases that name what it counts ("late repairs", "repairs"), for the plan checker's small-count rule |
 | `planUse` | `false` keeps a metric out of plan writing until the validator can check its kind of number |
 | `since` | `2`: served by version 2 only |
 
@@ -282,7 +282,7 @@ and the new tools refuse with a plain sentence.
 | `get_budget_room({period})` | per channel cap, spend, room, used; all ad spend; proposed changes; last-year index | ✓ | ✓ | | | |
 | `get_metric_series({metricId})` | ≤13 points + min, max, mean12, from the caller's division | ✓ | ✓ | ✓ | ✓ | |
 | `get_company_overview({period})` | HQ mart: salon, online and combined side by side, `normal`, attention | ✓ | | | | |
-| `get_data_quality({period})` | every rejected-rows count, their total, sources with any | | | | | ✓ |
+| `get_data_quality({period})` | every rejected-rows count, each under its business (never added up) | | | | | ✓ |
 | `get_repair_tickets({status, limit})` | rows + count, fees, cost | ✓ | | | ✓ | |
 | `get_supplier_invoices({status, business?, limit})` | rows + count and amount per business | ✓ | ✓ | | | |
 | `get_waiting_conversations({olderThanHours?, limit})` | thread, channel, topic, hours waited + counts | ✓ | | ✓ | | |
@@ -294,18 +294,34 @@ port. Plan rounds slice the read by the catalog's `divisions` (`sliceFor`, `depa
 from the money of both businesses side by side, not from every metric; a metric with `planUse: false` is
 never planned from.
 
+A failed read (Zetaris down, an HTTP error, SQL text in the body) reaches a script or a door client only as
+"Business data could not be read (ZETARIS_READ)."; the detail goes to the log (`worker.zetaris_read_failed`,
+`fortune-brain.zetaris_read_failed`) with email addresses and phone numbers masked. The door's own plain
+refusals ("it needs data version 2", "not one of the metrics your division reads") still read as before.
+The worker refuses a `FINANCE_PERIOD` the data does not serve: it plans for `2026-09` and logs why.
+
 ## The plan checker (`packages/contracts/src/validate.ts`)
 
-- **Ids are not amounts** (design 4e): digits right after a letter and a hyphen (`demo-rt-01234`,
-  `SUP-2201`) are part of an id. A minus sign or a range still reads (`-$3,000`, `10-20%`).
-- **Small counts** (design 4d): a number under 100 whose next two words name what a cited count metric
-  counts (the catalog's `nouns`: "3 overdue invoices") must be a count the plan holds (the metric, a count
-  projection or a count lever). `writePlans` passes the nouns from the port's catalog; without them small
+- **Ids are not amounts** (design 4e): bare digits that end a row id are part of the id: a synthetic row's
+  (`demo-rt-01234`, `demo-s-3`) or a supplier number (`SUP-2201`). Anything with a `$`, a unit, a comma or a
+  decimal point is still read, and so is any other word before the hyphen: "a sub-$5,000 test", "mid-30%",
+  "ROAS-9.5x", "the top-100 buyers". A minus sign or a range still reads (`-$3,000`, `10-20%`).
+- **Small counts** (design 4d): a whole number under 100 is a claim when the words after it (up to four, past
+  "of the", up to a joining word such as "about" or "and") name what a cited count metric counts. Each count
+  carries phrases in the catalog's `nouns` (`counted()` in `sql.ts`: "late repairs", "open repairs",
+  "overdue online invoices", then the bare nouns). The most specific phrase that fits picks the metric, and
+  the number must be THAT metric's value, one of its own projections or a count lever. A bare noun that two
+  cited counts with different values share ("3 repairs" beside 3 late and 16 open) is refused, with a phrase
+  of each to choose from. `catalog.test.ts` proves every count has a phrase that names it apart from every
+  other count its division reads. `writePlans` passes the phrases from the port's catalog; without them small
   counts are not checked, as before. The final check of a round does not pass them (the departments' own
   checks already did).
+- **Seasonal budgets** (design 4g): once a plan cites `m:online.season.last_year_index`, or a projection on an
+  approved cap (`m:online.budget.<channel>.cap`) names the season, that projection's factor must be the
+  index's value. A bare decimal in the text ("1.35") is a claim like any other number (a ratio may back it).
 - `PLAN_SYSTEM` (rules 1, 2 and 4) says that a `standing` metric is as of the data date, that a seasonal
   budget is the projection cap × last-year index, and the small-count rule; the plan writer now sees each
-  metric's period.
+  metric's period. Every one of these is checked by the code above.
 
 ## The oracle
 

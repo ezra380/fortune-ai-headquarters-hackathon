@@ -8,9 +8,9 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //    labels and assumptions, evidence notes, lever labels, memory notes). Each number found must match
 //    a value of the same kind: a dollar amount a dollar value, a percentage a percentage, "2.4x" a
 //    ratio, a bare number of 100 or more a dollar or count value, a bare decimal ("1.35") one of those or a
-//    ratio. Allowed values are cited metrics,
-//    projection inputs and results, and levers (a proposed price, discount, budget or count: a
-//    choice, not a fact). Durations ("90 days"), years ("in 2026") and ids ("demo-rt-01234") are not claims.
+//    ratio. Allowed values are cited metrics, projection inputs and results, and levers (a proposed price,
+//    discount, budget or count: a choice, not a fact). Durations ("90 days"), years ("in 2026") and row ids
+//    ("demo-rt-01234", "SUP-2201") are not claims; "a sub-$5,000 test" is.
 //  - A small count (under 100) is a claim when the words after it name what a cited count metric counts
 //    ("3 overdue invoices", "3 of the overdue invoices"): it must then be THAT count's value, one of its own
 //    projections, or a count lever. The phrases come from the data's catalog (`nouns`); the most specific one
