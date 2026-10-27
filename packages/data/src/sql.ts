@@ -22,3 +22,10 @@ export const both = (a: Cond, b: Cond): Cond => ({ sql: `${a.sql} AND ${b.sql}`,
 export const oneIf = (c: Cond): Field => ({ sql: `CASE WHEN ${c.sql} THEN 1 ELSE 0 END`, js: (r) => (c.js(r) ? 1 : 0) });
 /** 1 for every row: the denominator of a share. */
 export const ONE: Field = { sql: '1', js: () => 1 };
+
+/**
+ * What a count counts, for the plan checker: each qualifier before each noun ("late repair", "late repairs"),
+ * then the bare nouns. Counts that share a noun each need a qualifier of their own, so a plan can say which.
+ */
+export const counted = (nouns: readonly string[], qualifiers: readonly string[] = []): string[] =>
+  [...qualifiers.flatMap((q) => nouns.map((n) => `${q} ${n}`)), ...nouns];

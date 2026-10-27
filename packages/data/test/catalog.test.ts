@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Division, MetricId } from '@fahq/contracts';
+import { checkPlans, Division, MetricId, type Metric } from '@fahq/contracts';
 import { CATALOG_V2 } from '../src/divisions.ts';
 import { METRICS, VERSIONS } from '../src/finance-sql.ts';
 
@@ -43,6 +43,31 @@ describe('metric catalog', () => {
     expect(of('finance')).not.toContain('m:online.email.sends');
     expect(of('hq')).toEqual(expect.arrayContaining(['m:online.revenue.total', 'm:online.gross_profit', 'm:salon.revenue.total', 'm:online.dq.rejected_orders', 'm:salon.dq.rejected_appointments', 'm:online.dq.rejected_budgets']));
     expect(of('hq')).not.toContain('m:online.revenue.mazali');
+  });
+
+  // Review 2026-10-27: counts that share a noun ("repairs", "rows", "orders") need a phrase each, or the plan checker
+  // cannot tell which one a plan's "3 repairs" means and refuses it.
+  it('gives each count a phrase that names it apart from every other count its division reads, as the plan checker reads it', () => {
+    const source = { system: 'zetaris' as const, view: 'v', queryHash: 'a'.repeat(64), asOf: '2026-10-26T12:00:00Z' };
+    const metricOf = (m: (typeof CATALOG_V2)[number], value: number): Metric => ({ id: m.id as Metric['id'], label: m.label, value, unit: 'count', business: m.business, period: 'standing', source });
+    const passes = (a: (typeof CATALOG_V2)[number], b: (typeof CATALOG_V2)[number], said: string) => {
+      const plan = (rank: number) => ({
+        rank, title: 'Watch the counts', summary: `Watch the ${said} this week.`, actions: ['Check them today'], evidence: [{ metricId: a.id, value: 7 }, { metricId: b.id, value: 9 }],
+        projections: [], test: 'Check again next week.', stopLoss: 'Stop if they rise.', businesses: [...new Set([a.business, b.business])], risks: ['None'],
+      });
+      const nouns = new Map([a, b].map((m) => [m.id, m.nouns ?? []]));
+      return checkPlans({ plans: [plan(1), plan(2), plan(3)], memoryConflicts: [] }, [metricOf(a, 7), metricOf(b, 9)], nouns).ok;
+    };
+    for (const d of Division.options) {
+      const counts = CATALOG_V2.filter((m) => m.unit === 'count' && m.divisions.includes(d));
+      for (const a of counts) {
+        for (const b of counts) {
+          if (a === b) continue;
+          const nameable = (a.nouns ?? []).some((p) => passes(a, b, `7 ${p}`) && !passes(a, b, `9 ${p}`));
+          expect(nameable, `${d}: ${a.id} beside ${b.id}`).toBe(true);
+        }
+      }
+    }
   });
 
   it('version 1 serves its original 33 metrics in their original order; version 2 serves every metric', () => {

@@ -250,8 +250,53 @@ describe('checkPlans and small counts next to what a cited count counts', () => 
     expect(checkPlans(three({}), counts, nouns)).toMatchObject({ ok: true });
     const wrong = checkPlans(three({ summary: 'Finish the 5 late repairs before new intake.' }), counts, nouns);
     expect(wrong.ok).toBe(false);
-    expect(!wrong.ok && wrong.errors).toEqual(['plan 1 summary: "5 … repairs" counts what a cited metric counts, so it must be that metric\'s value or a count lever']);
+    expect(!wrong.ok && wrong.errors).toEqual(['plan 1 summary: "5 late repairs" counts what m:salon.repairs.open_over_14d.count counts, so it must be its value (3), one of its projections or a count lever']);
     expect(checkPlans(three({ actions: ['Call the 7 tickets owners'] }), counts, nouns).ok).toBe(false);
+  });
+
+  // Review 2026-10-27: any count in the plan passed, so "16 late repairs" passed on the open count (16).
+  describe('two cited counts that count the same thing', () => {
+    const both: Metric[] = [...counts, { ...counts.at(-1)!, id: 'm:salon.repairs.open.count', label: 'Repairs not finished yet', value: 16 }];
+    const qualified = new Map([
+      ['m:salon.repairs.open_over_14d.count', ['late repair', 'late repairs', 'repair', 'repairs']],
+      ['m:salon.repairs.open.count', ['open repair', 'open repairs', 'repair', 'repairs']],
+    ]);
+    const citing = (p1: Record<string, unknown>) => three({
+      evidence: [{ metricId: 'm:salon.repairs.open_over_14d.count', value: 3 }, { metricId: 'm:salon.repairs.open.count', value: 16 }], ...p1,
+    });
+    const errorsOf = (p1: Record<string, unknown>) => { const r = checkPlans(citing(p1), both, qualified); return r.ok ? [] : r.errors; };
+
+    it("holds a number to the count its words name, never to another count in the plan", () => {
+      expect(errorsOf({ summary: 'Finish the 3 late repairs, then the 16 open repairs.' })).toEqual([]);
+      expect(errorsOf({ summary: 'Finish the 16 late repairs.' })).toEqual([
+        'plan 1 summary: "16 late repairs" counts what m:salon.repairs.open_over_14d.count counts, so it must be its value (3), one of its projections or a count lever',
+      ]);
+      expect(errorsOf({ summary: 'Clear the 3 open repairs.' })[0]).toContain('m:salon.repairs.open.count counts, so it must be its value (16)');
+    });
+
+    it('asks which count a bare noun means when the counts it could be differ', () => {
+      expect(errorsOf({ summary: 'Finish the 3 repairs this week.' })).toEqual([
+        'plan 1 summary: "3 repairs" could be m:salon.repairs.open_over_14d.count (3) or m:salon.repairs.open.count (16); name which, as in "late repair" or "open repair"',
+      ]);
+      // A count lever is a choice, whatever it is next to.
+      expect(errorsOf({ actions: ['Book 5 repairs a day'], levers: [{ label: 'Repairs booked a day', value: 5, unit: 'count' }] })).toEqual([]);
+    });
+  });
+
+  it('reads the words after "of the" and further than two words ("3 of the overdue invoices", "4 overdue supplier invoices")', () => {
+    const owed: Metric[] = [
+      ...metrics.filter((m) => m.business === 'salon'),
+      { id: 'm:salon.ap.overdue.count', label: 'Overdue salon supplier invoices', value: 4, unit: 'count', business: 'salon', period: 'standing', source },
+    ];
+    const invoiceNouns = new Map([['m:salon.ap.overdue.count', ['overdue invoice', 'overdue invoices', 'invoice', 'invoices']]]);
+    const raw = (summary: string) => ({ plans: [1, 2, 3].map((rank) => salonPlan(rank, {
+      summary, evidence: [{ metricId: 'm:salon.ap.overdue.count', value: 4 }, { metricId: 'm:salon.revenue.wash_set', value: 6200 }],
+    })), memoryConflicts: [] });
+    expect(checkPlans(raw('Pay 3 of the overdue invoices first.'), owed, invoiceNouns).ok).toBe(false);
+    expect(checkPlans(raw('Pay 5 overdue supplier invoices first.'), owed, invoiceNouns).ok).toBe(false);
+    expect(checkPlans(raw('Pay 4 of the overdue invoices first.'), owed, invoiceNouns).ok).toBe(true);
+    // A joining word ends what the number names: 2 owners, not 2 invoices.
+    expect(checkPlans(raw('Call 2 owners about the overdue invoices.'), owed, invoiceNouns).ok).toBe(true);
   });
 
   it('accepts a count lever, and leaves alone a number next to other words, a duration, or no catalog words at all', () => {

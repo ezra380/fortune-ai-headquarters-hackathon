@@ -1,6 +1,6 @@
 import type { Division } from '@fahq/contracts';
 import type { MetricDef } from './finance-sql.ts';
-import { ONE, both, isNull, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
+import { ONE, both, counted, isNull, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
 import {
   AS_OF, INVOICE_BUSINESSES, LAST_WEEK, MESSAGE_CHANNELS, MESSAGE_DIRECTIONS, MESSAGE_INTENTS, PRODUCT_LINES, RECOVERY_CHANNELS, REFUND_REASONS,
   REPAIR_CHANNELS, REPAIR_STATUSES, REPAIR_TYPES, SALON_LOCATIONS, SUPPLIERS,
@@ -94,6 +94,8 @@ export const inDays = (n: number) => new Date(Date.parse(`${AS_OF}T00:00:00Z`) +
 
 const ROWS = ['row', 'rows'] as const;
 const MESSAGES = ['message', 'messages'] as const;
+const PRODUCTS = ['product', 'products'] as const;
+const REPAIRS = ['repair', 'repairs', 'ticket', 'tickets'] as const;
 const INBOUND = { direction: 'inbound' };
 const ONLINE: readonly Division[] = ['online'];
 const ONLINE_MONEY: readonly Division[] = ['online', 'finance'];
@@ -116,56 +118,56 @@ export const OPS_METRICS: MetricDef[] = [
   // Order fees and shipping labels, and refunds: what an online sale costs after it is made.
   period({ id: 'm:online.fees.payment', label: 'Online payment fees', unit: 'usd', divisions: ONLINE_MONEY, source: 'order_costs', agg: { kind: 'sum', field: 'payment_fee_usd' } }),
   period({ id: 'm:online.shipping.cost', label: 'Online shipping label cost', unit: 'usd', divisions: ONLINE_MONEY, source: 'order_costs', agg: { kind: 'sum', field: 'shipping_cost_usd' } }),
-  period({ id: 'm:online.dq.rejected_order_costs', label: 'Order fee and shipping rows rejected by data checks', unit: 'count', divisions: ['online', 'finance', 'hq'], source: 'order_costs', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:online.dq.rejected_order_costs', label: 'Order fee and shipping rows rejected by data checks', unit: 'count', divisions: ['online', 'finance', 'hq'], source: 'order_costs', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['fee', 'shipping', 'order cost']) }),
   period({ id: 'm:online.refunds.total', label: 'Online refunds issued', unit: 'usd', divisions: ONLINE_MONEY, source: 'refunds', agg: { kind: 'sum', field: 'amount_usd' }, about: 'Dated by the day the refund was issued, not the order date.' }),
   period({ id: 'm:online.refunds.count', label: 'Online refunds', unit: 'count', divisions: ONLINE_MONEY, source: 'refunds', agg: { kind: 'count' }, nouns: ['refund', 'refunds'] }),
-  period({ id: 'm:online.dq.rejected_refunds', label: 'Refund rows rejected by data checks', unit: 'count', divisions: ['online', 'finance', 'hq'], source: 'refunds', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:online.dq.rejected_refunds', label: 'Refund rows rejected by data checks', unit: 'count', divisions: ['online', 'finance', 'hq'], source: 'refunds', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['refund']) }),
   // Checkouts left before paying, and those that came back as an order.
-  period({ id: 'm:online.checkouts.abandoned.count', label: 'Checkouts left before paying', unit: 'count', divisions: ONLINE, source: 'checkouts', agg: { kind: 'count' }, nouns: ['checkout', 'checkouts'] }),
+  period({ id: 'm:online.checkouts.abandoned.count', label: 'Checkouts left before paying', unit: 'count', divisions: ONLINE, source: 'checkouts', agg: { kind: 'count' }, nouns: counted(['checkout', 'checkouts'], ['abandoned', 'left', 'unpaid']) }),
   period({ id: 'm:online.checkouts.abandoned.value', label: 'Value of checkouts left before paying', unit: 'usd', divisions: ONLINE, source: 'checkouts', agg: { kind: 'sum', field: 'value_usd' } }),
-  period({ id: 'm:online.checkouts.recovered.count', label: 'Left checkouts that came back as an order', unit: 'count', divisions: ONLINE, source: 'checkouts', agg: { kind: 'count' }, test: notNullCond('recovered_order_id'), nouns: ['checkout', 'checkouts'] }),
+  period({ id: 'm:online.checkouts.recovered.count', label: 'Left checkouts that came back as an order', unit: 'count', divisions: ONLINE, source: 'checkouts', agg: { kind: 'count' }, test: notNullCond('recovered_order_id'), nouns: counted(['checkout', 'checkouts'], ['recovered']) }),
   period({ id: 'm:online.checkouts.recovered.value', label: 'Value of left checkouts that came back as an order', unit: 'usd', divisions: ONLINE_MONEY, source: 'checkouts', agg: { kind: 'sum', field: 'value_usd' }, test: notNullCond('recovered_order_id') }),
   period({ id: 'm:online.checkouts.recovery_rate', label: 'Share of left checkouts that came back as an order', unit: 'ratio', divisions: ONLINE, source: 'checkouts', agg: { kind: 'ratio', num: oneIf(notNullCond('recovered_order_id')), den: ONE } }),
-  period({ id: 'm:online.dq.rejected_checkouts', label: 'Checkout rows rejected by data checks', unit: 'count', divisions: ['online', 'hq'], source: 'checkouts', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:online.dq.rejected_checkouts', label: 'Checkout rows rejected by data checks', unit: 'count', divisions: ['online', 'hq'], source: 'checkouts', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['checkout']) }),
   // Stock on the period's last day (the month so far: the data date), and the week's interest before it.
   period({
     id: 'm:online.inventory.low_stock.count', label: 'Products at or below their reorder point', unit: 'count', divisions: ONLINE, source: 'inventory', agg: { kind: 'count' },
-    test: { sql: 'on_hand <= reorder_point', js: (r) => num(r, 'on_hand') <= num(r, 'reorder_point') }, nouns: ['product', 'products'],
+    test: { sql: 'on_hand <= reorder_point', js: (r) => num(r, 'on_hand') <= num(r, 'reorder_point') }, nouns: counted(PRODUCTS, ['low-stock', 'low stock']),
     about: "On the period's last day; for the month so far, on the data date.",
   }),
   period({
     id: 'm:online.inventory.wanted_low_stock.count', label: 'Wanted products low on stock', unit: 'count', divisions: ['online', 'hq'], source: 'inventory', agg: { kind: 'count' },
-    test: { sql: 'on_hand <= reorder_point AND views_7d >= 40', js: (r) => num(r, 'on_hand') <= num(r, 'reorder_point') && num(r, 'views_7d') >= 40 }, nouns: ['product', 'products'],
+    test: { sql: 'on_hand <= reorder_point AND views_7d >= 40', js: (r) => num(r, 'on_hand') <= num(r, 'reorder_point') && num(r, 'views_7d') >= 40 }, nouns: counted(PRODUCTS, ['wanted low-stock', 'wanted low stock', 'wanted']),
     about: "At or below the reorder point with at least 40 product views in the week before, on the period's last day.",
   }),
   period({
     id: 'm:online.inventory.wanted_out_of_stock.count', label: 'Wanted products out of stock', unit: 'count', divisions: ['online', 'hq'], source: 'inventory', agg: { kind: 'count' },
-    test: { sql: 'on_hand = 0 AND views_7d >= 40', js: (r) => num(r, 'on_hand') === 0 && num(r, 'views_7d') >= 40 }, nouns: ['product', 'products'],
+    test: { sql: 'on_hand = 0 AND views_7d >= 40', js: (r) => num(r, 'on_hand') === 0 && num(r, 'views_7d') >= 40 }, nouns: counted(PRODUCTS, ['out-of-stock', 'sold-out', 'wanted out-of-stock']),
     about: "None on hand with at least 40 product views in the week before, on the period's last day.",
   }),
-  period({ id: 'm:online.dq.rejected_inventory', label: 'Inventory rows rejected by data checks', unit: 'count', divisions: ['online', 'hq'], source: 'inventory', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:online.dq.rejected_inventory', label: 'Inventory rows rejected by data checks', unit: 'count', divisions: ['online', 'hq'], source: 'inventory', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['inventory', 'stock']) }),
   // The support inbox: customers' messages (not the shop's own follow-ups), by the day they came.
-  period({ id: 'm:online.service.inbound.count', label: 'Customer messages received', unit: 'count', divisions: ONLINE, source: 'messages', agg: { kind: 'count' }, where: INBOUND, nouns: MESSAGES }),
+  period({ id: 'm:online.service.inbound.count', label: 'Customer messages received', unit: 'count', divisions: ONLINE, source: 'messages', agg: { kind: 'count' }, where: INBOUND, nouns: counted(MESSAGES, ['received', 'incoming']) }),
   period({ id: 'm:online.service.replied_1h.share', label: 'Customer messages answered within the hour', unit: 'ratio', divisions: ONLINE, source: 'messages', agg: { kind: 'ratio', num: oneIf(answeredWithin(60)), den: ONE }, where: INBOUND }),
   period({ id: 'm:online.service.replied_24h.share', label: 'Customer messages answered within a day', unit: 'ratio', divisions: ONLINE, source: 'messages', agg: { kind: 'ratio', num: oneIf(answeredWithin(1440)), den: ONE }, where: INBOUND }),
   period({
     id: 'm:online.service.unanswered_48h.count', label: 'Customer messages not answered within two days', unit: 'count', divisions: ONLINE, source: 'messages', agg: { kind: 'count' },
-    where: INBOUND, test: notAnsweredWithin(2880), nouns: MESSAGES, about: 'No first answer within 48 hours; one still unanswered on the data date counts.',
+    where: INBOUND, test: notAnsweredWithin(2880), nouns: counted(MESSAGES, ['unanswered']), about: 'No first answer within 48 hours; one still unanswered on the data date counts.',
   }),
   period({
     id: 'm:online.service.texts_unanswered_48h.count', label: "Texts to the shop's numbers not answered within two days", unit: 'count', divisions: ONLINE, source: 'messages',
     agg: { kind: 'count' }, where: INBOUND, test: both(inCond('channel', ['sms', 'phone_text']), notAnsweredWithin(2880)), nouns: ['text', 'texts'],
     about: 'Texts to either shop number with no first answer within 48 hours.',
   }),
-  period({ id: 'm:online.service.sale_intent.count', label: 'Customer messages asking to buy', unit: 'count', divisions: ONLINE, source: 'messages', agg: { kind: 'count' }, where: { ...INBOUND, intent: 'purchase' }, nouns: MESSAGES }),
+  period({ id: 'm:online.service.sale_intent.count', label: 'Customer messages asking to buy', unit: 'count', divisions: ONLINE, source: 'messages', agg: { kind: 'count' }, where: { ...INBOUND, intent: 'purchase' }, nouns: counted(MESSAGES, ['purchase', 'buying', 'sales']) }),
   period({
     id: 'm:online.service.missed_sale_intent.count', label: 'Customers asking to buy who got no answer within a day and did not order', unit: 'count', divisions: ['online', 'hq'],
     source: 'messages', agg: { kind: 'count' }, where: { ...INBOUND, intent: 'purchase' }, test: both(notAnsweredWithin(1440), isNullCond('converted_order_id')),
     nouns: ['customer', 'customers', 'buyer', 'buyers'], about: 'A purchase question with no first answer within 24 hours and no order after it.',
   }),
-  period({ id: 'm:online.dq.rejected_messages', label: 'Support message rows rejected by data checks', unit: 'count', divisions: ['online', 'hq'], source: 'messages', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:online.dq.rejected_messages', label: 'Support message rows rejected by data checks', unit: 'count', divisions: ['online', 'hq'], source: 'messages', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['message', 'inbox']) }),
   // Salon repair tickets, by the day the piece arrived.
-  period({ id: 'm:salon.repairs.received.count', label: 'Repair tickets received', unit: 'count', divisions: ['salon'], source: 'repairs', agg: { kind: 'count' }, nouns: ['repair', 'repairs', 'ticket', 'tickets'] }),
+  period({ id: 'm:salon.repairs.received.count', label: 'Repair tickets received', unit: 'count', divisions: ['salon'], source: 'repairs', agg: { kind: 'count' }, nouns: counted(REPAIRS, ['received', 'new']) }),
   period({ id: 'm:salon.repairs.revenue', label: 'Repair fees paid on tickets received', unit: 'usd', divisions: SALON_MONEY, source: 'repairs', agg: { kind: 'sum', field: 'quote_usd' }, test: notNullCond('paid_date'), about: 'The repair tickets of the ops app, separate from the repair appointments in the salon book.' }),
   period({ id: 'm:salon.repairs.cost', label: 'Parts and labor on finished repairs', unit: 'usd', divisions: SALON_MONEY, source: 'repairs', agg: { kind: 'sum', field: repairCost }, test: FINISHED }),
   period({ id: 'm:salon.repairs.margin', label: 'Margin on finished, paid repairs (fee less parts and labor, over the fee)', unit: 'ratio', divisions: SALON_MONEY, source: 'repairs', agg: { kind: 'ratio', num: repairMargin, den: 'quote_usd' }, test: both(notNullCond('paid_date'), FINISHED) }),
@@ -175,32 +177,32 @@ export const OPS_METRICS: MetricDef[] = [
     about: 'Finished within 14 days of arrival, of the tickets that arrived in the period and were not cancelled; one still in repair counts as not finished.',
   }),
   period({ id: 'm:salon.repairs.online_intake.share', label: 'Repairs sent in through the online form', unit: 'ratio', divisions: ['salon'], source: 'repairs', agg: { kind: 'ratio', num: oneIf(inCond('channel', ['online'])), den: ONE } }),
-  period({ id: 'm:salon.dq.rejected_repairs', label: 'Repair ticket rows rejected by data checks', unit: 'count', divisions: ['salon', 'finance', 'hq'], source: 'repairs', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:salon.dq.rejected_repairs', label: 'Repair ticket rows rejected by data checks', unit: 'count', divisions: ['salon', 'finance', 'hq'], source: 'repairs', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['repair', 'ticket']) }),
   // Supplier invoices, each business on its own; a bad row is counted once, for the company.
   ...INVOICE_BUSINESSES.map((b) => period({
     id: `m:${b}.ap.invoiced`, label: `Supplier invoices received by the ${b} business`, unit: 'usd', divisions: ['finance'], source: 'invoices',
     agg: { kind: 'sum', field: 'amount_usd' }, where: { business: b },
   })),
-  period({ id: 'm:combined.dq.rejected_invoices', business: 'combined', label: 'Supplier invoice rows rejected by data checks', unit: 'count', divisions: ['finance', 'hq'], source: 'invoices', agg: { kind: 'rejected' }, nouns: ROWS }),
+  period({ id: 'm:combined.dq.rejected_invoices', business: 'combined', label: 'Supplier invoice rows rejected by data checks', unit: 'count', divisions: ['finance', 'hq'], source: 'invoices', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['invoice']) }),
 ];
 
 /** Standing numbers: as of the data date, whatever period is asked. */
 export const OPS_STANDING: MetricDef[] = [
   standing({
     id: 'm:online.service.waiting_now.count', label: 'Customer messages from the last week still waiting for a first answer', unit: 'count', divisions: ['online', 'hq'],
-    source: 'messages', agg: { kind: 'count' }, where: INBOUND, test: isNullCond('first_reply_at'), window: LAST_WEEK, nouns: MESSAGES,
+    source: 'messages', agg: { kind: 'count' }, where: INBOUND, test: isNullCond('first_reply_at'), window: LAST_WEEK, nouns: counted(MESSAGES, ['waiting', 'open']),
     about: `Messages that came in the seven days ending on the data date, ${AS_OF}, with no answer by its end.`,
   }),
   standing({
     id: 'm:online.service.waiting_over_24h.count', label: 'Customer messages from the last week waiting over a day for a first answer', unit: 'count', divisions: ['online', 'hq'],
     source: 'messages', agg: { kind: 'count' }, where: INBOUND, test: both(isNullCond('first_reply_at'), { sql: `received_at < '${AS_OF} 00:00:00'`, js: (r) => str(r, 'received_at') < `${AS_OF} 00:00:00` }),
-    window: LAST_WEEK, nouns: MESSAGES, about: 'Came at least 24 hours before the end of the data date, in the seven days ending on it, and still has no answer.',
+    window: LAST_WEEK, nouns: counted(MESSAGES, ['late', 'overdue']), about: 'Came at least 24 hours before the end of the data date, in the seven days ending on it, and still has no answer.',
   }),
-  standing({ id: 'm:salon.repairs.open.count', label: 'Repairs not finished yet', unit: 'count', divisions: ['salon', 'hq'], source: 'repairs', agg: { kind: 'count' }, test: STILL_OPEN, nouns: ['repair', 'repairs', 'ticket', 'tickets'], about: 'Waiting for payment or in repair on the data date.' }),
+  standing({ id: 'm:salon.repairs.open.count', label: 'Repairs not finished yet', unit: 'count', divisions: ['salon', 'hq'], source: 'repairs', agg: { kind: 'count' }, test: STILL_OPEN, nouns: counted(REPAIRS, ['open', 'unfinished']), about: 'Waiting for payment or in repair on the data date.' }),
   standing({
     id: 'm:salon.repairs.open_over_14d.count', label: 'Repairs open longer than two weeks', unit: 'count', divisions: ['salon', 'hq'], source: 'repairs', agg: { kind: 'count' },
     test: both(STILL_OPEN, { sql: `DATEDIFF('${AS_OF}', received_date) > 14`, js: (r) => days(str(r, 'received_date'), AS_OF) > 14 }),
-    nouns: ['repair', 'repairs', 'ticket', 'tickets'], about: 'Not finished, and arrived more than 14 days before the data date.',
+    nouns: counted(REPAIRS, ['late', 'overdue']), about: 'Not finished, and arrived more than 14 days before the data date.',
   }),
   ...INVOICE_BUSINESSES.flatMap((b): MetricDef[] => {
     const mine = { source: 'invoices', where: { business: b }, agg: { kind: 'sum', field: 'amount_usd' } } as const;
@@ -213,7 +215,7 @@ export const OPS_STANDING: MetricDef[] = [
         about: `Unpaid and due from the data date, ${AS_OF}, to ${inDays(30)}.`,
       }),
       standing({ id: `m:${b}.ap.overdue`, label: `Owed on overdue ${b} supplier invoices`, unit: 'usd', divisions: ['finance', 'hq'], ...mine, test: overdue, about: `Unpaid and due before the data date, ${AS_OF}.` }),
-      standing({ id: `m:${b}.ap.overdue.count`, label: `Overdue ${b} supplier invoices`, unit: 'count', divisions: ['finance', 'hq'], ...mine, agg: { kind: 'count' }, test: overdue, nouns: ['invoice', 'invoices'] }),
+      standing({ id: `m:${b}.ap.overdue.count`, label: `Overdue ${b} supplier invoices`, unit: 'count', divisions: ['finance', 'hq'], ...mine, agg: { kind: 'count' }, test: overdue, nouns: counted(['invoice', 'invoices'], [`overdue ${b}`, b, 'overdue']) }),
     ];
   }),
 ];

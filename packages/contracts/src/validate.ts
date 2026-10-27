@@ -10,9 +10,11 @@ import type { BusinessUnit, Metric, Plan, ProfitPlans } from './schemas.ts';
 //    ratio, a bare number of 100 or more a dollar or count value. Allowed values are cited metrics,
 //    projection inputs and results, and levers (a proposed price, discount, budget or count: a
 //    choice, not a fact). Durations ("90 days"), years ("in 2026") and ids ("demo-rt-01234") are not claims.
-//  - A small count (under 100) is a claim when one of the next two words names what a cited count metric
-//    counts ("3 overdue invoices" when the plan cites the overdue invoice count): it must then be a count the
-//    plan holds. The words come from the data's catalog (`nouns`); without them small counts are not checked.
+//  - A small count (under 100) is a claim when the words after it name what a cited count metric counts
+//    ("3 overdue invoices", "3 of the overdue invoices"): it must then be THAT count's value, one of its own
+//    projections, or a count lever. The phrases come from the data's catalog (`nouns`); the most specific one
+//    wins ("late repairs" over "repairs"), and a phrase two cited counts with different values share is refused
+//    until the plan names which. Without the catalog's phrases small counts are not checked.
 //  - Numbers in words ("twelve thousand dollars") and digits the scanner cannot read are refused,
 //    never skipped.
 //  - A plan declares which businesses it touches and cites numbers from exactly those. One sentence
@@ -34,8 +36,10 @@ const RESULT_WORDS = /\b(profit|revenue|sales|income|gain|uplift|expected|projec
 // levers ("the combined effect of ads and email"), which is not a salon + online figure.
 const COMBINING_WORDS = /\b(both businesses|salon and online|online and salon|salon \+ online|online \+ salon|salon plus online|online plus salon|across both|whole company|company-wide)\b/i;
 
-/** For each count metric, the words that name what it counts (from the data's catalog). */
+/** For each count metric, the phrases that name what it counts (from the data's catalog): "late repairs", "repairs". */
 export type CountNouns = ReadonlyMap<string, readonly string[]>;
+/** A count metric a plan cites: its value, its own projection results and the phrases that name it, word by word. */
+type CitedCount = { id: string; value: number; results: number[]; phrases: string[][] };
 
 export function checkPlans(raw: unknown, metrics: readonly Metric[], nouns: CountNouns = new Map()): PlanCheck {
   const parsed = ProfitPlansSchema.safeParse(raw);
@@ -69,13 +73,16 @@ function checkPlan(
   const pool = poolOf(plan, byId);
   const units = new Set<BusinessUnit>();
   const citedValues: { value: number; business: BusinessUnit }[] = [];
-  // What the plan's cited counts count: a small number next to one of these words is a claim.
-  const countWords = new Set<string>();
+  // The plan's cited counts that the catalog names: a small number next to one of their phrases is a claim.
+  const counts = new Map<string, CitedCount>();
 
   const useMetric = (m: Metric) => {
     cited.add(m.id);
     units.add(m.business);
-    if (m.unit === 'count') for (const w of data.nouns.get(m.id) ?? []) countWords.add(w.toLowerCase());
+    const phrases = m.unit === 'count' ? data.nouns.get(m.id) ?? [] : [];
+    if (phrases.length > 0 && !counts.has(m.id)) {
+      counts.set(m.id, { id: m.id, value: m.value, results: [], phrases: phrases.map((p) => p.toLowerCase().split(/\s+/).filter(Boolean)) });
+    }
     const prefix = m.id.split(':')[1]?.split('.')[0];
     if (prefix !== m.business) errors.push(`${where}: metric ${m.id} is labeled ${m.business}, not ${prefix}`);
   };
@@ -100,6 +107,7 @@ function checkPlan(
       continue;
     }
     useMetric(m);
+    counts.get(m.id)?.results.push(p.result);
     const expected = m.value * p.factor;
     if (!close(p.result, expected, 0.002)) {
       errors.push(`${where}: projection "${p.label}" says ${p.result} but ${m.id} × ${p.factor} = ${round2(expected)}`);
@@ -142,17 +150,24 @@ function checkPlan(
     ...plan.evidence.flatMap((e, i): [string, string][] => (e.note ? [[`evidence ${i + 1} note`, e.note]] : [])),
     ...plan.levers.map((l, i): [string, string] => [`lever ${i + 1} label`, l.label]),
   ];
-  for (const [field, text] of texts) checkText(`${where} ${field}`, text, pool, errors, countWords);
+  for (const [field, text] of texts) checkText(`${where} ${field}`, text, pool, errors, [...counts.values()]);
   return pool;
 }
 
-function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[], countWords: ReadonlySet<string> = new Set()): void {
+function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[], counts: readonly CitedCount[] = []): void {
   const { found, unreadable, small } = scan(text);
   for (const u of unreadable) errors.push(`${where}: "${u}" is a number the checker cannot read; write it in digits`);
+  const levers = pool.filter((a) => a.business === null && a.kind === 'count');
   for (const n of small) {
-    const noun = n.next.find((w) => countWords.has(w.toLowerCase()));
-    if (noun && !pool.some((a) => a.kind === 'count' && close(n.value, a.value, 0))) {
-      errors.push(`${where}: "${n.raw} … ${noun}" counts what a cited metric counts, so it must be that metric's value or a count lever`);
+    const named = countsNamed(n.next, counts);
+    if (!named || levers.some((a) => close(n.value, a.value, 0))) continue; // names no cited count, or is a choice
+    const said = `"${[n.raw, ...n.next.slice(0, named.end + 1)].join(' ')}"`;
+    const [first] = named.counts;
+    if (new Set(named.counts.map((c) => c.value)).size > 1) {
+      const which = named.counts.map((c) => `"${ownPhrase(c, named.counts)}"`).join(' or ');
+      errors.push(`${where}: ${said} could be ${named.counts.map((c) => `${c.id} (${c.value})`).join(' or ')}; name which, as in ${which}`);
+    } else if (first && !named.counts.some((c) => [c.value, ...c.results].some((v) => close(n.value, v, 0)))) {
+      errors.push(`${where}: ${said} counts what ${first.id} counts, so it must be its value (${first.value}), one of its projections or a count lever`);
     }
   }
   for (const sentence of splitSentences(found)) {
@@ -163,6 +178,12 @@ function checkText(where: string, text: string, pool: readonly Allowed[], errors
       errors.push(`${where}: one sentence mixes salon and online numbers (${sentence.map((n) => n.raw).join(', ')})`);
     }
   }
+}
+
+/** A count's first qualified phrase that none of the others shares, to suggest when a plan must say which it means. */
+function ownPhrase(c: CitedCount, others: readonly CitedCount[]): string {
+  const shared = new Set(others.filter((o) => o !== c).flatMap((o) => o.phrases.map((p) => p.join(' '))));
+  return c.phrases.map((p) => p.join(' ')).find((p) => p.includes(' ') && !shared.has(p)) ?? c.id;
 }
 
 /**
@@ -267,10 +288,50 @@ export function numbersIn(text: string): FoundNumber[] {
   return scan(text).found;
 }
 
-/** A plain number under 100 (not a duration or a year) and the next two words after it. */
+/** A plain number under 100 (not a duration or a year) and the words after it that can name what it counts. */
 type SmallCount = { raw: string; value: number; next: string[] };
-const NEXT_WORDS = /^\s*(\p{L}[\p{L}'-]*)(?:\s+(\p{L}[\p{L}'-]*))?/u;
-const nextWords = (after: string) => (NEXT_WORDS.exec(after) ?? []).slice(1).filter((w): w is string => Boolean(w));
+
+// What a small number counts is named by the words right after it: up to four, past a lead-in ("3 of the overdue
+// invoices"), up to a clause break, another number or a joining word ("call 2 owners about the repairs" counts owners).
+const LEAD_IN = new Set(['of', 'the', 'these', 'those', 'our', 'your', 'its', 'their', 'all', 'still', 'other']);
+const JOINING = new Set([
+  'of', 'about', 'for', 'with', 'and', 'or', 'but', 'to', 'from', 'by', 'in', 'on', 'at', 'per', 'a', 'an', 'each', 'who', 'whose',
+  'that', 'which', 'so', 'then', 'than', 'into', 'over', 'under', 'while', 'when', 'if', 'before', 'after',
+]);
+function nextWords(after: string): string[] {
+  const clause = after.split(/[.,;:!?()[\]\n\d]/)[0] ?? '';
+  const words = (clause.match(/\p{L}[\p{L}'-]*/gu) ?? []).map((w) => w.toLowerCase());
+  let start = 0;
+  while (start < words.length && LEAD_IN.has(words[start]!)) start++;
+  const end = words.findIndex((w, i) => i >= start && JOINING.has(w));
+  return words.slice(start, end === -1 ? undefined : end).slice(0, 4);
+}
+
+/**
+ * The cited counts the words after a small number name: those whose most specific phrase fits (its words in
+ * order among them), and where the last matched word sits. Null when no cited count's phrase fits.
+ */
+function countsNamed(words: readonly string[], counts: readonly CitedCount[]): { counts: CitedCount[]; end: number } | null {
+  const fit = (phrase: readonly string[]) => {
+    let i = 0;
+    let end = -1;
+    for (const [at, w] of words.entries()) {
+      if (i < phrase.length && w === phrase[i]) {
+        i++;
+        end = at;
+      }
+    }
+    return i === phrase.length ? { size: i, end } : null;
+  };
+  const best = counts.map((c) => {
+    const [top] = c.phrases.map(fit).filter((f) => f !== null).sort((a, b) => b.size - a.size);
+    return { c, size: top?.size ?? 0, end: top?.end ?? -1 };
+  });
+  const size = Math.max(0, ...best.map((b) => b.size));
+  if (size === 0) return null;
+  const top = best.filter((b) => b.size === size);
+  return { counts: top.map((b) => b.c), end: Math.max(...top.map((b) => b.end)) };
+}
 
 function scan(input: string): { found: FoundNumber[]; unreadable: string[]; small: SmallCount[] } {
   const text = normalize(input);

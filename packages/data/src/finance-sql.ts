@@ -1,6 +1,6 @@
 import { DEFAULT_PERIODS, PERIOD_KEYS, type Division, type Period } from '@fahq/contracts';
 import { OPS_METRICS, OPS_SOURCES, OPS_SOURCE_NAMES, type OpsSource } from './operations.ts';
-import { ONE, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
+import { ONE, counted, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
 import {
   AD_CHANNELS, BOOKING_CHANNELS, PERIODS, PRODUCT_LINES, SALON_LOCATIONS, SALON_SERVICES, type SyntheticBusiness, type SyntheticYear,
 } from './synthetic.ts';
@@ -115,7 +115,10 @@ export type MetricAbout = {
   layer: 'period' | 'derived' | 'standing';
   /** Thresholds and caveats a reader needs, kept out of the label so a plan never echoes them as numbers. */
   about?: string;
-  /** For a count: the words that name what it counts, so a plan's small counts can be checked against it. */
+  /**
+   * For a count: the phrases that name what it counts ("late repairs", "repairs"), so a plan's small counts are
+   * checked against it. Counts a division reads that share a noun each carry a qualified phrase of their own.
+   */
   nouns?: readonly string[];
   /** false keeps it out of plan writing until the validator can check its kind of number (default true). */
   planUse?: boolean;
@@ -159,12 +162,12 @@ export const METRICS: MetricDef[] = [
     id: `m:online.revenue.${line}`, label: `Online ${LINE_LABEL[line]} revenue`, unit: 'usd', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'orders',
     agg: { kind: 'sum', field: 'net_usd' }, where: { product_line: line },
   })),
-  { id: 'm:online.orders.count', label: 'Online orders', unit: 'count', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'orders', agg: { kind: 'count' }, nouns: ORDERS },
+  { id: 'm:online.orders.count', label: 'Online orders', unit: 'count', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'orders', agg: { kind: 'count' }, nouns: counted(ORDERS, ['online', 'store']) },
   { id: 'm:online.aov', label: 'Online average order value', unit: 'usd', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'orders', agg: { kind: 'avg', field: 'net_usd' } },
   { id: 'm:online.discounts.total', label: 'Online discounts given', unit: 'usd', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'orders', agg: { kind: 'sum', field: 'discount_usd' } },
   { id: 'm:online.gross_profit', label: 'Online gross profit', unit: 'usd', business: 'online', divisions: ['online', 'finance', 'hq'], layer: 'period', source: 'orders', agg: { kind: 'sum', field: profit } },
   { id: 'm:online.gross_margin', label: 'Online gross margin (profit / revenue)', unit: 'ratio', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'orders', agg: { kind: 'ratio', num: profit, den: 'net_usd' } },
-  { id: 'm:online.dq.rejected_orders', label: 'Online order rows rejected by data checks', unit: 'count', business: 'online', divisions: ['online', 'hq'], layer: 'period', source: 'orders', agg: { kind: 'rejected' }, nouns: ROWS },
+  { id: 'm:online.dq.rejected_orders', label: 'Online order rows rejected by data checks', unit: 'count', business: 'online', divisions: ['online', 'hq'], layer: 'period', source: 'orders', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['order']) },
   // Version 1 has Google and Amazon; Meta joins in version 2 (its rows are a separate stream).
   ...AD_CHANNELS.flatMap((ch): MetricDef[] => {
     const name = CHANNEL_LABEL[ch];
@@ -174,7 +177,7 @@ export const METRICS: MetricDef[] = [
       { id: `m:online.ads.${ch}.spend`, label: `${name} ad spend`, unit: 'usd', agg: { kind: 'sum', field: 'spend_usd' }, ...ad },
       { id: `m:online.ads.${ch}.revenue`, label: `${name} ad revenue`, unit: 'usd', agg: { kind: 'sum', field: 'revenue_usd' }, ...ad },
       { id: `m:online.ads.${ch}.roas`, label: `${name} ad return (revenue / spend)`, unit: 'ratio', agg: { kind: 'ratio', num: 'revenue_usd', den: 'spend_usd' }, ...ad },
-      { id: `m:online.ads.${ch}.conversions`, label: `${name} ad orders`, unit: 'count', agg: { kind: 'sum', field: 'conversions' }, nouns: ORDERS, ...ad },
+      { id: `m:online.ads.${ch}.conversions`, label: `${name} ad orders`, unit: 'count', agg: { kind: 'sum', field: 'conversions' }, nouns: counted(ORDERS, [`${ch} ad`, ch]), ...ad },
     ];
   }),
   { id: 'm:online.email.revenue', label: 'Email revenue', unit: 'usd', business: 'online', divisions: ONLINE_MONEY, layer: 'period', source: 'email', agg: { kind: 'sum', field: 'revenue_usd' } },
@@ -188,7 +191,7 @@ export const METRICS: MetricDef[] = [
   { id: 'm:salon.appointments.count', label: 'Salon completed appointments', unit: 'count', business: 'salon', divisions: SALON_MONEY, layer: 'period', source: 'appointments', agg: { kind: 'count' }, where: done, nouns: ['appointment', 'appointments'] },
   { id: 'm:salon.no_shows.count', label: 'Salon no-shows', unit: 'count', business: 'salon', divisions: SALON, layer: 'period', source: 'appointments', agg: { kind: 'count' }, where: { status: 'no_show' }, nouns: ['no-show', 'no-shows'] },
   { id: 'm:salon.avg_ticket', label: 'Salon average ticket', unit: 'usd', business: 'salon', divisions: SALON_MONEY, layer: 'period', source: 'appointments', agg: { kind: 'avg', field: 'price_usd' }, where: done },
-  { id: 'm:salon.dq.rejected_appointments', label: 'Salon appointment rows rejected by data checks', unit: 'count', business: 'salon', divisions: ['salon', 'hq'], layer: 'period', source: 'appointments', agg: { kind: 'rejected' }, nouns: ROWS },
+  { id: 'm:salon.dq.rejected_appointments', label: 'Salon appointment rows rejected by data checks', unit: 'count', business: 'salon', divisions: ['salon', 'hq'], layer: 'period', source: 'appointments', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['appointment']) },
   // Version 2's appointment columns: the no-show rate, each location's revenue, online booking, and the
   // stylists' labor, so the salon has a profit beside the store's.
   {
@@ -216,7 +219,7 @@ export const METRICS: MetricDef[] = [
     about: 'The whole month\'s approved cap from the budget sheet, also for the month so far.',
   })),
   // The budget sheet lists only online ad channels, so its rejected rows are online business.
-  { id: 'm:online.dq.rejected_budgets', label: 'Budget sheet rows rejected by data checks', unit: 'count', business: 'online', divisions: ['finance', 'hq'], layer: 'period', source: 'budgets', agg: { kind: 'rejected' }, nouns: ROWS, since: 2 },
+  { id: 'm:online.dq.rejected_budgets', label: 'Budget sheet rows rejected by data checks', unit: 'count', business: 'online', divisions: ['finance', 'hq'], layer: 'period', source: 'budgets', agg: { kind: 'rejected' }, nouns: counted(ROWS, ['budget']), since: 2 },
   // The day-to-day systems (version 2): order fees and shipping, refunds, checkouts, inventory, the support
   // inbox, salon repair tickets and supplier invoices.
   ...OPS_METRICS,

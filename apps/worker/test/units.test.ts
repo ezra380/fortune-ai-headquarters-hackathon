@@ -135,13 +135,13 @@ describe('writePlans', () => {
     const invented = structuredClone(salonPlans);
     invented.plans[1]!.actions = ['Add 4 appointments on quiet weekdays'];
     const model = modelMock([JSON.stringify(invented)]);
-    await expect(writePlans({ ...base, data, model, department: 'salon' })).rejects.toThrow(/"4 … appointments" counts what a cited metric counts/);
+    await expect(writePlans({ ...base, data, model, department: 'salon' })).rejects.toThrow(/"4 appointments" counts what m:salon.appointments.count counts/);
     expect((JSON.parse(model.inputs[0]!.user).metrics as { period: string }[]).every((m) => m.period === '2026-09')).toBe(true);
     // The same plans pass when the data names no count words (a port without a catalog), as before.
     await expect(writePlans({ ...base, model: modelMock([JSON.stringify(invented)]), department: 'salon' })).resolves.toMatchObject({ attempts: 1 });
     expect(PLAN_SYSTEM).toContain('A metric whose period is "standing" is as of the data date');
     expect(PLAN_SYSTEM).toContain('A seasonal budget is one too: base m:online.budget.<channel>.cap × factor = the value of m:online.season.last_year_index.');
-    expect(PLAN_SYSTEM).toContain('A number under 100 next to what a cited count metric counts ("3 overdue invoices") must be that count\'s value or a count lever.');
+    expect(PLAN_SYSTEM).toContain('A number under 100 next to what a cited count metric counts ("3 overdue invoices") must be THAT count\'s value, one of its projections or a count lever; when two cited counts count the same thing, name which ("3 late repairs", not "3 repairs").');
   });
 
   it('reads the metrics once for a whole round: with a source it never touches the data port', async () => {
