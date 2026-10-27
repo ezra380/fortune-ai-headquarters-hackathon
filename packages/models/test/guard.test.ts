@@ -137,15 +137,23 @@ describe('screenText: the request', () => {
     expect(body.chat_template_kwargs).toBeUndefined();
   });
 
-  it('cuts the text at 1,600 characters and does not call the model for an empty message', async () => {
+  it('sends up to 1,600 characters in one call, and does not call the model for an empty message', async () => {
     const r = replying('{"User Safety": "safe"}');
-    await screen(r.model, 'a'.repeat(5000));
+    await screen(r.model, 'a'.repeat(1600));
+    expect(r.seen).toHaveLength(1);
     expect(r.seen[0]!.body.messages[0]!.content).toHaveLength(1600);
 
     const none = replying('{"User Safety": "unsafe"}');
     const empty = await screen(none.model, '   \n ');
     expect(none.seen).toHaveLength(0);
     expect(empty).toMatchObject({ safe: true, reason: null, ms: 0 });
+  });
+
+  it('never sends the model more than 1,600 characters in one message, however long the text', async () => {
+    const r = replying('{"User Safety": "safe"}');
+    await screen(r.model, 'a'.repeat(5000));
+    expect(r.seen.length).toBeGreaterThan(1);
+    for (const call of r.seen) expect(call.body.messages[0]!.content.length).toBeLessThanOrEqual(1600);
   });
 
   it('asks the port with noSystem set and the guard purpose', async () => {
@@ -159,6 +167,88 @@ describe('screenText: the request', () => {
     await screen(port, 'hi');
     expect(calls[0]).toMatchObject({ purpose: 'guard.screen', model: GUARD, noSystem: true, maxTokens: 100, temperature: 0, json: false });
     expect(calls[0]!.thinking).toBeUndefined();
+  });
+});
+
+// A port that flags any message containing a word, so the tests see exactly which text was screened.
+const SAFE_REPLY = '{"User Safety": "safe"}';
+function flagging(words: Record<string, string>, failOnCall?: number) {
+  const asked: string[] = [];
+  const port: ModelPort = {
+    chat: async (input) => {
+      asked.push(input.user);
+      if (asked.length === failOnCall) throw new Error('boom');
+      const hit = Object.entries(words).filter(([word]) => input.user.includes(word)).map(([, category]) => category);
+      const text = hit.length > 0 ? `{"User Safety": "unsafe", "Safety Categories": "${hit.join(', ')}"}` : SAFE_REPLY;
+      return { text, model: GUARD, inputTokens: 10, outputTokens: 2, costUsd: 0 };
+    },
+  };
+  return { asked, port };
+}
+
+describe('screenText: text past 1,600 characters is screened to its end, never passed unseen', () => {
+  const MAX_CHARS = 7200; // five windows
+
+  it('screens the text that follows leading whitespace (the empty check looks at the whole input)', async () => {
+    const f = flagging({ hurt: 'Violence' });
+    const result = await screen(f.port, `${' '.repeat(1600)}step-by-step plan to hurt someone`);
+    expect(f.asked.length).toBeGreaterThan(0);
+    expect(result).toMatchObject({ safe: false, categories: ['Violence'] });
+  });
+
+  it('screens a harmful tail that begins after character 1,600', async () => {
+    const f = flagging({ hurt: 'Violence' });
+    const result = await screen(f.port, `${'a'.repeat(1600)} plan to hurt someone`);
+    expect(result).toMatchObject({ safe: false, categories: ['Violence'], reason: 'the safety check flagged this text (Violence)' });
+  });
+
+  it('sees a word whole wherever it sits in the longest text it will screen (windows overlap)', async () => {
+    for (const at of [0, 1597, 1598, 1599, 1600, 2996, 2999, 3000, 4396, 4400, 5596, 5600, MAX_CHARS - 4]) {
+      const f = flagging({ hurt: 'Violence' });
+      const text = `${'a'.repeat(at)}hurt${'a'.repeat(MAX_CHARS - at - 4)}`;
+      expect(text).toHaveLength(MAX_CHARS);
+      expect((await screen(f.port, text)).safe, `word at ${at}`).toBe(false);
+    }
+  });
+
+  it('passes long text only when every window is safe, and adds up the tokens', async () => {
+    const f = flagging({ hurt: 'Violence' });
+    const result = await screen(f.port, 'word '.repeat(1000));
+    expect(f.asked).toHaveLength(4);
+    expect(result).toMatchObject({ safe: true, categories: [], reason: null, inputTokens: 40, outputTokens: 8 });
+  });
+
+  it('joins the categories of every flagged window, once each', async () => {
+    const f = flagging({ hurt: 'Violence', scam: 'Fraud/Deception' });
+    const text = `hurt${'a'.repeat(1700)}hurt${'a'.repeat(1700)}scam`;
+    const result = await screen(f.port, text);
+    expect(result.categories).toEqual(['Violence', 'Fraud/Deception']);
+    expect(result.safe).toBe(false);
+  });
+
+  it('does not ask the model about a window that is only whitespace', async () => {
+    const f = flagging({});
+    const result = await screen(f.port, `x${' '.repeat(4000)}y`);
+    expect(f.asked).toHaveLength(2);
+    expect(result.safe).toBe(true);
+  });
+
+  it('fails closed, with a plain reason and no model call, when the text is too long to screen', async () => {
+    const f = flagging({});
+    const result = await screen(f.port, 'a'.repeat(MAX_CHARS + 1));
+    expect(f.asked).toHaveLength(0);
+    expect(result).toMatchObject({ safe: false, categories: [], inputTokens: 0, outputTokens: 0, reason: 'the text is too long to screen' });
+    expect((await screen(flagging({}).port, 'a'.repeat(MAX_CHARS))).safe).toBe(true);
+  });
+
+  it('is unsafe when any window cannot be screened, and names a flagged window over an unreadable one', async () => {
+    const unread = flagging({}, 2);
+    const text = `${'a'.repeat(3000)}`;
+    expect(await screen(unread.port, text)).toMatchObject({ safe: false, categories: [], reason: 'the safety check could not run' });
+
+    const mixed = flagging({ hurt: 'Violence' }, 2);
+    const result = await screen(mixed.port, `hurt${'a'.repeat(3000)}`);
+    expect(result).toMatchObject({ safe: false, categories: ['Violence'] });
   });
 });
 
