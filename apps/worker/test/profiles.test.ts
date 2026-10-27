@@ -37,7 +37,7 @@ describe('workerProfiles (scripted store)', () => {
     // An assistant with no row keeps its file, with no lessons section.
     expect(profiles.skill('owner')).toBe(files.owner.skill);
     expect(profiles.reads('owner')).toEqual([...files.owner.reads]);
-    expect(log).toEqual(['worker: profiles from the database: finance; from the files: owner, salon, online, manager']);
+    expect(log).toEqual(['worker: profiles from the database: finance; from the files: owner, salon, online, manager, legal']);
   });
 
   it('says plainly that an assistant has no model for a job it does not do', async () => {

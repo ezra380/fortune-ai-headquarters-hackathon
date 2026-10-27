@@ -55,6 +55,16 @@ failure was seen.
   `manager.ts` is untouched: the manager already reads every door's reports.
 - **Docs.** `docs/legal.md`.
 
+### Seen failing (Law 5)
+
+- Before the code: with `legal` in `AssistantId` and no profile for it, every profile test crashed in `loadProfiles` ("Cannot
+  destructure property 'jobs' of 'SHAPES[id]'").
+- After the code, each guard was taken out again and put back (`git checkout`), and the test that guards it failed:
+  - the wall line in `rows.ts`: four tests failed (`changes.test.ts` twice, `db-source.test.ts`, `door.test.ts`);
+  - the `target !== 'legal'` guard in `flows.ts`: `legal.test.ts` "answers a request for plans that the router sends to the
+    Legal Team as a question" failed (the owner got "I couldn't get plans ..." instead of a Legal Team answer);
+  - the `assistants` row in `20261027130010_legal.sql`: `migrations.test.ts` "makes the Legal Team a real assistant ..." failed.
+
 ## What is not done
 
 - **No Legal Team tab in the Admin console.** `apps/console` (`DEPARTMENTS`, `LIVE_ASSISTANTS`, the loader's id check and

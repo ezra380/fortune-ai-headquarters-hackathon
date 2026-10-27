@@ -12,7 +12,7 @@ import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, lo
 // Profiles in the database, the two doors an outside tool may call, and what the public (anon) role can reach.
 // Real Postgres and the real Data API (local Supabase: npm run db:start); nothing is mocked.
 //  - The "doors" and "privileges" groups run against the shared local database. They write only tokens and
-//    session reports (which they delete again) and read the five seeded profiles. A profile version is
+//    session reports (which they delete again) and read the seeded profiles. A profile version is
 //    append-only, so nothing here may add one to the shared database.
 //  - The "profile writes" group builds a throwaway database from the real migration file, so it can commit
 //    versions, race two writers and reseed as often as it likes.
@@ -638,14 +638,14 @@ describe('seeding profiles (a second throwaway database)', () => {
   const stored = async () => (await scratch.query('select * from public.assistant_profiles order by assistant_id')).rows;
   const versionCount = async () => (await scratch.query('select count(*)::int as n from public.assistant_profile_versions')).rows[0].n as number;
 
-  it('stores the five file profiles once, each with a version made by "seed"', async ({ skip }) => {
+  it('stores the file profiles once (one per assistant), each with a version made by "seed"', async ({ skip }) => {
     if (!scratchName) skip();
     const first = await seedProfiles(scratch, {});
     expect(first.map((r) => [r.assistant, r.action, r.version, r.differsFromFiles])).toEqual(
       AssistantId.options.map((id) => [id, 'created', 1, false]),
     );
     const versions = (await scratch.query(`select assistant_id, version, made_by, reason, snapshot from public.assistant_profile_versions order by assistant_id`)).rows;
-    expect(versions).toHaveLength(5);
+    expect(versions).toHaveLength(AssistantId.options.length);
     for (const v of versions) {
       const p = files[v.assistant_id as AssistantId];
       expect(v.made_by).toBe('seed');
@@ -691,7 +691,7 @@ describe('seeding profiles (a second throwaway database)', () => {
     const before = await versionCount();
     const results = await seedProfiles(scratch, {}, { force: true });
     expect(results.every((r) => r.action === 'reseeded' && !r.differsFromFiles)).toBe(true);
-    expect(await versionCount()).toBe(before + 5);
+    expect(await versionCount()).toBe(before + AssistantId.options.length);
     const salon = (await scratch.query(`select version, title, skill, lessons from public.assistant_profiles where assistant_id = 'salon'`)).rows[0];
     expect(salon.title).toBe(files.salon.title);
     expect(salon.skill).toBe(files.salon.skill);
@@ -774,7 +774,7 @@ describe('seeding profiles (a second throwaway database)', () => {
     );
     const before = await versionCount();
     const results = await seedProfiles(scratch, {}, { force: true });
-    expect(await versionCount()).toBe(before + 5);
+    expect(await versionCount()).toBe(before + AssistantId.options.length);
     const finance = (await scratch.query(`select skill from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
     expect(finance.skill).toBe(withManagerNotes(files.finance.skill, ['Name the month.', 'Say the return with the spend.']));
     expect(managerNotes(finance.skill)).toEqual(['Name the month.', 'Say the return with the spend.']);
