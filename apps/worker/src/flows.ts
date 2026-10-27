@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AssistantId, FrontDoorDecision, Metric, ProfitPlans } from '@fahq/contracts';
+import { approveAction, BRIEF_CODE_FOR, divisionBrief } from './brief.ts';
 import { parseCommand, type Command } from './commands.ts';
 import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, type Outcome, type WorkerDeps } from './common.ts';
 import { departmentsFor, DEPARTMENT_LABEL, originsOf } from './departments.ts';
@@ -27,6 +28,7 @@ export async function handleTask(task: TaskRow, deps: WorkerDeps): Promise<Outco
 async function scheduled(task: TaskRow, deps: WorkerDeps, runId: string): Promise<Outcome> {
   const job = String((task.payload as { job?: unknown }).job ?? '');
   if (task.assistant_id === 'manager' && job === 'manager_review') return managerReview(task, deps, runId);
+  if (job === 'division_brief') return divisionBrief(task, deps, runId);
   return fail(`unsupported scheduled job "${job}" for the ${task.assistant_id} assistant`);
 }
 
@@ -231,6 +233,8 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
       return decidePlan(command, person, task, deps, runId, started, reply);
     case 'adopt':
       return adoptChanges(command, person, task, deps, runId, started, reply);
+    case 'approve':
+      return approveAction(command, person, task, deps, runId, started, reply);
     case 'review':
       return requestReview(person, task, deps, runId, started);
   }
@@ -248,7 +252,9 @@ async function forwardPlan(
     await receipt(deps, { runId, taskId: task.id, step: 'approval.forward', assistant: sender.assistant_id, started, outcome: 'refused', detail: `code is for ${used.action ?? 'another action'}` });
     await reply(used.action === 'adopt_change'
       ? 'That code is for adopting a review recommendation: reply ADOPT <1-3> <code>. Nothing was sent.'
-      : `That code is for a decision: reply CONFIRM <code> or DECLINE <code>. Nothing was sent.`);
+      : used.action === 'approve_action'
+        ? `That code is for ${BRIEF_CODE_FOR}. Nothing was sent.`
+        : `That code is for a decision: reply CONFIRM <code> or DECLINE <code>. Nothing was sent.`);
     return done;
   }
   if (used.outcome !== 'signed' || used.action !== 'forward_plan' || !used.message_id) {
@@ -296,7 +302,9 @@ async function decidePlan(
     await receipt(deps, { runId, taskId: task.id, step: 'approval.decide', assistant: sender.assistant_id, started, outcome: 'refused', detail: `code is for ${used.action ?? 'another action'}` });
     await reply(used.action === 'adopt_change'
       ? 'That code is for adopting a review recommendation: reply ADOPT <1-3> <code>. Nothing was recorded.'
-      : `That code is for sending a plan: reply SEND <1-3> <code>. Nothing was recorded.`);
+      : used.action === 'approve_action'
+        ? `That code is for ${BRIEF_CODE_FOR}. Nothing was recorded.`
+        : `That code is for sending a plan: reply SEND <1-3> <code>. Nothing was recorded.`);
     return done;
   }
   if (used.outcome !== verdict || used.action !== 'decide_plan' || !used.message_id) {
