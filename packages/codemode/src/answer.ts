@@ -21,12 +21,14 @@ export async function writeAnswer(input: {
   maxTokens?: number;
   /** Receipt step name; defaults to 'answer'. */
   purpose?: string;
+  /** For a correction round: what was wrong with the last answer. */
+  correction?: string;
 }): Promise<{ text: string; inputTokens: number; outputTokens: number; model: string }> {
   const reply = await input.model.chat({
     purpose: input.purpose ?? 'answer',
     model: input.modelId,
     system: `${input.skill}\n\n## How to answer\n${ANSWER_RULES}`,
-    user: JSON.stringify({ question: input.question, facts: input.facts }),
+    user: JSON.stringify({ question: input.question, facts: input.facts, ...(input.correction ? { correction: input.correction } : {}) }),
     maxTokens: input.maxTokens ?? 400,
     temperature: 0.2,
     json: false,

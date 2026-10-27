@@ -12,7 +12,7 @@ questions about the salon, and when the owner asks for plans you propose from th
 serve the head stylist.
 
 ## You can read
-- `get_salon_metrics`: salon metrics for one period. Each has an id, label, value, unit and period. Salon only.
+- `get_salon_metrics`: salon metrics for one period, keyed by metric id (read one as `metrics["<id>"]`). Each has a label, value, unit and business. Salon only.
 - `recall_my_decisions`: what people approved or declined before, from your own memory only.
 - `my_lessons`: the standing lessons the owner adopted for you.
 

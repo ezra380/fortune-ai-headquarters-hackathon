@@ -457,15 +457,30 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
       expect((await reportOf((await taskOfText(messageSid)).id)).usage.codeMode).toEqual({ scripts: 1, toolCalls: 3, resultChars: chars });
     });
 
-    it('sends the facts as they are, and records a refusal, when the answer holds a number the facts do not', async () => {
+    it('sends the facts as they are, and records a refusal, when the answer holds a number the facts do not, twice', async () => {
       codeMode.respond(() => okResult({ tasks: 12, failed: 1 }));
       model.script('front-door', router('owner'));
       model.script('owner.answer', 'Finance did 9 tasks.');
       const messageSid = await textIn(ownerPhone, 'How did finance do today?');
       expect(lastTo(ownerPhone)).toBe("Here's what I found: tasks: 12; failed: 1");
+      expect(model.of('owner.answer')).toHaveLength(2);
       const steps = await stepsOf((await taskOfText(messageSid)).id);
-      expect(steps.at(-1)).toMatchObject({ step: 'owner.answer', outcome: 'refused', detail: 'answer: "9" is not a number in the data' });
+      expect(steps.at(-1)).toMatchObject({ step: 'owner.answer', outcome: 'refused', detail: 'answer: "9" is not a number in the data', input_tokens: 200, output_tokens: 400 });
       expect((await reportOf((await taskOfText(messageSid)).id)).suggestions[0]).toMatchObject({ kind: 'prompt', about: 'owner' });
+    });
+
+    it('sends an answer that passes on the correction round, which names the numbers that failed', async () => {
+      codeMode.respond(() => okResult({ latestProposal: null }));
+      model.script('front-door', router('owner'));
+      model.script('owner.answer', 'The latest proposal cited 4.2% and 3.8%.', 'There is no proposal yet.');
+      const messageSid = await textIn(ownerPhone, 'What did the latest proposal cite?');
+      expect(lastTo(ownerPhone)).toBe('There is no proposal yet.');
+      const [first, second] = model.of('owner.answer');
+      expect(JSON.parse(first!.user)).not.toHaveProperty('correction');
+      expect(JSON.parse(second!.user).correction).toMatch(/^Your last answer used numbers that are not in the facts \(answer: "4\.2%" is not a number in the data/);
+      expect((await stepsOf((await taskOfText(messageSid)).id)).at(-1)).toMatchObject({
+        step: 'owner.answer', outcome: 'ok', input_tokens: 200, output_tokens: 400, detail: '25 characters; passed on the correction round',
+      });
     });
 
     it('does not text the owner a made-up small count: 0 pending approvals is never "2"', async () => {

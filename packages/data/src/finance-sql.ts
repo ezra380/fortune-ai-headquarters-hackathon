@@ -87,7 +87,7 @@ const SERVICE_LABEL: Record<(typeof SALON_SERVICES)[number], string> = {
 const done = { status: 'completed' };
 
 export const METRICS: MetricDef[] = [
-  { id: 'm:online.revenue.total', label: 'Online revenue after discounts', unit: 'usd', business: 'online', source: 'orders', agg: { kind: 'sum', field: 'net_usd' } },
+  { id: 'm:online.revenue.total', label: 'Online revenue, all lines, after discounts', unit: 'usd', business: 'online', source: 'orders', agg: { kind: 'sum', field: 'net_usd' } },
   ...PRODUCT_LINES.map((line): MetricDef => ({
     id: `m:online.revenue.${line}`, label: `Online ${LINE_LABEL[line]} revenue`, unit: 'usd', business: 'online', source: 'orders',
     agg: { kind: 'sum', field: 'net_usd' }, where: { product_line: line },
@@ -111,7 +111,7 @@ export const METRICS: MetricDef[] = [
   { id: 'm:online.email.revenue', label: 'Email revenue', unit: 'usd', business: 'online', source: 'email', agg: { kind: 'sum', field: 'revenue_usd' } },
   { id: 'm:online.email.sends', label: 'Emails sent', unit: 'count', business: 'online', source: 'email', agg: { kind: 'sum', field: 'sends' } },
   { id: 'm:online.email.click_rate', label: 'Email click rate (clicks / sends)', unit: 'ratio', business: 'online', source: 'email', agg: { kind: 'ratio', num: 'clicks', den: 'sends' } },
-  { id: 'm:salon.revenue.total', label: 'Salon revenue (completed appointments)', unit: 'usd', business: 'salon', source: 'appointments', agg: { kind: 'sum', field: 'price_usd' }, where: done },
+  { id: 'm:salon.revenue.total', label: 'Salon revenue, all services (completed appointments)', unit: 'usd', business: 'salon', source: 'appointments', agg: { kind: 'sum', field: 'price_usd' }, where: done },
   ...SALON_SERVICES.map((s): MetricDef => ({
     id: `m:salon.revenue.${s}`, label: `Salon ${SERVICE_LABEL[s]} revenue`, unit: 'usd', business: 'salon', source: 'appointments',
     agg: { kind: 'sum', field: 'price_usd' }, where: { ...done, service: s },

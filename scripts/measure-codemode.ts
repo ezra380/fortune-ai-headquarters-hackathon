@@ -6,7 +6,8 @@
 //
 // Both arms get the same model, the same skill (the owner's) and the same read tools (the owner's):
 //   A  Code Mode: the model writes one script, the sandbox runs it, a second call writes the reply
-//      from the script's small result (createCodeModeRunner + writeAnswer).
+//      from the script's small result (createCodeModeRunner + writeAnswer), with one correction round
+//      when the reply holds a number the result does not, as the worker's answer step does.
 //   B  Tool loop: the model asks for one tool at a time and the whole transcript is re-sent each round.
 // Tokens are the provider's own counts. Whether a reply's numbers are real is checked against an oracle:
 // the same read tools called directly by this script, with no model in between.
@@ -80,6 +81,8 @@ type MeasureInput = {
   questions: readonly Question[];
   /** Seconds, from any steady clock; injected so tests do not depend on time. */
   clock: () => number;
+  /** Code Mode's script step with reasoning on (CODE_THINKING=on). The tool loop is unchanged. */
+  codeThinking?: boolean;
 };
 
 function judge(q: Question, answer: string | null): Pick<Row, 'objections' | 'keysFound'> {
@@ -99,10 +102,16 @@ async function runArm(input: MeasureInput, q: Question, arm: Arm): Promise<Row> 
   let script: string | null = null;
   try {
     if (arm === 'Code Mode') {
-      const run = await createCodeModeRunner({ model })({ purpose: PURPOSE, model: input.modelId, skill: input.skill, question: q.text, tools });
+      const run = await createCodeModeRunner({ model, thinking: input.codeThinking ?? false })({ purpose: PURPOSE, model: input.modelId, skill: input.skill, question: q.text, tools });
       script = run.script;
-      if (run.ok) answer = (await writeAnswer({ model, modelId: input.modelId, skill: input.skill, question: q.text, facts: run.result })).text;
-      else error = run.error;
+      if (run.ok) {
+        const ask = async (correction?: string) =>
+          (await writeAnswer({ model, modelId: input.modelId, skill: input.skill, question: q.text, facts: run.result, ...(correction ? { correction } : {}) })).text;
+        answer = await ask();
+        // As the worker's answer step does: one correction round when a number is not in the script's result.
+        const objections = traceNumbers(answer, run.result);
+        if (objections.length > 0) answer = await ask(`Your last answer used numbers that are not in the facts (${objections.slice(0, 3).join('; ')}). Answer again using only the facts. If the facts do not answer the question, say so.`);
+      } else error = run.error;
     } else {
       const run = await toolLoopAnswer({ model, modelId: input.modelId, skill: input.skill, question: q.text, tools });
       answer = run.answer;
@@ -133,9 +142,10 @@ type MetricRow = { id: string; label: string; value: number };
 type Oracle = Pick<Question, 'facts' | 'keys'>;
 
 async function metricsOf(tools: ReadonlyMap<string, ReadTool>): Promise<MetricRow[]> {
-  const r = (await tools.get('get_finance_metrics')!.run({ period: PERIOD })) as { metrics?: MetricRow[] };
-  if (!Array.isArray(r.metrics) || r.metrics.length === 0) throw new Error('get_finance_metrics returned no metrics');
-  return r.metrics;
+  const r = (await tools.get('get_finance_metrics')!.run({ period: PERIOD })) as { metrics?: Record<string, Omit<MetricRow, 'id'>> };
+  const rows = Object.entries(r.metrics ?? {}).map(([id, m]) => ({ id, ...m }));
+  if (rows.length === 0) throw new Error('get_finance_metrics returned no metrics');
+  return rows;
 }
 
 const QUESTIONS: { text: string; oracle: (tools: ReadonlyMap<string, ReadTool>) => Promise<Oracle> }[] = [
@@ -207,7 +217,7 @@ function traceCell(r: Row): string {
   return r.objections.length === 0 ? 'yes' : `no (${r.objections.length})`;
 }
 
-export function renderReport(input: { date: string; modelId: string; skillName: string; toolNames: readonly string[]; rows: readonly Row[]; questions: readonly Question[] }): string {
+export function renderReport(input: { date: string; modelId: string; skillName: string; toolNames: readonly string[]; rows: readonly Row[]; questions: readonly Question[]; codeThinking?: boolean }): string {
   const { rows } = input;
   const code = rows.filter((r) => r.arm === 'Code Mode');
   const loop = rows.filter((r) => r.arm === 'Tool loop');
@@ -217,6 +227,8 @@ export function renderReport(input: { date: string; modelId: string; skillName: 
     `**LIVE run.** Real NVIDIA model calls and the real read tools. Nothing was sent to anyone and nothing was written except this report.`,
     `Both arms used model \`${input.modelId}\`, the skill \`${input.skillName}\` and the same ${input.toolNames.length} read tools (${input.toolNames.map((n) => `\`${n}\``).join(', ')}).`,
     'Tokens are the provider-reported counts. Each question ran once per arm, so one run is a sample, not an average.',
+    "Code Mode's reply step works as the worker's does: when a number in the reply is not in the script's result, the model gets one correction round (its tokens are counted).",
+    `Code Mode's script step: reasoning ${input.codeThinking ? 'ON' : 'off'}. The tool loop runs with reasoning off.`,
     '',
     '| # | Arm | Answered | Model calls | Input tokens | Output tokens | Total tokens | Tool calls | Seconds | Numbers trace to the data | Key numbers stated |',
     '|---|---|---|---|---|---|---|---|---|---|---|',
@@ -301,10 +313,11 @@ async function main(): Promise<void> {
   const modelId = owner.models.code?.model ?? fail('the owner profile has no code model');
   const questions = await buildQuestions(tools);
   console.error(`LIVE: ${questions.length} questions, model ${modelId}, ${tools.length} read tools`);
-  const rows = await measure({ model: modelsFromEnv(env).nvidia, modelId, skill: owner.skill, tools, questions, clock: () => performance.now() / 1000 });
+  const codeThinking = env.CODE_THINKING === 'on';
+  const rows = await measure({ model: modelsFromEnv(env).nvidia, modelId, skill: owner.skill, tools, questions, clock: () => performance.now() / 1000, codeThinking });
 
   const date = new Date().toISOString().slice(0, 10);
-  const report = renderReport({ date, modelId, skillName: 'fortune-hq-owner', toolNames: tools.map((t) => t.name), rows, questions });
+  const report = renderReport({ date, modelId, skillName: 'fortune-hq-owner', toolNames: tools.map((t) => t.name), rows, questions, codeThinking });
   const dir = path.join(root, 'docs/research');
   fs.mkdirSync(dir, { recursive: true });
   let file = path.join(dir, `codemode-savings-${date}.md`);

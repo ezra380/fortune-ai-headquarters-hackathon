@@ -17,6 +17,7 @@ const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const SCRIPT_START = /\basync\s*(?:\(|function\b[^(\n]*\(|[A-Za-z_$][\w$]*\s*=>)/;
 const MAX_ATTEMPTS = 2;
 const SCRIPT_TOKENS = 1200;
+const THINKING_TOKENS = 4000;
 
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').replaceAll('*/', '* /').trim();
 
@@ -53,7 +54,17 @@ export function extractScript(reply: string): string | null {
   text = fenced ? fenced[1]! : text.replace(/```[a-zA-Z]*/g, '');
   const start = text.search(SCRIPT_START);
   if (start < 0) return null;
-  return text.slice(start).trim().replace(/[;\s]+$/, '') || null;
+  let script = text.slice(start).trim().replace(/[;\s]+$/, '');
+  // A live reply sent the whole function as one JSON-escaped string ("async () => {\n  const f = ...}"),
+  // twice in a row. A real script has real line breaks; this one has only escaped ones.
+  if (!script.includes('\n') && (script.match(/\\n/g) ?? []).length >= 2) {
+    try {
+      script = (JSON.parse(`"${script.replace(/"$/, '')}"`) as string).trim().replace(/[;\s]+$/, '');
+    } catch {
+      // Not a clean escaped string: leave it, and the sandbox's own error goes back to the model.
+    }
+  }
+  return script || null;
 }
 
 function toolProblem(tools: readonly ReadTool[]): string | null {
@@ -99,9 +110,14 @@ export function createCodeModeRunner(deps: {
   model: ModelPort;
   executor?: QuickJsExecutor;
   maxResultChars?: number;
+  /** Let the model reason before it writes the script (more output tokens; see the savings reports). */
+  thinking?: boolean;
 }): CodeModeRunner {
   const executor = deps.executor ?? new QuickJsExecutor({ timeoutMs: 20_000, maxToolCalls: 30 });
   const maxChars = deps.maxResultChars ?? 4000;
+  const thinking = deps.thinking ?? false;
+  // Reasoning comes out of the same token budget as the script.
+  const scriptTokens = thinking ? SCRIPT_TOKENS + THINKING_TOKENS : SCRIPT_TOKENS;
 
   return async (input) => {
     const tally = { attempts: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, model: input.model };
@@ -123,7 +139,7 @@ export function createCodeModeRunner(deps: {
       try {
         reply = await deps.model.chat({
           purpose: input.purpose, model: input.model, system, user: JSON.stringify({ question: input.question, ...retry }),
-          maxTokens: SCRIPT_TOKENS, temperature: 0, json: false, thinking: false,
+          maxTokens: scriptTokens, temperature: 0, json: false, thinking,
         });
       } catch (caught) {
         return finish(false, null, caught instanceof ModelError ? caught.message : 'the model could not be reached', script, resultChars);

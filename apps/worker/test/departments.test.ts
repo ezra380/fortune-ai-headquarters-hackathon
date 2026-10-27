@@ -104,9 +104,9 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       // The answer comes from the number the owner texted, not from a number the owner never wrote to.
       expect((await pool.query(`select from_assistant from public.outbox where dedupe_key = $1`, [`reply:${(await taskOfText(messageSid)).id}`])).rows[0].from_assistant).toBe('owner');
       // Whatever its script asks for, online reads online numbers only.
-      const online = (await codeMode.calls[0]!.tools.find((t) => t.name === 'get_online_metrics')!.run({ period: '2026-09' })) as { metrics: { business: string }[] };
-      expect(online.metrics.length).toBeGreaterThan(0);
-      expect(online.metrics.every((m) => m.business === 'online')).toBe(true);
+      const online = (await codeMode.calls[0]!.tools.find((t) => t.name === 'get_online_metrics')!.run({ period: '2026-09' })) as { metrics: Record<string, { business: string }> };
+      expect(Object.keys(online.metrics).length).toBeGreaterThan(0);
+      expect(Object.values(online.metrics).every((m) => m.business === 'online')).toBe(true);
     });
 
     it("asks the salon: the stand-in for Cindy sees salon metrics only", async () => {
@@ -117,9 +117,9 @@ describe.skipIf(!api)('departments: ask any, the safety screen, claim loops (rea
       expect(lastTo(ownerPhone)).toBe('[Salon] Salon wash and set revenue is 6200 dollars.');
       expect(codeMode.calls[0]).toMatchObject({ purpose: 'salon.lookup', model: 'MOCK/salon/code', skill: 'SKILL(salon)' });
       expect(toolNames()).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
-      const salon = (await codeMode.calls[0]!.tools.find((t) => t.name === 'get_salon_metrics')!.run({ period: '2026-09' })) as { metrics: { id: string; business: string }[] };
-      expect(salon.metrics.map((m) => m.id)).toEqual(['m:salon.revenue.wash_set', 'm:salon.appointments.count']);
-      expect(salon.metrics.every((m) => m.business === 'salon')).toBe(true);
+      const salon = (await codeMode.calls[0]!.tools.find((t) => t.name === 'get_salon_metrics')!.run({ period: '2026-09' })) as { metrics: Record<string, { business: string }> };
+      expect(Object.keys(salon.metrics)).toEqual(['m:salon.revenue.wash_set', 'm:salon.appointments.count']);
+      expect(Object.values(salon.metrics).every((m) => m.business === 'salon')).toBe(true);
     });
 
     it('asks finance, and keeps Owner HQ\'s own questions unprefixed', async () => {

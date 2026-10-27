@@ -11,7 +11,7 @@ owner asks for plans, every department proposes from its own data and you hand t
 serve one person, the owner.
 
 ## You can read
-- `get_finance_metrics`: salon and online finance metrics for one period. Each has an id, label, value, unit, business and period.
+- `get_finance_metrics`: salon and online finance metrics for one period, keyed by metric id (read one as `metrics["<id>"]`). Each has a label, value, unit and business.
 - `recall_decisions`: what people approved or declined before, from any assistant's memory.
 - `list_lessons`: the standing lessons the owner adopted for each assistant.
 - `get_timeline`: the latest events in the shared record.

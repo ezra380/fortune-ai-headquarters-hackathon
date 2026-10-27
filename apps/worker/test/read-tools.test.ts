@@ -126,31 +126,34 @@ describe('read tools', () => {
     await expect(tools.open_items!.run(null)).resolves.toBeTruthy(); // no arguments is fine for a no-argument tool
   });
 
-  it('returns metrics with their business label, and only online ones from get_online_metrics', async () => {
+  type Keyed = { view: string; queryHash: string; metrics: Record<string, { label: string; value: number; unit: string; business: string }> };
+
+  it('returns metrics keyed by id with their business label, and only online ones from get_online_metrics', async () => {
     const tools = createReadTools(setup().ctx, 'finance');
-    const all = (await tools.get_finance_metrics!.run({ period: '2026-09' })) as { view: string; queryHash: string; metrics: { id: string; business: string }[] };
+    const all = (await tools.get_finance_metrics!.run({ period: '2026-09' })) as Keyed;
     expect(all.view).toBe('fortune_demo_finance_mart');
     expect(all.queryHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(new Set(all.metrics.map((m) => m.business))).toEqual(new Set(['online', 'salon']));
-    expect(Object.keys(all.metrics[0]!).sort()).toEqual(['business', 'id', 'label', 'unit', 'value']);
-    const online = (await tools.get_online_metrics!.run({ period: '2026-09' })) as { metrics: { business: string }[] };
-    expect(online.metrics.length).toBeGreaterThan(0);
-    expect(online.metrics.every((m) => m.business === 'online')).toBe(true);
+    expect(Object.keys(all.metrics)).toEqual(mockMetrics.map((m) => m.id));
+    expect(all.metrics['m:online.ads.google.spend']).toEqual({ label: 'Google ad spend', value: 1800, unit: 'usd', business: 'online' });
+    expect(new Set(Object.values(all.metrics).map((m) => m.business))).toEqual(new Set(['online', 'salon']));
+    const online = (await tools.get_online_metrics!.run({ period: '2026-09' })) as Keyed;
+    expect(Object.keys(online.metrics).length).toBeGreaterThan(0);
+    expect(Object.values(online.metrics).every((m) => m.business === 'online')).toBe(true);
   });
 
   it('gives the salon its own metrics only: no online and no combined metric', async () => {
     const tools = createReadTools(setup().ctx, 'salon');
-    const salon = (await tools.get_salon_metrics!.run({ period: '2026-09' })) as { view: string; metrics: { id: string; business: string }[] };
+    const salon = (await tools.get_salon_metrics!.run({ period: '2026-09' })) as Keyed;
     expect(salon.view).toBe('fortune_demo_finance_mart');
-    expect(salon.metrics.map((m) => m.id)).toEqual(['m:salon.revenue.wash_set', 'm:salon.appointments.count']);
-    expect(salon.metrics.every((m) => m.business === 'salon')).toBe(true);
+    expect(Object.keys(salon.metrics)).toEqual(['m:salon.revenue.wash_set', 'm:salon.appointments.count']);
+    expect(Object.values(salon.metrics).every((m) => m.business === 'salon')).toBe(true);
     await expect(tools.get_salon_metrics!.run({ period: '2026-08' })).rejects.toThrow(/argument "period"/);
   });
 
   it('names the exact metric ids in each metric tool, only the ones that tool returns', () => {
     const catalog = mockMetrics.map(({ id, label, unit, business }) => ({ id, label, unit, business }));
     const tools = createReadTools(setup({ data: { ...dataMock, catalog } }).ctx, 'owner');
-    expect(tools.get_finance_metrics!.description).toContain('Metric ids: m:online.revenue.mazali (Online Mazali revenue, usd); m:online.ads.google.spend (Google ad spend, usd);');
+    expect(tools.get_finance_metrics!.description).toContain('Read one as metrics["<id>"]. Metric ids: m:online.revenue.mazali (Online Mazali revenue, usd); m:online.ads.google.spend (Google ad spend, usd);');
     expect(tools.get_finance_metrics!.description).toContain('m:salon.appointments.count (Salon appointments, count).');
     expect(tools.get_online_metrics!.description).toContain('m:online.ads.google.roas (Google ad return, ratio)');
     expect(tools.get_online_metrics!.description).not.toContain('m:salon.');

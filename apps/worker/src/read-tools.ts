@@ -71,7 +71,9 @@ function tool<S extends z.ZodType>(def: {
   };
 }
 
-const Metrics = '{ view: string; queryHash: string; metrics: { id: string; label: string; value: number; unit: "usd" | "count" | "ratio" | "percent"; business: "salon" | "online" | "combined" }[] }';
+// Keyed by metric id, so a script reads metrics["m:salon.no_shows.count"] instead of searching labels
+// (live runs matched "no-shows" against the label "Salon no-shows", found nothing and reported 0).
+const Metrics = '{ view: string; queryHash: string; metrics: { [id: string]: { label: string; value: number; unit: "usd" | "count" | "ratio" | "percent"; business: "salon" | "online" | "combined" } } }';
 const Suggestion = '{ kind: string; about: string; text: string }';
 const Explained = '{ proposal: { id: string; createdAt: string; from: string; requestText: string; view: string; queryHash: string; pickedBy: "model" | "rule" | null; failedDepartments: string[] } | null; plans: { rank: number; title: string; department: string; originalRank: number; why: string | null; cites: string[] }[]; cited: { id: string; label: string; value: number; unit: string; business: string }[]; approvals: { action: string; status: string; planRank: number | null; decidedAt: string | null }[]; decisions: { by: string; action: string; planRank: number | null; at: string }[]; record: { askedBy: string | null; request: { text: string; from: string; at: string } | null; cites: string[] } | null; notes: string[] }';
 
@@ -82,13 +84,13 @@ export function createReadTools(ctx: ReadToolContext, caller: AssistantId): Reco
     return {
       view,
       queryHash,
-      metrics: metrics.filter((m) => !only || m.business === only).map((m) => ({ id: m.id, label: m.label, value: m.value, unit: m.unit, business: m.business })),
+      metrics: Object.fromEntries(metrics.filter((m) => !only || m.business === only).map((m) => [m.id, { label: m.label, value: m.value, unit: m.unit, business: m.business }])),
     };
   };
   // The exact ids a script can look up, so it never guesses at a label ("Google Ads Spend" matched nothing).
   const metricIds = (only?: 'online' | 'salon') => {
     const listed = (ctx.data?.catalog ?? []).filter((m) => !only || m.business === only);
-    return listed.length === 0 ? '' : ` Metric ids: ${listed.map((m) => `${m.id} (${m.label}, ${m.unit})`).join('; ')}.`;
+    return listed.length === 0 ? '' : ` Read one as metrics["<id>"]. Metric ids: ${listed.map((m) => `${m.id} (${m.label}, ${m.unit})`).join('; ')}.`;
   };
   const decisions = (assistant: AssistantId, query: string, limit: number | undefined) => ({
     decisions: ctx.brain.memory(assistant).recallDecisions(query, clampRows(limit, 5)).map((d) => ({

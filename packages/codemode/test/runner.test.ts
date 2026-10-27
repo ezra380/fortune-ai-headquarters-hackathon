@@ -12,7 +12,7 @@ const metrics = [
   { id: 'm:salon.revenue.wash_set', value: 6200, unit: 'usd', business: 'salon' },
 ];
 
-function setup(replies: readonly (string | Error)[], opts: { maxResultChars?: number } = {}) {
+function setup(replies: readonly (string | Error)[], opts: { maxResultChars?: number; thinking?: boolean } = {}) {
   const financeArgs: unknown[] = [];
   const forbidden = vi.fn(async () => ({ queued: true }));
   const finance = fakeTool('get_finance_metrics', async (args) => { financeArgs.push(args); return { metrics }; });
@@ -66,6 +66,14 @@ describe('extractScript', () => {
     expect(extractScript('I cannot do that.')).toBeNull();
     expect(extractScript('')).toBeNull();
   });
+
+  it('unescapes a function sent as one JSON-escaped string (seen live), and leaves a real one-line script alone', () => {
+    const real = 'async () => {\n  const f = await codemode.get_finance_metrics({ period: "2026-09" });\n  return { v: f.metrics["m:online.email.revenue"]?.value };\n}';
+    const escaped = JSON.stringify(real).slice(1, -1); // async () => {\n  const f = ... \"2026-09\" ...
+    expect(extractScript(escaped)).toBe(real);
+    expect(extractScript(`"${escaped}"`)).toBe(real);
+    expect(extractScript('async () => { return { s: "a\\nb" }; }')).toBe('async () => { return { s: "a\\nb" }; }');
+  });
 });
 
 describe('createCodeModeRunner', () => {
@@ -90,6 +98,13 @@ describe('createCodeModeRunner', () => {
     expect(call.system).toMatch(/no TypeScript annotations, no imports, no require, no fetch, no timers/);
     expect(call.system).toMatch(/at most 40 values/);
     expect(JSON.parse(call.user)).toEqual({ question: 'What did Google ads earn?' });
+  });
+
+  it('lets the model reason first when asked, with room for the reasoning, and still finds the script after it', async () => {
+    const t = setup([`<think>The ids are listed, so read spend and revenue by id.</think>\n${GOOD}`], { thinking: true });
+    const r = await t.ask();
+    expect(r).toMatchObject({ ok: true, result: { spend: 4100, revenue: 14760, roas: 3.6 } });
+    expect(t.calls[0]).toMatchObject({ thinking: true, maxTokens: 5200 });
   });
 
   it('retries once with the sandbox error and sums tokens and tool calls over both attempts', async () => {

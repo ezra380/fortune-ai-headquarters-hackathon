@@ -52,7 +52,9 @@ const deps: WorkerDeps = {
   data: await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)'),
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
   // Each assistant's read-only profile: its skill text, the model for each job, its read tools.
-  codeMode: createCodeModeRunner({ model: models.nvidia }),
+  // Reasoning on before each script: in live runs it read the right metrics more often, at about 35 s a
+  // question instead of 10 (docs/research/codemode-savings-summary-2026-10-27.md). CODE_THINKING=off turns it off.
+  codeMode: createCodeModeRunner({ model: models.nvidia, thinking: env.CODE_THINKING !== 'off' }),
   profiles: {
     skill: (id) => profiles[id].skill,
     model: (id, job) => {

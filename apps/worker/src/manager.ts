@@ -354,22 +354,35 @@ export async function askQuestion(
     await tell(renderFacts(facts));
     return done;
   };
-  let r;
-  try {
-    r = await deps.models.nvidia.chat({
-      purpose: `${asker}.answer`, model, system: `${deps.profiles.skill(asker)}\n\n${ANSWER_RULES}`.trim(),
-      user: JSON.stringify({ question: question.slice(0, 1600), facts }), maxTokens: 400, temperature: 0.2, json: false, thinking: false,
-    });
-  } catch (error) {
-    return refuse(`the answer model failed: ${errorText(error, 'unknown error')}`);
-  }
-  const used = { model: r.model, inputTokens: r.inputTokens, outputTokens: r.outputTokens };
-  const answer = r.text.trim();
-  if (!answer) return refuse('the answer model returned nothing', used);
-  const objections = numberTrace([['answer', answer]], facts);
-  if (objections.length > 0) return refuse(objections.slice(0, 3).join(' | '), used);
+  // One correction round, as plans and reviews get: live runs showed the answer model inventing figures
+  // when the facts were empty ("no proposal yet" came back as made-up percentages).
+  const used = { model, inputTokens: 0, outputTokens: 0 };
+  let objections: string[] = [];
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const correction = attempt === 1 ? {} : {
+      correction: `Your last answer used numbers that are not in the facts (${objections.slice(0, 3).join('; ')}). Answer again using only the facts. If the facts do not answer the question, say so.`,
+    };
+    let r;
+    try {
+      r = await deps.models.nvidia.chat({
+        purpose: `${asker}.answer`, model, system: `${deps.profiles.skill(asker)}\n\n${ANSWER_RULES}`.trim(),
+        user: JSON.stringify({ question: question.slice(0, 1600), facts, ...correction }), maxTokens: 400, temperature: 0.2, json: false, thinking: false,
+      });
+    } catch (error) {
+      return refuse(`the answer model failed: ${errorText(error, 'unknown error')}`, attempt > 1 ? used : undefined);
+    }
+    used.model = r.model;
+    used.inputTokens += r.inputTokens;
+    used.outputTokens += r.outputTokens;
+    const answer = r.text.trim();
+    if (!answer) return refuse('the answer model returned nothing', used);
+    objections = numberTrace([['answer', answer]], facts);
+    if (objections.length > 0) continue;
 
-  await receipt(deps, { runId, taskId: task.id, step: `${asker}.answer`, assistant: asker, started: answerStarted, outcome: 'ok', ...used, detail: `${answer.length} characters` });
-  await tell(clip(answer, 1500));
-  return done;
+    const detail = `${answer.length} characters${attempt > 1 ? '; passed on the correction round' : ''}`;
+    await receipt(deps, { runId, taskId: task.id, step: `${asker}.answer`, assistant: asker, started: answerStarted, outcome: 'ok', ...used, detail });
+    await tell(clip(answer, 1500));
+    return done;
+  }
+  return refuse(objections.slice(0, 3).join(' | '), used);
 }
