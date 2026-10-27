@@ -302,3 +302,89 @@ failures come from the shared database, not this branch.
   green. Only the "You can read" lists changed.
 - Zetaris: nothing created or changed (the row reads use the existing `fortune_hq_v2` row views). Env:
   unchanged. No migration.
+
+## Review fixes (2026-10-27, 10:01–10:30 ET)
+
+An independent review of slice 4 found one blocker, one major and five minors. All seven are fixed; none was
+judged wrong. Each fix's test was run on the code before the fix and seen failing first, unless noted.
+
+### What changed, and the tests that prove it
+
+- **Blocker, 4e ids** (`validate.ts` `isRowId`): only bare digits that end a row id are skipped
+  (`demo-<kind>-…<digits>`, `SUP-<digits>`, nothing glued after). "a sub-$5,000 test", "a mid-$45,000 profit",
+  "a high-35% margin", "mid-30%", "ROAS-9.5x", "a sub-5,000 budget", "the top-100 buyers" and "demo-rt-1,234"
+  are read again. `validate.test.ts`: "still reads a figure after a word and a hyphen that is not a row id"
+  (9 cases), "still refuses an untraced figure written after a word and a hyphen", `mixedSentences` "is not
+  hidden by a hyphen glued to each figure"; the id tests still pass. 11 seen failing.
+- **Major, 4d small counts** (`validate.ts` `countsNamed`, `nextWords`; catalog phrases via `counted()` in
+  `packages/data/src/sql.ts`): a small whole number is held to the count its words name, not to any count in
+  the plan. Up to four words after it, past "of the", up to a joining word; the most specific catalog phrase
+  wins ("late repairs" over "repairs"); only that metric's value, its own projections or a count lever pass; a
+  bare noun shared by cited counts with different values is refused with a phrase of each to choose from.
+  Every count that shares a noun now has qualified phrases (rows by source, orders, checkouts, products,
+  messages, repairs, overdue invoices by business). Tests: `validate.test.ts` "two cited counts that count the
+  same thing" (2: "16 late repairs" refused when late = 3 and open = 16; "3 repairs" asks which), "reads the
+  words after "of the" and further than two words" ("3 of the overdue invoices", "5 overdue supplier
+  invoices", "2 owners about the overdue invoices" left alone); `catalog.test.ts` "gives each count a phrase
+  that names it apart from every other count its division reads, as the plan checker reads it" (every pair, in
+  every division, through `checkPlans`); `units.test.ts` updated for the new message. PLAN_SYSTEM rule 4 says
+  "name which ("3 late repairs", not "3 repairs")".
+- **Minor, seasonal factor** (`validate.ts`): once a plan cites `m:online.season.last_year_index`, or a
+  projection on `m:online.budget.<channel>.cap` names the season, the factor must equal the index (0.1%). A
+  bare decimal in any text ("1.35") is now a claim (a ratio may back it). `validate.test.ts` "a seasonal
+  budget …" (3 tests). PLAN_SYSTEM rule 4 adds the bare decimal.
+- **Minor, get_data_quality** (`read-tools.ts`, `brain-mcp.ts`): no `totalRows` / `sourcesWithRejects`; both
+  return `{ period, view, queryHash, rejected: { [id]: { label, value, business, period } } }`.
+  `read-tools.test.ts` "lists the rejected rows per source under each own business, and adds nothing up";
+  `doors.test.ts` "lists the rejected rows per source under its business, the worker's shape, and adds
+  nothing up" (seen failing on the old door).
+- **Minor, FINANCE_PERIOD** (`finance.ts` `financePeriod`, `main.ts`): a period the data does not serve, or a
+  typo, plans for `2026-09` and logs why. `units.test.ts` "financePeriod (FINANCE_PERIOD at startup)".
+- **Minor, provider text** (`brain-mcp.ts` `fromData` + `DoorRefusal`; twin in `read-tools.ts` `portRead`): a
+  failed data read answers "Business data could not be read (ZETARIS_READ)."; the detail goes to the log
+  (`fortune-brain.zetaris_read_failed`, `worker.zetaris_read_failed`) with emails and phone numbers masked;
+  the door's own refusals read as before. `doors.test.ts` "keeps the provider's text out of the answer…",
+  `read-tools.test.ts` "keeps the provider's text away from the script…" (both seen failing).
+- **Minor, missing tests**: `doors.test.ts` "serves the budget room from the finance read…" (BUDGET_IDS and the
+  budget-only attention), "passes each row read on as asked…" (invoices one business or both, waiting
+  messages, low stock); `rounds.test.ts` "slices the real version 1 catalog: Finance plans from 28 of its 33
+  metrics, Salon from 11, Online from 22" (and the five ids Finance loses). These pin behaviour that already
+  worked, so they passed on the old code.
+
+Test counts: `npm run typecheck` green. Touched test files (`validate`, `catalog`, `doors`, `read-tools`,
+`units`, `rounds`): 185 passed. Full `npm test` (10:19 ET): 658 passed, 2 failed: the two
+`supabase/tests/db.test.ts` RLS tests that fail on bb29578's own code against the shared local database
+(slice 1's tier 0).
+
+### Twins searched (Law 4)
+
+- `rg 'p{L}-|FIGURE\s*='` over `packages` and `apps`: `apps/worker/src/reports.ts:226` (`numberTrace`'s
+  `NUMBER`) has the same look-behind `\p{L}-`, so a manager report's "high-35%" or "ROAS-9.5x" is not traced
+  (its match starts at the digit, so "sub-$5,000" is read). `packages/codemode/src/answer.ts` `FIGURE` reads
+  "SUP-2201" as 2201 (noted in slice 4). Neither is this lane's file; both listed for their owners.
+- `rg 'error.message|errorText('` over `apps/worker/src`: `rounds.ts:52` keeps the data read's error text as a
+  department's failure detail, and `flows.ts:165` a step's; a provider's HTTP body can reach a receipt or a
+  person's text that way. Not this lane's files; listed.
+
+### Not done
+
+- No second-key review of these fixes (Law 10: a fix-up is reviewed again); the merge should get one.
+- The twins above, in other lanes' files.
+- A plan that names a count in words other than its catalog phrases ("3 repairs open longer than two weeks")
+  is read as the bare noun: refused when two cited counts share it, so the writer gets one correction round
+  with the phrases to use. The plan writer is not shown the phrases up front (the payload is not this lane's).
+
+### What the merge must know
+
+- **Outside this lane's files (unavoidable, minimal):** `apps/worker/src/main.ts` (the data port is made just
+  before `deps`, then `financePeriod`; the `Period` import became `DEFAULT_PERIODS`);
+  `apps/worker/src/finance.ts` beyond PLAN_SYSTEM (`financePeriod` export; `Period` and `DEFAULT_PERIODS`
+  imported as values); `packages/codemode/src/brain-mcp.ts` beyond DOOR_READS (`fromData`, `DoorRefusal`,
+  `get_data_quality`'s shape); tests: `apps/worker/test/{units,rounds,read-tools}.test.ts` (rounds imports
+  `@fahq/data`, test only), `packages/codemode/test/doors.test.ts`.
+- **Behaviour changes:** `get_data_quality` lost `totalRows` and `sourcesWithRejects` (worker and door), so a
+  script or profile that read them must read `rejected`. A failed data read no longer shows the provider's
+  text. The plan checker is stricter: bare decimals, seasonal factors, and small counts held to the named
+  metric (under version 1 too: "5 orders" beside both the order count and Google ad orders with different
+  values is refused until it says "online orders" or "Google ad orders").
+- Zetaris: nothing created or changed (`nouns` is in no view). Env: unchanged. No migration.
