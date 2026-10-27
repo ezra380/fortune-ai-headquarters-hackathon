@@ -58,6 +58,19 @@ describe('metric catalog', () => {
       const nouns = new Map([a, b].map((m) => [m.id, m.nouns ?? []]));
       return checkPlans({ plans: [plan(1), plan(2), plan(3)], memoryConflicts: [] }, [metricOf(a, 7), metricOf(b, 9)], nouns).ok;
     };
+    // Merge wave 2 (the data lane's review): the marketplace stock counts own qualified phrases only ("amazon low-cover
+    // listings"), so a Finance plan's bare "2 products" is never held to a stock count it does not cite.
+    const counts = CATALOG_V2.filter((m) => m.unit === 'count' && m.divisions.includes('finance'));
+    expect(counts.filter((m) => /\.stock\./.test(m.id)).length).toBeGreaterThan(0);
+    const revenue = CATALOG_V2.find((m) => m.id === 'm:online.revenue.total')!;
+    const data: Metric[] = [...counts.map((m) => metricOf(m, 5)), { ...metricOf(revenue, 1000), unit: revenue.unit } as Metric];
+    const financePlan = (summary: string) => checkPlans({ plans: [1, 2, 3].map((rank) => ({
+      rank, title: 'Reprice', summary, actions: ['Check the prices today'], evidence: [{ metricId: revenue.id, value: 1000 }],
+      projections: [], test: 'Check again next week.', stopLoss: 'Stop if revenue falls.', businesses: ['online'], risks: ['None'],
+    })), memoryConflicts: [] }, data, new Map(counts.map((m) => [m.id, m.nouns ?? []])));
+    const passed = financePlan('Reprice 2 products before the weekend.');
+    expect(passed.ok ? [] : passed.errors).toEqual([]);
+    expect(financePlan('Restock the 2 amazon low-cover products first.').ok).toBe(false); // a stock count's own phrase is still held to its value (5)
     for (const d of Division.options) {
       const counts = CATALOG_V2.filter((m) => m.unit === 'count' && m.divisions.includes(d));
       for (const a of counts) {

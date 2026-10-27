@@ -2,7 +2,7 @@ import type { Division } from '@fahq/contracts';
 import type { MetricDef } from './finance-sql.ts';
 import { ONE, both, counted, isNull, num, oneIf, oneOf, quoted, type Cond, type Field, type Row, type SourceSpec } from './sql.ts';
 import {
-  AS_OF, INVOICE_BUSINESSES, LAST_WEEK, MESSAGE_CHANNELS, MESSAGE_DIRECTIONS, MESSAGE_INTENTS, PRODUCT_LINES, RECOVERY_CHANNELS, REFUND_REASONS,
+  ANSWERERS, AS_OF, INVOICE_BUSINESSES, LAST_WEEK, MESSAGE_CHANNELS, MESSAGE_DIRECTIONS, MESSAGE_INTENTS, PRODUCT_LINES, RECOVERY_CHANNELS, REFUND_REASONS,
   REPAIR_CHANNELS, REPAIR_STATUSES, REPAIR_TYPES, SALON_LOCATIONS, SUPPLIERS,
 } from './synthetic.ts';
 
@@ -17,6 +17,7 @@ export type OpsSource = (typeof OPS_SOURCE_NAMES)[number];
 
 const str = (r: Row, k: string) => String(r[k]);
 const startsDemoOrder = (r: Row) => !isNull(r.order_id) && str(r, 'order_id').startsWith('demo-o-');
+export const startsDemoCustomer = (r: Row) => !isNull(r.customer_id) && str(r, 'customer_id').startsWith('demo-cu-');
 
 export const OPS_SOURCES: Record<OpsSource, SourceSpec> = {
   order_costs: {
@@ -26,8 +27,9 @@ export const OPS_SOURCES: Record<OpsSource, SourceSpec> = {
   },
   refunds: {
     table: 'online_refunds', date: 'refund_date',
-    validSql: `amount_usd > 0 AND reason IN (${quoted(REFUND_REASONS)}) AND order_id LIKE 'demo-o-%'`,
-    valid: (r) => num(r, 'amount_usd') > 0 && oneOf(REFUND_REASONS, r.reason) && startsDemoOrder(r),
+    // Wave 2: issued to the order's customer, a synthetic id.
+    validSql: `amount_usd > 0 AND reason IN (${quoted(REFUND_REASONS)}) AND order_id LIKE 'demo-o-%' AND customer_id LIKE 'demo-cu-%'`,
+    valid: (r) => num(r, 'amount_usd') > 0 && oneOf(REFUND_REASONS, r.reason) && startsDemoOrder(r) && startsDemoCustomer(r),
   },
   checkouts: {
     table: 'online_checkouts', date: 'created_date',
@@ -44,9 +46,17 @@ export const OPS_SOURCES: Record<OpsSource, SourceSpec> = {
   },
   messages: {
     table: 'support_messages', date: 'received_date',
-    validSql: `channel IN (${quoted(MESSAGE_CHANNELS)}) AND direction IN (${quoted(MESSAGE_DIRECTIONS)}) AND intent IN (${quoted(MESSAGE_INTENTS)}) AND substr(received_at, 1, 10) = received_date AND (first_reply_at IS NULL OR first_reply_at >= received_at)`,
+    // Wave 2: from a customer (a synthetic id), and someone from a fixed list answered it exactly when it was answered.
+    validSql: `channel IN (${quoted(MESSAGE_CHANNELS)}) AND direction IN (${quoted(MESSAGE_DIRECTIONS)}) AND intent IN (${quoted(MESSAGE_INTENTS)}) AND substr(received_at, 1, 10) = received_date AND (first_reply_at IS NULL OR first_reply_at >= received_at)`
+      + ` AND customer_id LIKE 'demo-cu-%' AND (answered_by IS NULL) = (first_reply_at IS NULL) AND (answered_by IS NULL OR answered_by IN (${quoted(ANSWERERS)}))`,
     valid: (r) => oneOf(MESSAGE_CHANNELS, r.channel) && oneOf(MESSAGE_DIRECTIONS, r.direction) && oneOf(MESSAGE_INTENTS, r.intent)
-      && str(r, 'received_at').slice(0, 10) === r.received_date && (isNull(r.first_reply_at) || str(r, 'first_reply_at') >= str(r, 'received_at')),
+      && str(r, 'received_at').slice(0, 10) === r.received_date && (isNull(r.first_reply_at) || str(r, 'first_reply_at') >= str(r, 'received_at'))
+      && startsDemoCustomer(r) && isNull(r.answered_by) === isNull(r.first_reply_at) && (isNull(r.answered_by) || oneOf(ANSWERERS, r.answered_by)),
+    // Each message with the customer's previous message on the same topic in the same direction (wave 2's duplicates).
+    from: (rowView) => {
+      const before = (col: string) => `LAG(${col}) OVER (PARTITION BY customer_id, intent, direction ORDER BY received_at, message_id) AS prev_${col}`;
+      return `(SELECT *, ${['channel', 'received_at', 'first_reply_at'].map(before).join(', ')} FROM ${rowView} ) m_messages`;
+    },
   },
   repairs: {
     table: 'salon_repairs', date: 'received_date',
@@ -78,7 +88,9 @@ export const clock = (col: string) => `(CAST(substr(${col}, 12, 2) AS INT) * 60 
 const REPLY_MINUTES = `(DATEDIFF(substr(first_reply_at, 1, 10), received_date) * 1440 + ${clock('first_reply_at')} - ${clock('received_at')})`;
 export const moment = (v: unknown) => Date.parse(`${String(v).replace(' ', 'T')}Z`);
 const replyMinutes = (r: Row) => (isNull(r.first_reply_at) ? null : (moment(r.first_reply_at) - moment(r.received_at)) / 60_000);
-const answeredWithin = (minutes: number): Cond => ({
+/** Minutes to the first answer as a field (NULL when unanswered, which an aggregate leaves out). */
+export const REPLY_MINUTES_FIELD: Field = { sql: REPLY_MINUTES, js: (r) => replyMinutes(r) ?? Number.NaN };
+export const answeredWithin = (minutes: number): Cond => ({
   sql: `${REPLY_MINUTES} <= ${minutes}`, js: (r) => { const m = replyMinutes(r); return m !== null && m <= minutes; },
 });
 const notAnsweredWithin = (minutes: number): Cond => ({

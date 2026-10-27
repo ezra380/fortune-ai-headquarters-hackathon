@@ -411,15 +411,224 @@ Two things learned the hard way:
 - Because window functions work, the season index can stay in Zetaris (computed from the grouped rows in
   the period view), not in TypeScript. The oracle computes the same number independently.
 
+## Wave 2, slice 1: the channels (Finance's sources, docs/wave2.md items 1 to 3)
+
+`packages/data/src/channels.ts` (sources, rules, metrics) and `generateChannels` in `synthetic.ts` (rows), built the
+way version 2 is: each source its own seeded stream (`marketplace_sales`, `walmart_ads`, `marketplace_stock`,
+`email_messages`, `order_lines`), exactly one planted bad row with its rule and a rejected-rows count, an oracle,
+live proof. Seventeen sources now; the catalog holds 104 period, 14 derived and 20 standing metrics.
+
+| Source (Zetaris table, row view) | Rows | What it is | Planted bad row |
+|---|---|---|---|
+| `fortune_demo_marketplace.sales` (`marketplace_sales`, new database `FORTUNE_DEMO_MARKETPLACE`) | 3,023 | one marketplace order of one listing, sold and shipped from the marketplace's warehouse: units, revenue, fees (15% referral plus a warehouse fee per unit). Amazon lists the 16 accessories and four Tuni pieces, Walmart ten accessories | `demo-mk-bad-fees` (June): a fee reversal exported as a negative fee |
+| `fortune_demo_marketplace.ads` (`marketplace_ads`) | 783 | Walmart's own ads, two keywords a day (Amazon's have been among the marketing ads since version 1) | `demo-wa-bad-negative` (January): negative spend |
+| `fortune_demo_marketplace.stock` (`marketplace_stock`) | 391 | each listing on every period's last day: on hand, inbound, units sold in the 28 days to that day (equal to the sales, a test) | `demo-ms-bad-negative` (May): negative on hand |
+| `fortune_demo_marketing.email_messages` (`marketing_email_messages`) | 2,793 | each email row split into its messages (a flow's steps from a fixed list; a campaign is one message): sends and revenue to the cent, and unsubscribes | `demo-ems-bad-negative` (March): negative sends |
+| `fortune_demo_online.order_lines` (`online_order_lines`) | 1,938 | each store sale split into lines, one unit of one product each (distinct products of the order's line): price, unit cost and the refunds on the order to the data date, shared by weight to the cent | `demo-ol-bad-units` (August): a line of no units |
+
+**What adds up exactly (tests in `channels.test.ts`):** every email row's messages carry its sends and revenue to the
+cent, so flow plus campaign sends are `m:online.email.sends` and their revenue `m:online.email.revenue` in every
+period; every order's lines carry its revenue, cost and valid refunds to the cent, so `m:online.products.cogs` is the
+orders' cost and the lines' revenue `m:online.revenue.total`; a warehouse's 28-day units are the sales. **Every one
+of the 1,224 values the base (16449bf) served is unchanged** (pinned by a hash computed by running the base's own
+code). Not re-counted: the marketplaces are not the store, so `m:online.revenue.total`, the all-channel ad spend,
+the MER and the contribution keep their Google, Meta and Amazon meaning (Walmart's ad spend says so in `about`).
+
+| Metrics | Unit | Rule | Divisions |
+|---|---|---|---|
+| `m:online.{amazon,walmart}.{revenue,orders.count,fees}` | usd / count / usd | valid sales of the marketplace, by order day | finance, hq |
+| `m:online.ads.walmart.{spend,revenue,roas,conversions}` | as Google's | valid Walmart ad days | online, finance |
+| `m:online.{amazon,walmart}.stock.out.count` (standing) | count | none on hand at the warehouse on the data date | finance, hq |
+| `m:online.{amazon,walmart}.stock.low_cover.count` (standing) | count | in stock with under 21 days of cover at the last 28 days' pace (`on_hand * 28 < 21 * units_28d`); never also out | finance, hq |
+| `m:online.marketplace.inbound_units` (standing) | count | units on their way to both warehouses on the data date | finance, hq |
+| `m:online.email.{flow,campaign}.{sends,revenue}`, `m:online.email.campaign.count`, `m:online.email.unsubscribe_rate` | count / usd / count / ratio | valid email messages by kind; campaigns sent; unsubscribes over sends | online, finance |
+| `m:online.products.cogs` | usd | the lines' units × unit cost, by order date | online, finance |
+| `m:online.products.negative_margin.count` | count | products whose lines in the period made less than they cost once their refunds (to the data date) are off; a returned piece's cost is not added back | online, hq |
+| `m:online.dq.rejected_{marketplace_sales,marketplace_stock}`, `…_{marketplace_ads,email_messages,order_lines}` | count | the source's rejected rows | the source's readers, hq |
+
+`m:online.email.sends` gained the phrases "total emails" and "marketing emails" (its value is unchanged), so a plan
+can name it apart from the flow and campaign sends. The products that lost money are counted per product inside the
+period view's one read of the lines: an inner `GROUP BY period, sku`, then a count of the products below zero
+(`groupedSelect` in `finance-sql.ts`, a new aggregate kind `losing`; every other source's SQL is byte-for-byte as
+before). Ids per division (period / derived / standing): salon 24 / 2 / 3; finance 76 / 14 / 16; online 65 / 5 / 3;
+hq 31 / 14 / 16; a `2026-10-mtd` read returns salon 28, finance 104, online 72, hq 59 metrics.
+
+**The asks of docs/wave2.md, pinned by a test** (`channels.test.ts`, "who must not read what"): Online never reads the
+marketplace stock (`m:online.{amazon,walmart}.stock.*`, `m:online.marketplace.*`; Finance and HQ do); Finance reads
+no product number but the money totals and no `returns`/`reviews` number; Finance never reads `m:salon.clients.*`;
+Online never reads `m:salon.*`.
+
+**Attention** (new rules): a marketplace listing out of stock (act); low on cover (watch). On the synthetic year:
+Amazon has 2 out and 4 low, Walmart 0 out and 2 low, 78 units inbound; Finance and HQ see them.
+
+**Row reads** (`RowRead` in `@fahq/contracts`, `rows.ts`):
+- `marketplace_stock { status: 'all' | 'low', marketplace? }`: each listing on the data date, by marketplace and sku:
+  sku, marketplace, line, on hand, inbound, units in 28 days, units a day, days of cover (null when none sold) and a
+  status (`out`, `low`, `ok`). Totals: listings, out of stock, low on cover, units on hand and inbound (units, never
+  money, so both marketplaces add up). The out, low and inbound totals equal the standing numbers (a test).
+- `products { period, sort: 'best' | 'worst' }`: each store product's period from its lines, by profit: units,
+  revenue, cost, refunds, profit, margin, refund rate and views in the period's last week (from the inventory). One
+  fixed statement: the period's valid lines added up per product, left-joined to that day's valid stock rows; its hash
+  covers both row views. Totals: products, units, revenue, cost, refunds, profit, and how many lost money (equal to
+  the period metrics, a test). The average rating joins when the reviews source exists (slice 2).
+
+**Read tools** (worker and door): `get_marketplace_stock({ status?, marketplace?, limit? })` for the owner and
+Finance; `get_product_performance({ period, sort?, limit? })` for the owner and Online. Their lines are in the skills.
+
+**Live run, 2026-10-27 11:24–11:58 ET:** `--v2 --recreate` dropped every version 2 object (the filter views about 50 s
+a drop today) and was stopped once the period view was gone; `--v2` then created everything missing (database
+`FORTUNE_DEMO_MARKETPLACE`, 17 REST tables and row views, the three layer views, twelve filter views, four marts and
+their twelve tables) and proved it: 104 of 104 period metrics in each of the 13 periods (the grouped select of the
+order lines accepted), derived and standing views, every mart table for every period, the DataPort reads (unsliced
+136 of 136; salon 28, finance 104, online 72, hq 59, in `2026-10-mtd` and `2026-09`): **145 comparisons, all matched,
+0 mismatches**; 13 row reads equal to the oracle (the four new ones among them: all stock 30 listings, 2 out, 6 low,
+78 inbound; Amazon low 6 rows; products `2026-10-mtd` worst first 40 products, `2026-09` best first 48 with 3 that
+lost money); 7 series (Amazon revenue and the losing products among them); version 1's mart listed exactly as
+before; "version 2 verified". Attention that fired: Finance and HQ, the marketplace stock out (act) and low cover
+(watch), beside what fired before. A period read now takes about 12 s.
+
+## Wave 2, slice 2: the customers and the store site (Online's sources, docs/wave2.md items 4 to 6)
+
+`packages/data/src/customers.ts` and `web.ts` (sources, rules, metrics), `generateCustomers` and `generateWeb` in
+`synthetic.ts` (rows), built the same way: each source its own seeded stream, one planted bad row with its rule and a
+rejected-rows count, an oracle, live proof. Twenty-one sources now; the catalog holds 121 period, 14 derived and 23
+standing metrics. **Every one of the 1,224 values the base (16449bf) served is still unchanged** (the hash test in
+`channels.test.ts` leaves out only the new metrics).
+
+**The customers (item 4 and 5).** A customer is a synthetic id, `demo-cu-c…` (ordered), `demo-cu-r…` (six invented
+customers who send back again and again) or `demo-cu-p…` (wrote to the shop, has not ordered); never a name, address
+or contact detail. Version 2's orders (`orders_v2`), refunds and support messages gain `customer_id`, assigned by the
+streams `customers` and `message_people`, which only read the rows: no row moves and no number counted before changes.
+A refund goes to its order's customer, a message that led to an order to that order's customer, a question about a
+return to a customer refunded within two weeks of it, the shop's follow-up to the thread's customer. Messages also
+gain `answered_by` (`emma`, `salon`, `auto`, `other`; empty exactly when unanswered; `auto` is a chat answered within
+two minutes). **Planted duplicates** come from the same assignment, so the inbox's existing counts stay as they were:
+now and then a customer writes again about the same thing on another channel within a day, before the first message
+was answered.
+
+| Source (Zetaris table, row view) | Rows | What it is | Planted bad row |
+|---|---|---|---|
+| `fortune_demo_online.reviews` (`online_reviews`) | 189 | a customer's review of the first product of an order, 5 to 30 days after it: rating 1 to 5 and a topic (fit, color, quality, shipping, service, other). No text. Refunded orders are reviewed more often and lower | `demo-rv-bad-rating` (February): a rating of 0 |
+| `fortune_demo_web.page_days` (`web_page_days`, new database `FORTUNE_DEMO_WEB`) | 14,077 | each of six pages' day by visit source (organic, google, meta, email, direct, social): sessions, carts, checkouts, orders (each at most the one before), LCP in ms. Each day's sales are placed on one page and source | `demo-pd-bad-carts` (April): more carts than visits |
+| `fortune_demo_web.crawl` (`web_crawl`) | 2,017 | every Monday from 2025-10-06, the six links of each page and the HTTP status (`http_status`) the crawler got; a link breaks now and then and stays broken a few weeks | `demo-cr-bad-status` (May): status 0 |
+| `fortune_demo_web.blog_posts` (`web_blog_posts`) | 103 | a post every 6 to 14 days since January 2024: published, last updated, topic (care, styling, buying guide, salon news, consignment), visits in 28 days | `demo-bp-bad-dates` (March): updated before published |
+
+The rules of orders (version 2 only; version 1's is frozen), refunds and messages now also check the customer id, and
+the messages' rule that `answered_by` is empty exactly when `first_reply_at` is.
+
+**What adds up exactly (tests in `web.test.ts`):** each day's page-day orders are that day's valid store orders, so the
+page days' orders are `m:online.orders.count` in every period.
+
+| Metrics | Unit | Rule | Divisions |
+|---|---|---|---|
+| `m:online.reviews.count`, `m:online.reviews.low_rating.count` | count | valid reviews by review day; rated 1 or 2 | online, hq |
+| `m:online.reviews.avg_rating` | score (planUse false) | the average rating, to a hundredth | online, hq |
+| `m:online.returns.repeat_customers.count` (standing) | count | customers with two or more valid refunds in the 365 days to the data date (2025-10-27 to 2026-10-26), counted per customer in the refunds' one read (aggregate kind `repeat`) | online, hq |
+| `m:online.service.emma.replied_1h.share` | ratio | of the inbound messages Emma answered first, those answered within the hour | online |
+| `m:online.service.emma.first_reply_minutes` | minutes (planUse false) | the median minutes to her first answer: Spark's exact `percentile(…, 0.5)` (between the two middle values), to a tenth (aggregate kind `median`) | online |
+| `m:online.service.duplicate.count` | count | an inbound message whose customer's previous inbound message on the same topic came on another channel within the 24 hours before it and had not been answered when it came; counted on the second message's day | online, hq |
+| `m:online.service.answered_twice.count` | count | duplicates where both messages were answered (two people did the same work) | online |
+| `m:online.web.sessions`, `m:online.web.cart_rate`, `m:online.web.conversion_rate` | count / ratio / ratio | valid page days: visits; carts over visits; orders over visits | online |
+| `m:online.web.slow_pages.count` | count | pages whose rows' average LCP over the period is above 2,500 ms, counted per page in the page days' one read (aggregate kind `above`) | online, hq |
+| `m:online.web.lcp_avg_seconds` | seconds (planUse false) | the average LCP of every page day, in seconds, to four places | online |
+| `m:online.web.broken_links.count` (standing) | count | the latest crawl (the data date is a Monday): 404 or a server error | online, hq |
+| `m:online.blog.published.count`; `m:online.blog.stale.count` (standing) | count | posts published in the period; posts not updated in the 180 days to the data date | online; online, hq |
+| `m:online.dq.rejected_{reviews,page_days,crawl,blog_posts}` | count | the source's rejected rows | online, hq |
+
+**The duplicates in SQL.** The period view's messages select reads the row view through a window (the source spec's
+new `from`): `LAG(channel | received_at | first_reply_at) OVER (PARTITION BY customer_id, intent, direction ORDER BY
+received_at, message_id)`, still one read of the inbox; the oracle adds the same three columns in `sourceRows`
+(`withPrevious`, once per messages array). The gap in minutes comes from `DATEDIFF` on the dates and the clock digits,
+as the reply minutes do. Probed live first (12:05 ET, a read-only `SELECT` on literal arrays): `percentile`,
+`LAG … PARTITION BY`, `SELECT *, LAG(…)` and `concat_ws(',', sort_array(collect_set(…)))` all work.
+
+Ids per division (period / derived / standing): salon 24 / 2 / 3; finance 76 / 14 / 16 (unchanged: the asks); online
+82 / 5 / 6; hq 40 / 14 / 19. A `2026-10-mtd` read returns salon 28, finance 104, online 92, hq 71 metrics. The asks
+test still holds: no `returns`/`reviews` number and no product number but the money totals reach Finance.
+
+**Attention** (new rules): repeat returners, duplicated messages, low ratings, slow pages, stale posts (watch); broken
+links (act). On the synthetic year in `2026-10-mtd`: 7 repeat returners, 8 duplicates (6 answered twice), 1 low rating,
+1 slow page (the featured product page), 81 stale posts, 2 broken links; Online and HQ see them.
+
+**Row reads** (`RowRead` in `@fahq/contracts`, `rows.ts`):
+- `return_cases { period }`: each valid refund issued in the period, oldest first: refund, order, customer id, the
+  order's products (`skus`, comma-joined), reason, amount, refund date, days after the sale; the customer's refunds in
+  the 365 days to the data date, reviews (count, lowest rating, topics) and inbound messages (count, topics, never the
+  text). One fixed statement: the period's refunds joined to their orders, the orders' lines and, per customer, the
+  year's refunds, the reviews and the inbound messages, each from its source's valid rows; its hash covers the five row
+  views. Totals: refunds, amount, customers, repeat customers, and count and amount by reason (every reason named).
+  The count and amount equal `m:online.refunds.{count,total}` (a test). The privacy test allows a customer only here,
+  only as `customerId` matching `demo-cu-[a-z]\d{5}`.
+- `journey { period }`: the period's valid page days added up per visit source, most visits first: sessions, carts,
+  checkouts, orders, cart rate, conversion rate. Totals: the sources added up (counts) and the overall rates, equal to
+  `m:online.web.{sessions,cart_rate,conversion_rate}` and the order count (a test).
+- `products` gains `avgRating` (all valid reviews of the product to the data date, to a hundredth; null with none)
+  and `reviews`, through a third left join; 45 of September's 48 products are rated.
+
+**Read tools** (worker and door): `get_return_cases({ period, limit? })` and `get_store_journey({ period, limit? })`
+for the owner and Online. Their lines are in the skills (Online stays at 48 body lines: two pairs of reads share a
+line each).
+
+**Live run, 2026-10-27 12:19–14:19 ET** (logs `.local/live-s2.log`, `time-s2.log`, `online-s2.log` in the worktree):
+- **Rebuilt only what changed** (a scratch script over `v2DropStatements`, version 1 never on its list): the four
+  marts, the twelve filter views, the three layer views, and the orders, refunds and messages row views and REST tables
+  (their columns grew), 25 drops, 12:19–12:38 (a filter or layer view drop took 15 s to 4 min). Then `--v2` created
+  what was missing: database `FORTUNE_DEMO_WEB`, the four new REST tables and row views, the three recreated ones, the
+  layer views (the period view in 23 s: the inbox's `LAG` window, `percentile`, the grouped page days all accepted),
+  the twelve filter views, and the marts.
+- **`ADD DATAMART TABLE` of a derived table drops the connection after about five minutes** ("Cannot reach Zetaris",
+  three times) while Zetaris finishes it: a fresh `SHOW DATAMART TABLES` lists it. A scratch script added the missing
+  mart tables, re-listing after each dropped connection, 13:12–13:30.
+- **Proof** (`--v2 --verify-only`, then a focused read-only script, both against the oracle): the period view, **121 of
+  121 metrics in each of 2025-10, 2025-11, 2025-12 and 2026-01**; the standing view, **23 of 23** (the repeat returners
+  per customer, the latest crawl, the stale posts); the row reads **return_cases** (`2026-10-mtd`: 7 refunds, $4,907.50,
+  1 repeat customer; `2026-09`: 4), **journey** (`2026-10-mtd`: 6 sources, 15,430 sessions, 89 orders; `2026-09`:
+  18,501 and 112), **products** with ratings (`2026-09` best first, 48 products, 3 losing) and **waiting** (24 h: 2), each
+  equal to the oracle; the series of `m:online.service.duplicate.count` from the online mart and of
+  `m:online.web.slow_pages.count` from the HQ mart, 13 points each, equal (about 4.5 minutes each).
+- **Spark refused the first return-cases statement** (`MISSING_ATTRIBUTES.RESOLVED_ATTRIBUTE_APPEAR_IN_OPERATION`):
+  it joined the refunds' exploded row view with itself. The year's refunds per customer are now a window over the one
+  read (commit `0a0796a`); a test pins one read of each row view.
+- **Failed live: the online division read** (`getDivisionMetrics online 2026-10-mtd`, 14:02–14:07): "Cannot reach
+  Zetaris" after about five minutes, the same dropped connection as the long mart adds; its three statements include
+  the derived table, which reads the whole period view. Not proved either: the period view in the other nine periods
+  (the same statement, a different `WHERE period`), the derived view, and the full mart-by-mart and DataPort comparison
+  of `zetaris-setup.ts`.
+- **Reads are much slower now, and that is the open problem of this slice:** one period of the period view took 2 to
+  3.5 minutes (slice 1: about 12 s), a series through a mart about 4.5 minutes, and a division read passes Zetaris's
+  five-minute connection. Row reads stay quick (the journey 7 to 9 s, return cases about 25 s). **Timed per source
+  (14:09 ET, read-only, each source's part of the period view alone for `2026-09`):** page days 6.9 s, messages (with
+  the window) 5.4 s, email messages 5.4 s, orders 4.2 s, ads (unchanged since version 1) 3.9 s, blog posts 3.0 s,
+  refunds, reviews and crawl about 2.6 s each. No new source stands out: every read now pays about 2.5 s of fixed cost
+  (slice 1's whole 17-source period read took about 12 s), and the period view's 21 parts add up to the minutes seen.
+  The machine was loaded (load average 4 to 5); Zetaris itself was not restarted (the live worker reads version 1
+  from it).
+- **The derived layer is the one that does not answer** (14:13–14:19 ET, the online mart's three statements asked one
+  after another): `period_metrics` for `2026-10-mtd`, **82 of 82 in 28 s**; `standing_metrics`, **6 of 6 in 13 s**;
+  `derived_metrics`, dropped connection after five minutes. The derived view pivots the period view over all thirteen
+  periods (with the season index's windows) and so reads every source's every row; the one-period reads stay well
+  inside the limit. Until it is fixed, a version 2 division read (`getDivisionMetrics`, which asks all three together)
+  and the unsliced `getFinanceMetrics` can fail on Zetaris's five-minute connection.
+- **Fixed (review round, commit `030f4bd`):** the derived view no longer reads the period view. `periodSubsetBody`
+  builds the period totals of just its inputs (`DERIVED_INPUTS`) from just their six sources (orders, appointments,
+  ads, budgets, order costs, refunds), with the period view's own SQL per metric (`layers.test.ts` pins both: the
+  subset of every id is the period view's body; the derived body names no other metric and reads no other source).
+  Live, 15:09 ET: `derived_metrics` recreated alone (the period, standing and row views and the marts untouched),
+  then **all 13 periods in one statement in 38.6 s, 156 of 156 equal to the oracle** (load 4.5 to 5.9). The marts read
+  the view by name: the online mart's derived table for `2026-10-mtd` in 10.5 s; its standing table 85.6 s and its
+  period table 182.8 s (load 3 to 6.4). `getDivisionMetrics`, 15:10–15:31 ET, every division in `2026-10-mtd` and
+  `2026-09`, all equal to the oracle (590 values): salon 287.9 s and 24.5 s, online 20.3 s and 35.5 s, finance 31.7 s
+  and 35.8 s, hq 254.5 s and 24.4 s (the slow ones ran while other lanes' suites loaded the machine). The period
+  table is now the slow part: each division's period filter view still reads the whole period view; the same fix
+  (a filter view over `periodSubsetBody` of the division's own ids) is the next step.
+
 ## Future work, by owner decision
 
 - **No salon–online customer join yet** (Ezra, 2026-10-27). The "xjoin" database, the customer segments
   and the client profiles wait for a matching rule both owners agree. Until then no metric, view or tool
-  links a salon client to an online customer.
+  links a salon client to an online customer. (The store's own customer ids, wave 2, are online only.)
 - **No combined money metrics** (`m:combined.revenue.*`, `m:combined.gross_profit`): HQ shows salon and
   online side by side. The one `combined` metric is a count of rejected invoice rows.
-- Store sessions and landing pages come last, only if time remains.
 - Not built: rejected-rows metrics for ads and email (their extra rules from the design), average repair
-  turnaround in days and average first-reply minutes (the contract's metric units have no `days` or
-  `minutes`; the share metrics carry turnaround and reply speed instead), email flow/campaign splits and
-  unsubscribes, Meta campaigns and agents' late reports.
+  turnaround in days (wave 2 item 8), Meta campaigns and agents' late reports. (The email split came in wave 2,
+  slice 1; Emma's median first-reply minutes and the store's sessions and landing pages in slice 2.)

@@ -25,6 +25,9 @@ export const READ_TOOL_NAMES = [
   // and the rows behind the standing numbers.
   'get_budget_room', 'get_metric_series', 'get_company_overview', 'get_data_quality', 'get_repair_tickets', 'get_supplier_invoices',
   'get_waiting_conversations', 'get_low_stock_interest',
+  // Wave 2: the marketplace warehouses' stock (Finance's; Online asks for it) and each product's period (Online's; Finance asks);
+  // each refund with its customer's year, reviews and messages (Online's; Finance asks); the store journey (Online's).
+  'get_marketplace_stock', 'get_product_performance', 'get_return_cases', 'get_store_journey',
 ] as const;
 export type ReadToolName = (typeof READ_TOOL_NAMES)[number];
 
@@ -59,18 +62,25 @@ const SHAPES: Record<AssistantId, Shape> = {
     id: 'owner', title: 'Owner HQ', serves: 'owner', status: 'live',
     reads: [
       'get_finance_metrics', 'get_company_overview', 'get_budget_room', 'get_metric_series', 'get_repair_tickets', 'get_supplier_invoices',
-      'get_waiting_conversations', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal',
+      'get_waiting_conversations', 'get_marketplace_stock', 'get_product_performance', 'get_return_cases', 'get_store_journey', 'recall_decisions', 'list_lessons', 'get_timeline',
+      'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal',
     ],
     writes: ['propose'], jobs: ['route', 'code', 'answer'], memory: 'owner',
   },
   finance: {
     id: 'finance', title: 'Finance Department', serves: 'finance_owner', status: 'live',
-    reads: ['get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal'],
+    reads: [
+      'get_finance_metrics', 'get_budget_room', 'get_metric_series', 'get_supplier_invoices', 'get_marketplace_stock', 'recall_my_decisions', 'my_lessons', 'latest_proposal',
+      'explain_proposal',
+    ],
     writes: ['propose', 'report'], jobs: ['plan', 'code', 'answer'], memory: 'finance',
   },
   online: {
     id: 'online', title: 'Online Customer Service', serves: 'online_staff', status: 'live',
-    reads: ['get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'recall_my_decisions', 'my_lessons'],
+    reads: [
+      'get_online_metrics', 'get_metric_series', 'get_waiting_conversations', 'get_low_stock_interest', 'get_product_performance', 'get_return_cases', 'get_store_journey',
+      'recall_my_decisions', 'my_lessons',
+    ],
     writes: ['propose', 'report'], jobs: ['plan', 'code', 'answer'], memory: 'online',
   },
   // In production this is Cindy's own backend (her family and personal data never cross); here it shows the

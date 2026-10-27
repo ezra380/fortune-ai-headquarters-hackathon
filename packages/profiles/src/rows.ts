@@ -57,10 +57,14 @@ export const READ_SCOPE: Readonly<Record<ReadToolName, ReadScope>> = {
   get_budget_room: 'online', get_metric_series: 'none', // walls itself by caller (SERIES_DIVISIONS in read-tools.ts)
   get_company_overview: 'both', get_data_quality: 'both', get_repair_tickets: 'salon', get_supplier_invoices: 'both',
   get_waiting_conversations: 'online', get_low_stock_interest: 'online',
+  get_marketplace_stock: 'online', get_product_performance: 'online', get_return_cases: 'online', get_store_journey: 'online',
 };
 
 /** The read tools that return money. The HQ Manager reviews the work and never reads them. */
-export const MONEY_READS: readonly ReadToolName[] = ['get_finance_metrics', 'get_budget_room', 'get_company_overview', 'get_supplier_invoices'];
+export const MONEY_READS: readonly ReadToolName[] = [
+  'get_finance_metrics', 'get_budget_room', 'get_company_overview', 'get_supplier_invoices',
+  'get_product_performance', 'get_return_cases', // revenue, cost, profit and refund amounts
+];
 
 /**
  * What an assistant may never read, from the scopes: the salon and the online store stay separate businesses (neither

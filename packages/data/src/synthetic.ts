@@ -8,7 +8,9 @@ import type { Period } from '@fahq/contracts';
 // history before it (generateHistory), Meta as a third ad channel and the finance owner's monthly budget
 // sheet (generateDivisions), and the day-to-day systems each division runs on (generateOperations): order
 // fees and shipping labels, refunds, abandoned checkouts, inventory with product interest, the support
-// inbox, salon repair tickets and supplier invoices.
+// inbox, salon repair tickets and supplier invoices. Wave 2 adds the channels (generateChannels): Amazon's and
+// Walmart's sales, Walmart's ads and both warehouses' stock, the email rows split into their messages, and each
+// store order split into its lines.
 // No source has a medical or hair-loss field or value (Fortune rule 6), and the support inbox has no body.
 
 export type { Period };
@@ -59,13 +61,44 @@ export const BOOKING_CHANNELS = ['online', 'phone', 'walk_in'] as const;
 /** The two businesses a supplier invoice can belong to; an invoice is never split between them. */
 export const INVOICE_BUSINESSES = ['salon', 'online'] as const;
 export const SUPPLIERS = ['demo-sup-s1', 'demo-sup-s2', 'demo-sup-s3', 'demo-sup-s4'] as const;
+/** The marketplaces the store also sells on, each from its own warehouse (Amazon FBA, Walmart WFS). */
+export const MARKETPLACES = ['amazon', 'walmart'] as const;
+export type Marketplace = (typeof MARKETPLACES)[number];
+/** Each email flow's messages in order, and the weekly campaign: the fixed list of names an email row may carry. */
+export const EMAIL_STEPS: Record<string, readonly string[]> = {
+  'Welcome (demo)': ['Welcome: hello (demo)', 'Welcome: the three lines (demo)', 'Welcome: meet the salon (demo)'],
+  'Checkout recovery (demo)': ['Checkout recovery: reminder (demo)', 'Checkout recovery: questions answered (demo)'],
+  'Post-purchase care (demo)': ['Care: first wash (demo)', 'Care: styling at home (demo)'],
+  'Weekly edit (demo)': ['Weekly edit (demo)'],
+};
+export const EMAIL_NAMES = Object.keys(EMAIL_STEPS);
+/** What a review is about, from a fixed list; a review has a rating and a topic, never text. */
+export const REVIEW_TOPICS = ['fit', 'color', 'quality', 'shipping', 'service', 'other'] as const;
+/** Who sent the first answer to a customer's message: Emma (the online assistant), the salon, an automatic reply, someone else. */
+export const ANSWERERS = ['emma', 'salon', 'auto', 'other'] as const;
+/** The store site's pages the page days and the crawl cover (invented): each with its type, its share of a day's visits and how fast it usually draws (ms). */
+export const SITE_PAGES = [
+  { page: '/', type: 'home', share: 0.32, lcp: [1600, 2300] },
+  { page: '/collections/mazali', type: 'collection', share: 0.2, lcp: [1900, 2600] },
+  { page: '/collections/tuni', type: 'collection', share: 0.12, lcp: [1800, 2500] },
+  { page: '/collections/accessories', type: 'collection', share: 0.1, lcp: [1500, 2200] },
+  { page: '/products/demo-mazali-feature', type: 'product', share: 0.16, lcp: [2300, 3300] },
+  { page: '/blogs/journal', type: 'blog', share: 0.1, lcp: [2000, 2900] },
+] as const;
+export const PAGE_TYPES = ['home', 'collection', 'product', 'blog'] as const;
+/** Where a site visit came from. */
+export const WEB_SOURCES = ['organic', 'google', 'meta', 'email', 'direct', 'social'] as const;
+/** What a blog post is about, from a fixed list (no health topic). */
+export const BLOG_TOPICS = ['care', 'styling', 'buying_guide', 'salon_news', 'consignment'] as const;
 
 /** Every enumerated column of every source, by column name, with its allowed values (the no-medical guard reads it). */
 export const SOURCE_ENUMS = {
-  product_line: PRODUCT_LINES, channel: [...ONLINE_CHANNELS, ...AD_CHANNELS, ...MESSAGE_CHANNELS, ...REPAIR_CHANNELS],
+  product_line: PRODUCT_LINES, channel: [...ONLINE_CHANNELS, ...AD_CHANNELS, ...MESSAGE_CHANNELS, ...REPAIR_CHANNELS, 'walmart'],
   service: SALON_SERVICES, reason: REFUND_REASONS, recovered_via: RECOVERY_CHANNELS, direction: MESSAGE_DIRECTIONS, booked_via: BOOKING_CHANNELS,
   intent: MESSAGE_INTENTS, repair_type: REPAIR_TYPES, status: [...REPAIR_STATUSES, 'completed', 'no_show', 'approved', 'proposed'],
   location: SALON_LOCATIONS, business: INVOICE_BUSINESSES, supplier_id: SUPPLIERS, kind: ['flow', 'campaign'],
+  marketplace: MARKETPLACES, name: EMAIL_NAMES, step: Object.values(EMAIL_STEPS).flat(), topic: [...REVIEW_TOPICS, ...BLOG_TOPICS], answered_by: ANSWERERS,
+  page_type: PAGE_TYPES, source: WEB_SOURCES, page: SITE_PAGES.map((p) => p.page),
 } as const;
 
 /**
@@ -133,6 +166,37 @@ export type SupplierInvoice = {
   invoice_id: string; supplier_id: string; business: (typeof INVOICE_BUSINESSES)[number]; product_line: string;
   invoice_date: string; due_date: string; paid_date: string | null; amount_usd: number;
 };
+/** One marketplace order of one listing, sold and shipped from the marketplace's warehouse: what it brought in and the marketplace's fees. */
+export type MarketplaceSale = {
+  sale_id: string; sale_date: string; marketplace: Marketplace; sku: string; product_line: string; units: number; revenue_usd: number; fees_usd: number;
+};
+/** A day of one Walmart ad keyword (the marketplace's own ads; Amazon's are among the marketing ads since version 1). */
+export type MarketplaceAdDay = Omit<AdDay, 'channel'> & { channel: 'walmart' };
+/** A listing's stock in the marketplace's warehouse on a snapshot date: on hand, on its way in, and units sold in the 28 days to it. */
+export type MarketplaceStock = {
+  stock_id: string; snapshot_date: string; marketplace: Marketplace; sku: string; product_line: string; on_hand: number; inbound: number; units_28d: number;
+};
+/** One message of a flow, or a campaign, sent on one day: its part of that day's email row, and the unsubscribes it caused. */
+export type EmailMessage = {
+  message_id: string; email_id: string; send_date: string; kind: 'flow' | 'campaign'; name: string; step: string; sends: number; revenue_usd: number; unsubscribes: number;
+};
+/**
+ * One unit of one product in a store order: what it sold for (its part of the order's revenue after the discount),
+ * its cost, and what has been refunded on it by the data date. An order of three accessories is three lines.
+ */
+export type OrderLine = {
+  line_id: string; order_id: string; order_date: string; sku: string; product_line: string; units: number; price_usd: number; unit_cost_usd: number; refunded_usd: number;
+};
+/** A store customer's synthetic id (demo-cu-…): never a name, an address or a phone number. */
+type CustomerId = { customer_id: string };
+/** Version 2's order: every version 1 column and value unchanged, plus the customer who placed it. */
+export type StoreOrder = OnlineOrder & CustomerId;
+/** Version 2's refund: issued to the customer who placed the order. */
+export type CustomerRefund = Refund & CustomerId;
+/** Version 2's support message: the customer it came from (or the shop's follow-up went to) and who first answered it (none when unanswered). */
+export type InboxMessage = SupportMessage & CustomerId & { answered_by: (typeof ANSWERERS)[number] | null };
+/** A customer's review of one product of an order: a rating from 1 to 5 and a topic from a fixed list. No text. */
+export type Review = { review_id: string; review_date: string; order_id: string; customer_id: string; sku: string; rating: number; topic: (typeof REVIEW_TOPICS)[number] };
 export type SyntheticBusiness = {
   generatedFor: string; seed: number;
   online: { orders: OnlineOrder[] };
@@ -144,12 +208,34 @@ export type Operations = {
   orderCosts: OrderCost[]; refunds: Refund[]; checkouts: Checkout[]; inventory: InventorySnapshot[];
   messages: SupportMessage[]; repairs: RepairTicket[]; invoices: SupplierInvoice[];
 };
-/** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet and the operations. */
-export type SyntheticYear = Omit<SyntheticBusiness, 'salon'> & {
-  online: Pick<Operations, 'orderCosts' | 'refunds' | 'checkouts' | 'inventory'>;
+/** The selling and marketing sources wave 2 adds for Finance (generateChannels). */
+export type Channels = {
+  marketplace: { sales: MarketplaceSale[]; ads: MarketplaceAdDay[]; stock: MarketplaceStock[] };
+  emailMessages: EmailMessage[];
+  orderLines: OrderLine[];
+};
+/** One page's day for one source of visits: sessions, carts, checkouts and orders (each at most the one before), and how fast it drew. */
+export type PageDay = {
+  page_day_id: string; visit_date: string; page: string; page_type: string; source: (typeof WEB_SOURCES)[number];
+  sessions: number; carts: number; checkouts: number; orders: number; lcp_ms: number;
+};
+/** One link on one page in a weekly crawl of the site, and the HTTP status the crawler got. */
+export type CrawlRow = { crawl_id: string; crawl_date: string; page: string; link: string; http_status: number };
+/** A blog post: when it was published and last updated, its topic and its visits in the last 28 days. No text. */
+export type BlogPost = { post_id: string; published_date: string; last_updated: string; topic: (typeof BLOG_TOPICS)[number]; sessions_28d: number };
+/** The store site wave 2 adds (generateWeb). */
+export type Web = { pageDays: PageDay[]; crawl: CrawlRow[]; blogPosts: BlogPost[] };
+/** The store's customers wave 2 adds (generateCustomers): who placed each order, got each refund and sent each message, and their reviews. */
+export type Customers = { orders: StoreOrder[]; refunds: CustomerRefund[]; messages: InboxMessage[]; reviews: Review[] };
+/** Version 2: thirteen months of every version 1 source, Meta among the ads, the budget sheet, the operations, the channels and the customers. */
+export type SyntheticYear = Omit<SyntheticBusiness, 'salon' | 'online'> & {
+  online: { orders: StoreOrder[]; refunds: CustomerRefund[]; reviews: Review[] } & Pick<Operations, 'orderCosts' | 'checkouts' | 'inventory'> & Pick<Channels, 'orderLines'>;
   salon: { appointments: SalonVisit[] } & Pick<Operations, 'repairs'>;
-  support: Pick<Operations, 'messages'>;
+  support: { messages: InboxMessage[] };
   finance: { budgets: BudgetRow[] } & Pick<Operations, 'invoices'>;
+  marketing: Pick<Channels, 'emailMessages'>;
+  marketplace: Channels['marketplace'];
+  web: Web;
 };
 
 /** mulberry32: tiny, fast, deterministic. */
@@ -629,20 +715,398 @@ export function generateOperations(orders: readonly OnlineOrder[], seed = DIVISI
   };
 }
 
-/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions and generateOperations add. */
+// ---- The channels (wave 2, for Finance) ---------------------------------------------------
+// Amazon and Walmart sell some of the store's products from their own warehouses; the email rows split into the
+// flows' messages and the campaign; each store order splits into its lines. Each source draws from its own named
+// stream. The email split and the order lines only re-divide rows that already exist, so they add up to them to
+// the cent; every source has exactly one planted bad row (ids demo-*-bad-*).
+
+/** A store product's id, as the inventory names it: the line's first letter and a two-digit number. */
+const skuOf = (line: (typeof PRODUCT_LINES)[number], i: number) => `demo-sku-${line[0]}${String(i + 1).padStart(2, '0')}`;
+const lineOfSku = (sku: string) => PRODUCT_LINES.find((l) => sku.startsWith(`demo-sku-${l[0]}`))!;
+const skusOf = (line: (typeof PRODUCT_LINES)[number], n: number) => Array.from({ length: n }, (_, i) => skuOf(line, i));
+const isPlanted = (id: string) => id.includes('-bad-');
+
+/** What each marketplace lists (invented): the accessories on both, four Tuni pieces on Amazon too. */
+export const LISTINGS: Record<Marketplace, readonly string[]> = {
+  amazon: [...skusOf('accessories', 16), ...skusOf('tuni', 4)],
+  walmart: skusOf('accessories', 10),
+};
+
+/** Splits a whole number by weights (the last part takes what is left), so the parts add up to it exactly. */
+function split(total: number, weights: readonly number[]): number[] {
+  const all = weights.reduce((t, w) => t + w, 0);
+  const parts = weights.map((w) => Math.floor((total * w) / all));
+  parts[parts.length - 1]! += total - parts.reduce((t, p) => t + p, 0);
+  return parts;
+}
+
+/** Spreads a whole number over parts in proportion to their caps, never above a cap (the total is at most the caps' sum). */
+function spread(total: number, caps: readonly number[]): number[] {
+  const all = caps.reduce((t, c) => t + c, 0);
+  if (total > all) throw new Error('spread: more than the parts can hold');
+  const out = caps.map((c) => (all === 0 ? 0 : Math.floor((total * c) / all)));
+  let left = total - out.reduce((t, x) => t + x, 0);
+  for (let i = 0; left > 0; i = (i + 1) % caps.length) if (out[i]! < caps[i]!) { out[i]! += 1; left -= 1; }
+  return out;
+}
+
+const toCents = (usd: number) => Math.round(usd * 100);
+
+/**
+ * Each listing's orders at the store's season: its usual units a day, price and warehouse fee per unit are drawn
+ * once (invented); the marketplace keeps a referral fee of 15% plus the fee per unit. The bad row is a fee
+ * reversal exported as a negative fee.
+ */
+function marketplaceSales(seed: number): MarketplaceSale[] {
+  const { r, between, count } = drawer(streamSeed(seed, 'marketplace_sales'));
+  const listings = MARKETPLACES.flatMap((marketplace) => LISTINGS[marketplace].map((sku) => {
+    const line = lineOfSku(sku);
+    const piece = line !== 'accessories';
+    const rate = piece ? between(0.03, 0.08) : marketplace === 'amazon' ? between(0.15, 0.6) : between(0.05, 0.3);
+    return { marketplace, sku, line, rate, price: cents(between(LINE[line].price[0], LINE[line].price[1])), perUnit: piece ? between(7, 9.5) : between(3.8, 6.2) };
+  }));
+  const out: MarketplaceSale[] = [];
+  for (const day of YEAR_DAYS()) {
+    for (const l of listings) {
+      for (let i = count(l.rate * seasonOf(day).online); i > 0; i--) {
+        const units = l.line === 'accessories' && r() < 0.2 ? 2 : 1;
+        const revenue = cents(l.price * units);
+        out.push({
+          sale_id: seq('demo-mk-s', out.length + 1), sale_date: day, marketplace: l.marketplace, sku: l.sku, product_line: l.line, units,
+          revenue_usd: revenue, fees_usd: cents(revenue * 0.15 + units * l.perUnit),
+        });
+      }
+    }
+  }
+  out.push({ sale_id: 'demo-mk-bad-fees', sale_date: '2026-06-09', marketplace: 'walmart', sku: 'demo-sku-a02', product_line: 'accessories', units: 1, revenue_usd: 34.5, fees_usd: -9.9 });
+  return out;
+}
+
+/** Walmart's own ads, two keywords a day at the store's season (invented); the bad row is a negative spend. */
+function walmartAds(seed: number): MarketplaceAdDay[] {
+  const { r, between } = drawer(streamSeed(seed, 'walmart_ads'));
+  const out: MarketplaceAdDay[] = [];
+  for (const day of YEAR_DAYS()) {
+    for (const keyword of ['demo wig care kit', 'demo wig stand']) {
+      const spend = cents(between(1.5, 6) * seasonOf(day).online);
+      const clicks = Math.max(1, Math.round(spend / between(0.4, 1.1)));
+      const conversions = r() < 0.22 ? 1 : 0;
+      out.push({ ad_id: seq('demo-wa-w', out.length + 1), ad_date: day, channel: 'walmart', keyword, spend_usd: spend, clicks, conversions, revenue_usd: conversions ? cents(between(20, 75)) : 0 });
+    }
+  }
+  out.push({ ad_id: 'demo-wa-bad-negative', ad_date: '2026-01-21', channel: 'walmart', keyword: 'demo wig stand', spend_usd: -14.2, clicks: 3, conversions: 0, revenue_usd: 0 });
+  return out;
+}
+
+/**
+ * Each listing's warehouse stock on every period's last day (the month so far: the data date), as the marketplace's
+ * inventory report gives it: units sold in the 28 days to that day (from the sales, the planted row left out), on
+ * hand (sometimes none) and, when it runs low, a shipment on its way in.
+ */
+function marketplaceStock(seed: number, sales: readonly MarketplaceSale[]): MarketplaceStock[] {
+  const { r, between } = drawer(streamSeed(seed, 'marketplace_stock'));
+  const sold = sales.filter((s) => !isPlanted(s.sale_id));
+  const out: MarketplaceStock[] = [];
+  for (const { to: day } of Object.values(PERIODS)) {
+    const from = addDays(day, -27);
+    for (const marketplace of MARKETPLACES) {
+      for (const sku of LISTINGS[marketplace]) {
+        const units_28d = sold.filter((s) => s.marketplace === marketplace && s.sku === sku && s.sale_date >= from && s.sale_date <= day).reduce((t, s) => t + s.units, 0);
+        const [outDraw, cover, shipDraw, shipDays, idle] = [r(), between(4, 75), r(), between(20, 45), between(1, 8)];
+        const daily = units_28d / 28;
+        const on_hand = outDraw < 0.07 ? 0 : daily === 0 ? Math.round(idle) : Math.max(1, Math.round(daily * cover));
+        const inbound = (on_hand === 0 || on_hand < daily * 25) && shipDraw < 0.55 ? Math.round(daily * shipDays) + 2 : 0;
+        out.push({ stock_id: seq('demo-ms-k', out.length + 1), snapshot_date: day, marketplace, sku, product_line: lineOfSku(sku), on_hand, inbound, units_28d });
+      }
+    }
+  }
+  out.push({ stock_id: 'demo-ms-bad-negative', snapshot_date: '2026-05-31', marketplace: 'amazon', sku: 'demo-sku-a03', product_line: 'accessories', on_hand: -4, inbound: 0, units_28d: 9 });
+  return out;
+}
+
+/**
+ * Each email row split into the messages that made it (a flow's steps; a campaign is one message): its sends and
+ * revenue to the cent, and the unsubscribes each message caused (invented rates). The bad row has negative sends.
+ */
+function emailMessages(seed: number, email: readonly EmailDay[]): EmailMessage[] {
+  const { between } = drawer(streamSeed(seed, 'email_messages'));
+  const out: EmailMessage[] = [];
+  for (const e of email) {
+    const steps = EMAIL_STEPS[e.name]!;
+    const weights = steps.map(() => between(0.5, 1.5));
+    const [sends, revenue] = [split(e.sends, weights), split(toCents(e.revenue_usd), weights)];
+    const [lo, hi] = e.kind === 'campaign' ? [0.001, 0.004] : [0.002, 0.008];
+    steps.forEach((step, i) => {
+      const unsubscribes = Math.min(sends[i]!, Math.round(sends[i]! * between(lo, hi)));
+      out.push({ message_id: seq('demo-ems-e', out.length + 1), email_id: e.email_id, send_date: e.send_date, kind: e.kind, name: e.name, step, sends: sends[i]!, revenue_usd: revenue[i]! / 100, unsubscribes });
+    });
+  }
+  const march = email.find((e) => e.send_date >= '2026-03-10' && e.name === 'Welcome (demo)')!;
+  out.push({ message_id: 'demo-ems-bad-negative', email_id: march.email_id, send_date: march.send_date, kind: 'flow', name: march.name, step: EMAIL_STEPS[march.name]![0]!, sends: -40, revenue_usd: 0, unsubscribes: 0 });
+  return out;
+}
+
+/**
+ * Each sale's lines, one per unit (distinct products of its line), with the order's revenue, cost and refunds (as
+ * of the data date) shared out by weight to the cent, so a line never carries more refund than it sold for. The bad
+ * row is a line of no units.
+ */
+function orderLines(seed: number, orders: readonly OnlineOrder[], refunded: readonly Refund[]): OrderLine[] {
+  const { r, between } = drawer(streamSeed(seed, 'order_lines'));
+  const back = new Map<string, number>();
+  for (const f of refunded) if (!isPlanted(f.refund_id) && f.amount_usd > 0) back.set(f.order_id, (back.get(f.order_id) ?? 0) + toCents(f.amount_usd));
+  const out: OrderLine[] = [];
+  for (const o of orders.filter(isSale)) {
+    const line = o.product_line as (typeof PRODUCT_LINES)[number];
+    const size = CATALOG[line].n;
+    const picked: number[] = [];
+    for (let u = 0; u < o.units; u++) {
+      let i = Math.floor(r() * size);
+      while (picked.includes(i)) i = (i + 1) % size;
+      picked.push(i);
+    }
+    const weights = picked.map(() => between(0.6, 1.4));
+    const price = split(toCents(o.net_usd), weights);
+    const cost = split(toCents(o.cost_usd), weights);
+    const refund = spread(back.get(o.order_id) ?? 0, price);
+    picked.forEach((i, n) => out.push({
+      line_id: seq('demo-ol-l', out.length + 1), order_id: o.order_id, order_date: o.order_date, sku: skuOf(line, i), product_line: line, units: 1,
+      price_usd: price[n]! / 100, unit_cost_usd: cost[n]! / 100, refunded_usd: refund[n]! / 100,
+    }));
+  }
+  const august = orders.find((o) => isSale(o) && o.order_date >= '2026-08-12')!;
+  out.push({
+    line_id: 'demo-ol-bad-units', order_id: august.order_id, order_date: august.order_date, sku: skuOf(august.product_line as (typeof PRODUCT_LINES)[number], 0),
+    product_line: august.product_line, units: 0, price_usd: 120, unit_cost_usd: 60, refunded_usd: 0,
+  });
+  return out;
+}
+
+/** The channels, each from its own stream. `orders`, `email` and `refunds` are only read: the lines and messages re-divide them. */
+export function generateChannels(orders: readonly OnlineOrder[], email: readonly EmailDay[], refunded: readonly Refund[], seed = DIVISIONS_SEED): Channels {
+  const sales = marketplaceSales(seed);
+  return {
+    marketplace: { sales, ads: walmartAds(seed), stock: marketplaceStock(seed, sales) },
+    emailMessages: emailMessages(seed, email),
+    orderLines: orderLines(seed, orders, refunded),
+  };
+}
+
+// ---- The customers (wave 2, for Online) ------------------------------------------------------
+// Who placed each store order, got each refund and sent each message, and the reviews customers left. Each draws from
+// its own named stream and only reads the rows that already exist: no order, refund or message moves, and no number
+// counted before changes. A customer is a synthetic id (demo-cu-…), never a name, an address or a phone number.
+
+/** Six customers who send back again and again (invented), so the repeat returners have someone to count. */
+const RETURNERS = Array.from({ length: 6 }, (_, i) => seq('demo-cu-r', i + 1));
+const sorted = <T>(xs: readonly T[], key: (x: T) => string) => [...xs].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+
+/**
+ * Who placed each order (they come in date order): a quarter of the refunded orders go to the six returners; of the
+ * rest, about one in three comes from a customer who ordered before, the others from a new customer.
+ */
+function orderCustomers(seed: number, orders: readonly OnlineOrder[], refunded: readonly Refund[]): StoreOrder[] {
+  const { r } = drawer(streamSeed(seed, 'customers'));
+  const back = new Set(refunded.filter((f) => !isPlanted(f.refund_id)).map((f) => f.order_id));
+  const known: string[] = [];
+  return orders.map((o) => {
+    const [u, which, again] = [r(), r(), r()];
+    if (back.has(o.order_id) && u < 0.25) return { ...o, customer_id: RETURNERS[Math.floor(which * RETURNERS.length)]! };
+    if (again < 0.3 && known.length > 0) return { ...o, customer_id: known[Math.floor(which * known.length)]! };
+    known.push(seq('demo-cu-c', known.length + 1));
+    return { ...o, customer_id: known[known.length - 1]! };
+  });
+}
+
+/** Minutes between two inbox moments. */
+const minutesBetween = (from: string, to: string) => (Date.parse(`${to.replace(' ', 'T')}Z`) - Date.parse(`${from.replace(' ', 'T')}Z`)) / 60_000;
+
+/**
+ * Who each message came from and who first answered it. A message that led to an order is that order's customer; a
+ * question about a return comes from a customer refunded within two weeks of it; others from a customer who ordered
+ * before, or someone who has not ordered yet (demo-cu-p…). Planted duplicates: now and then a customer writes again on
+ * another channel about the same thing within a day, before the first message was answered. The shop's follow-ups go
+ * to the thread's customer. A chat answered within two minutes is the automatic reply; otherwise Emma answers most,
+ * the salon many repair and consignment questions.
+ */
+function inboxPeople(seed: number, messages: readonly SupportMessage[], orders: readonly StoreOrder[], refunds: readonly CustomerRefund[]): InboxMessage[] {
+  const { r } = drawer(streamSeed(seed, 'message_people'));
+  const ofOrder = new Map(orders.map((o) => [o.order_id, o.customer_id]));
+  const refunded = refunds.filter((f) => !isPlanted(f.refund_id));
+  const who = new Map<string, string>();
+  let prospects = 0;
+  const inbound = sorted(messages.filter((m) => m.direction === 'inbound'), (m) => `${m.received_at}|${m.message_id}`);
+  inbound.forEach((m, i) => {
+    const [u, which, dup] = [r(), r(), r()];
+    if (m.converted_order_id) return who.set(m.message_id, ofOrder.get(m.converted_order_id)!);
+    // An earlier message on the same topic, from another channel, in the day before, still unanswered when this one came.
+    const first = inbound.slice(Math.max(0, i - 40), i).reverse().find((e) => e.intent === m.intent && e.channel !== m.channel
+      && minutesBetween(e.received_at, m.received_at) <= 1440 && (e.first_reply_at === null || e.first_reply_at > m.received_at));
+    if (first && dup < 0.07) return who.set(m.message_id, who.get(first.message_id)!);
+    const near = m.intent === 'return' ? refunded.filter((f) => Math.abs(minutesBetween(`${f.refund_date} 00:00:00`, m.received_at)) <= 14 * 1440) : [];
+    if (near.length > 0) return who.set(m.message_id, near[Math.floor(which * near.length)]!.customer_id);
+    const before = orders.filter((o) => o.order_date < m.received_date);
+    if (u < 0.55 && before.length > 0) return who.set(m.message_id, before[Math.floor(which * before.length)]!.customer_id);
+    return who.set(m.message_id, seq('demo-cu-p', ++prospects));
+  });
+  const ofThread = new Map(inbound.map((m) => [m.thread_id, who.get(m.message_id)!]));
+  return messages.map((m) => {
+    const [u, au] = [r(), r()];
+    const customer_id = who.get(m.message_id) ?? ofThread.get(m.thread_id) ?? seq('demo-cu-p', ++prospects);
+    if (m.first_reply_at === null) return { ...m, customer_id, answered_by: null };
+    const instant = m.channel === 'chat' && minutesBetween(m.received_at, m.first_reply_at) <= 2;
+    const salonish = m.intent === 'repair' || m.intent === 'consignment';
+    const answered_by = instant && u < 0.8 ? 'auto' : pick(au, ['emma', 'salon', 'other'] as const, salonish ? [0.45, 0.45, 0.1] : [0.72, 0.16, 0.12]);
+    return { ...m, customer_id, answered_by };
+  });
+}
+
+/**
+ * About one sale in seven gets a review five to thirty days after the order (two in five of the refunded ones), of
+ * the order's first product: refunded orders are rated low and mostly about fit, color or quality. The bad row has a
+ * rating of zero.
+ */
+function reviews(seed: number, orders: readonly StoreOrder[], lines: readonly OrderLine[], refunds: readonly CustomerRefund[]): Review[] {
+  const { r, between } = drawer(streamSeed(seed, 'reviews'));
+  const back = new Set(refunds.filter((f) => !isPlanted(f.refund_id)).map((f) => f.order_id));
+  const firstSku = new Map<string, string>();
+  for (const l of lines) if (!isPlanted(l.line_id) && !firstSku.has(l.order_id)) firstSku.set(l.order_id, l.sku);
+  const out: Review[] = [];
+  for (const o of orders.filter(isSale)) {
+    const [u, lag, ru, tu] = [r(), Math.round(between(5, 30)), r(), r()];
+    const refunded = back.has(o.order_id);
+    const review_date = addDays(o.order_date, lag);
+    if (u >= (refunded ? 0.4 : 0.14) || review_date > AS_OF) continue;
+    out.push({
+      review_id: seq('demo-rv-v', out.length + 1), review_date, order_id: o.order_id, customer_id: o.customer_id, sku: firstSku.get(o.order_id)!,
+      rating: pick(ru, [1, 2, 3, 4, 5], refunded ? [0.35, 0.3, 0.2, 0.1, 0.05] : [0.02, 0.04, 0.12, 0.32, 0.5]),
+      topic: pick(tu, REVIEW_TOPICS, refunded ? [0.35, 0.25, 0.25, 0.05, 0.05, 0.05] : [0.2, 0.2, 0.25, 0.15, 0.15, 0.05]),
+    });
+  }
+  const feb = out.find((v) => v.review_date >= '2026-02-09')!;
+  out.push({ ...feb, review_id: 'demo-rv-bad-rating', rating: 0 });
+  return out;
+}
+
+/**
+ * The customers, each from its own stream. `orders`, `refunds`, `messages` and `lines` are only read: every row comes
+ * back with each of its columns and values unchanged, plus its customer (and, for a message, who answered it).
+ */
+export function generateCustomers(
+  orders: readonly OnlineOrder[], refunds: readonly Refund[], messages: readonly SupportMessage[], lines: readonly OrderLine[], seed = DIVISIONS_SEED,
+): Customers {
+  const placed = orderCustomers(seed, orders, refunds);
+  const ofOrder = new Map(placed.map((o) => [o.order_id, o.customer_id]));
+  const refunded = refunds.map((f): CustomerRefund => ({ ...f, customer_id: ofOrder.get(f.order_id)! }));
+  return { orders: placed, refunds: refunded, messages: inboxPeople(seed, messages, placed, refunded), reviews: reviews(seed, placed, lines, refunded) };
+}
+
+// ---- The store site (wave 2, for Online) -----------------------------------------------------
+// Each page's day by where its visits came from, the weekly crawl of the site's links, and the blog's posts, each from
+// its own named stream. The page days share out the day's store orders, so they add up to the order count exactly.
+
+/** Each source's usual share of a day's visits, and how likely a visit from it is to end in an order against the average (invented). */
+const VISIT_SOURCES: Record<(typeof WEB_SOURCES)[number], { share: number; buys: number }> = {
+  organic: { share: 0.34, buys: 1 }, google: { share: 0.2, buys: 1.4 }, meta: { share: 0.14, buys: 0.8 },
+  email: { share: 0.1, buys: 1.6 }, direct: { share: 0.16, buys: 1.3 }, social: { share: 0.06, buys: 0.5 },
+};
+
+/**
+ * About six hundred visits a day at the store's season, shared over the pages and sources; each of the day's sales is
+ * placed on one page and source by its chance of selling; carts and checkouts follow, never fewer than the orders. The
+ * bad row has more carts than visits.
+ */
+function pageDays(seed: number, orders: readonly OnlineOrder[]): PageDay[] {
+  const { r, between } = drawer(streamSeed(seed, 'page_days'));
+  const sold = new Map<string, number>();
+  for (const o of orders.filter(isSale)) sold.set(o.order_date, (sold.get(o.order_date) ?? 0) + 1);
+  const out: PageDay[] = [];
+  for (const day of YEAR_DAYS()) {
+    const visits = between(520, 680) * seasonOf(day).online;
+    const cells = SITE_PAGES.flatMap((p) => WEB_SOURCES.map((source) => {
+      const sessions = Math.max(1, Math.round(visits * p.share * VISIT_SOURCES[source].share * between(0.7, 1.3)));
+      return { p, source, sessions, weight: sessions * VISIT_SOURCES[source].buys * (p.type === 'blog' ? 0.3 : 1) };
+    }));
+    const placed = cells.map(() => 0);
+    const at = cells.map((_, i) => i);
+    for (let k = sold.get(day) ?? 0; k > 0; k--) placed[pick(r(), at, cells.map((c) => c.weight))]! += 1;
+    cells.forEach((c, i) => {
+      const [cartShare, checkShare, lcp] = [between(0.04, 0.09), between(0.35, 0.6), between(c.p.lcp[0], c.p.lcp[1])];
+      const checkouts = Math.max(placed[i]!, Math.round(c.sessions * cartShare * checkShare));
+      const carts = Math.max(checkouts, Math.round(c.sessions * cartShare));
+      out.push({
+        page_day_id: seq('demo-pd-d', out.length + 1), visit_date: day, page: c.p.page, page_type: c.p.type, source: c.source,
+        sessions: Math.max(c.sessions, carts), carts, checkouts, orders: placed[i]!, lcp_ms: Math.round(lcp),
+      });
+    });
+  }
+  out.push({ page_day_id: 'demo-pd-bad-carts', visit_date: '2026-04-14', page: '/', page_type: 'home', source: 'social', sessions: 3, carts: 9, checkouts: 0, orders: 0, lcp_ms: 1900 });
+  return out;
+}
+
+/** Six links on each page, crawled every Monday from 2025-10-06: now and then one breaks (mostly a 404) and stays broken a few weeks. */
+function siteCrawl(seed: number): CrawlRow[] {
+  const { r } = drawer(streamSeed(seed, 'crawl'));
+  const links = SITE_PAGES.flatMap((p) => Array.from({ length: 6 }, (_, i) => ({ page: p.page, link: `${p.page === '/' ? '' : p.page}/demo-link-${i + 1}` })));
+  const brokenUntil = new Map<string, string>();
+  const out: CrawlRow[] = [];
+  for (let day = '2025-10-06'; day <= AS_OF; day = addDays(day, 7)) {
+    for (const l of links) {
+      const [u, weeks, kind] = [r(), r(), r()];
+      if (brokenUntil.has(l.link) && day >= brokenUntil.get(l.link)!) brokenUntil.delete(l.link);
+      if (!brokenUntil.has(l.link) && u < 0.02) brokenUntil.set(l.link, addDays(day, 7 * (1 + Math.floor(weeks * 6))));
+      const http_status = brokenUntil.has(l.link) ? (kind < 0.8 ? 404 : 503) : kind < 0.08 ? 301 : 200;
+      out.push({ crawl_id: seq('demo-cr-c', out.length + 1), crawl_date: day, page: l.page, link: l.link, http_status });
+    }
+  }
+  out.push({ crawl_id: 'demo-cr-bad-status', crawl_date: '2026-05-04', page: '/', link: '/demo-link-1', http_status: 0 });
+  return out;
+}
+
+/** A post every six to fourteen days since January 2024; about a third are updated later. The bad row was updated before it was published. */
+function blogPosts(seed: number): BlogPost[] {
+  const { r, between } = drawer(streamSeed(seed, 'blog_posts'));
+  const out: BlogPost[] = [];
+  for (let day = '2024-01-03'; day <= AS_OF; day = addDays(day, Math.round(between(6, 14)))) {
+    const [tu, uu, gap, visits] = [r(), r(), Math.round(between(20, 400)), between(40, 900)];
+    const updated = addDays(day, gap);
+    out.push({
+      post_id: seq('demo-bp-p', out.length + 1), published_date: day, last_updated: uu < 0.35 && updated <= AS_OF ? updated : day,
+      topic: pick(tu, BLOG_TOPICS, [0.3, 0.3, 0.2, 0.1, 0.1]), sessions_28d: Math.round(visits),
+    });
+  }
+  out.push({ post_id: 'demo-bp-bad-dates', published_date: '2026-03-18', last_updated: '2026-03-02', topic: 'care', sessions_28d: 120 });
+  return out;
+}
+
+/** The store site, each source from its own stream. `orders` are only read: the page days share out each day's sales. */
+export function generateWeb(orders: readonly OnlineOrder[], seed = DIVISIONS_SEED): Web {
+  return { pageDays: pageDays(seed, orders), crawl: siteCrawl(seed), blogPosts: blogPosts(seed) };
+}
+
+/** Version 2's rows: history, then version 1's rows unchanged, then what generateDivisions, generateOperations, generateChannels, generateCustomers and generateWeb add. */
 export function generateYear(): SyntheticYear {
   const today = generateBusiness();
   const history = generateHistory();
   const added = generateDivisions();
-  const orders = [...history.online.orders, ...today.online.orders];
-  const ops = generateOperations(orders);
+  const plain = [...history.online.orders, ...today.online.orders];
+  const email = [...history.marketing.email, ...today.marketing.email];
+  const ops = generateOperations(plain);
+  const channels = generateChannels(plain, email, ops.refunds);
+  const people = generateCustomers(plain, ops.refunds, ops.messages, channels.orderLines);
   return {
     generatedFor: GENERATED_FOR,
     seed: today.seed,
-    online: { orders, orderCosts: ops.orderCosts, refunds: ops.refunds, checkouts: ops.checkouts, inventory: ops.inventory },
+    online: {
+      orders: people.orders, orderCosts: ops.orderCosts, refunds: people.refunds, checkouts: ops.checkouts, inventory: ops.inventory, orderLines: channels.orderLines,
+      reviews: people.reviews,
+    },
     salon: { appointments: salonVisits(DIVISIONS_SEED, [...history.salon.appointments, ...today.salon.appointments]), repairs: ops.repairs },
-    marketing: { ads: [...history.marketing.ads, ...today.marketing.ads, ...added.metaAds], email: [...history.marketing.email, ...today.marketing.email] },
-    support: { messages: ops.messages },
+    marketing: { ads: [...history.marketing.ads, ...today.marketing.ads, ...added.metaAds], email, emailMessages: channels.emailMessages },
+    support: { messages: people.messages },
     finance: { budgets: added.budgets, invoices: ops.invoices },
+    marketplace: channels.marketplace,
+    web: generateWeb(plain),
   };
 }

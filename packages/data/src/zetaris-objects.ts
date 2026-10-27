@@ -17,6 +17,8 @@ export const V2_DATABASES = [
   // Created live in slice 1 with this description; it also holds the supplier invoices now.
   { db: 'FORTUNE_DEMO_FINANCE', about: 'Fortune demo finance owner budget sheet, synthetic' },
   { db: 'FORTUNE_DEMO_SUPPORT', about: 'Fortune demo support inbox, message times and topics only, synthetic' },
+  { db: 'FORTUNE_DEMO_MARKETPLACE', about: 'Fortune demo Amazon and Walmart sales, ads and warehouse stock, synthetic' },
+  { db: 'FORTUNE_DEMO_WEB', about: 'Fortune demo store site pages, link crawl and blog posts, synthetic' },
 ] as const;
 
 export const V2_TABLES = [
@@ -26,7 +28,7 @@ export const V2_TABLES = [
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'orders_v2', path: '/v2/online/orders', view: 'online_orders',
-    cols: ['order_id', 'order_date', 'product_line', 'channel', 'units', 'gross_usd', 'discount_usd', 'net_usd', 'cost_usd'],
+    cols: ['order_id', 'order_date', 'product_line', 'channel', 'units', 'gross_usd', 'discount_usd', 'net_usd', 'cost_usd', 'customer_id'],
   },
   {
     db: 'FORTUNE_DEMO_MARKETING', table: 'ads_v2', path: '/v2/marketing/ads', view: 'marketing_ads',
@@ -48,7 +50,7 @@ export const V2_TABLES = [
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'refunds', path: '/v2/online/refunds', view: 'online_refunds',
-    cols: ['refund_id', 'order_id', 'refund_date', 'amount_usd', 'reason'],
+    cols: ['refund_id', 'order_id', 'refund_date', 'amount_usd', 'reason', 'customer_id'],
   },
   {
     db: 'FORTUNE_DEMO_ONLINE', table: 'checkouts', path: '/v2/online/checkouts', view: 'online_checkouts',
@@ -60,7 +62,7 @@ export const V2_TABLES = [
   },
   {
     db: 'FORTUNE_DEMO_SUPPORT', table: 'messages', path: '/v2/support/messages', view: 'support_messages',
-    cols: ['message_id', 'thread_id', 'channel', 'direction', 'received_date', 'received_at', 'first_reply_at', 'intent', 'converted_order_id'],
+    cols: ['message_id', 'thread_id', 'channel', 'direction', 'received_date', 'received_at', 'first_reply_at', 'intent', 'converted_order_id', 'customer_id', 'answered_by'],
   },
   {
     db: 'FORTUNE_DEMO_SALON', table: 'repair_tickets', path: '/v2/salon/repairs', view: 'salon_repairs',
@@ -69,6 +71,45 @@ export const V2_TABLES = [
   {
     db: 'FORTUNE_DEMO_FINANCE', table: 'invoices', path: '/v2/finance/invoices', view: 'finance_invoices',
     cols: ['invoice_id', 'supplier_id', 'business', 'product_line', 'invoice_date', 'due_date', 'paid_date', 'amount_usd'],
+  },
+  // The channels (wave 2): the marketplaces (their own system and database), the email split, the order lines.
+  {
+    db: 'FORTUNE_DEMO_MARKETPLACE', table: 'sales', path: '/v2/marketplace/sales', view: 'marketplace_sales',
+    cols: ['sale_id', 'sale_date', 'marketplace', 'sku', 'product_line', 'units', 'revenue_usd', 'fees_usd'],
+  },
+  {
+    db: 'FORTUNE_DEMO_MARKETPLACE', table: 'ads', path: '/v2/marketplace/ads', view: 'marketplace_ads',
+    cols: ['ad_id', 'ad_date', 'channel', 'keyword', 'spend_usd', 'clicks', 'conversions', 'revenue_usd'],
+  },
+  {
+    db: 'FORTUNE_DEMO_MARKETPLACE', table: 'stock', path: '/v2/marketplace/stock', view: 'marketplace_stock',
+    cols: ['stock_id', 'snapshot_date', 'marketplace', 'sku', 'product_line', 'on_hand', 'inbound', 'units_28d'],
+  },
+  {
+    db: 'FORTUNE_DEMO_MARKETING', table: 'email_messages', path: '/v2/marketing/email_messages', view: 'marketing_email_messages',
+    cols: ['message_id', 'email_id', 'send_date', 'kind', 'name', 'step', 'sends', 'revenue_usd', 'unsubscribes'],
+  },
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'order_lines', path: '/v2/online/order_lines', view: 'online_order_lines',
+    cols: ['line_id', 'order_id', 'order_date', 'sku', 'product_line', 'units', 'price_usd', 'unit_cost_usd', 'refunded_usd'],
+  },
+  // The customers (wave 2): the store's reviews. Orders, refunds and messages above now name the customer.
+  {
+    db: 'FORTUNE_DEMO_ONLINE', table: 'reviews', path: '/v2/online/reviews', view: 'online_reviews',
+    cols: ['review_id', 'review_date', 'order_id', 'customer_id', 'sku', 'rating', 'topic'],
+  },
+  // The store site (wave 2): its own system and database.
+  {
+    db: 'FORTUNE_DEMO_WEB', table: 'page_days', path: '/v2/web/page_days', view: 'web_page_days',
+    cols: ['page_day_id', 'visit_date', 'page', 'page_type', 'source', 'sessions', 'carts', 'checkouts', 'orders', 'lcp_ms'],
+  },
+  {
+    db: 'FORTUNE_DEMO_WEB', table: 'crawl', path: '/v2/web/crawl', view: 'web_crawl',
+    cols: ['crawl_id', 'crawl_date', 'page', 'link', 'http_status'],
+  },
+  {
+    db: 'FORTUNE_DEMO_WEB', table: 'blog_posts', path: '/v2/web/blog_posts', view: 'web_blog_posts',
+    cols: ['post_id', 'published_date', 'last_updated', 'topic', 'sessions_28d'],
   },
 ] as const;
 

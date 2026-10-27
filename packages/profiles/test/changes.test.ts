@@ -274,10 +274,17 @@ describe('a change of read tools', () => {
     for (const name of ['get_budget_room', 'get_company_overview', 'get_data_quality', 'get_supplier_invoices', 'get_waiting_conversations', 'get_low_stock_interest'] as const) expect(walled('salon', name), name).toBe(true);
     for (const name of ['get_repair_tickets', 'get_company_overview', 'get_data_quality', 'get_supplier_invoices'] as const) expect(walled('online', name), name).toBe(true);
     for (const name of ['get_company_overview', 'get_budget_room', 'get_supplier_invoices', 'get_finance_metrics'] as const) expect(walled('manager', name), name).toBe(true);
+    // Wave 2's store reads (merge-wave2): the salon reads none of them, the manager none of the two with money in them.
+    for (const name of ['get_marketplace_stock', 'get_product_performance', 'get_return_cases', 'get_store_journey'] as const) {
+      expect(walled('salon', name), name).toBe(true);
+      expect(walled('online', name), name).toBe(false);
+    }
+    for (const name of ['get_product_performance', 'get_return_cases'] as const) expect(walled('manager', name), name).toBe(true);
   });
 
   it('declares a scope for every read tool, and for nothing else', () => {
     expect(Object.keys(READ_SCOPE).sort()).toEqual([...READ_TOOL_NAMES].sort());
+    expect(READ_SCOPE).toMatchObject({ get_marketplace_stock: 'online', get_product_performance: 'online', get_return_cases: 'online', get_store_journey: 'online' });
     for (const name of READ_TOOL_NAMES) expect(['salon', 'online', 'both', 'none'], name).toContain(READ_SCOPE[name]);
     for (const name of MONEY_READS) expect(READ_TOOL_NAMES, name).toContain(name);
   });

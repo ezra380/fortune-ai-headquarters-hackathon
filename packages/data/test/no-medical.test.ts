@@ -16,7 +16,7 @@ const routes = Object.entries(SOURCE_ROUTES).map(([path, rows]) => [path, rows(s
 
 describe('no medical or hair-loss data anywhere', () => {
   it('in any column or string value of any source, version 1 and version 2, planted bad rows included', () => {
-    expect(routes.length).toBe(16);
+    expect(routes.length).toBe(25);
     for (const [path, rows] of routes) {
       expect(rows.length, path).toBeGreaterThan(0);
       for (const row of rows) {
@@ -27,15 +27,16 @@ describe('no medical or hair-loss data anywhere', () => {
       }
     }
     for (const t of V2_TABLES) for (const c of t.cols) expect(c, t.table).not.toMatch(BANNED);
-  });
+  }, 60_000); // every value of every row: the site's 14,077 page days alone are 140,000 checks
 
   it('in any allowed value of any enumerated column, and every good row keeps to those values', () => {
     for (const [column, values] of Object.entries(SOURCE_ENUMS)) for (const v of values) expect(v, column).not.toMatch(BANNED);
-    // The lists are complete: a good row's value in an enumerated column is always one of them.
+    // The lists are complete: a good row's value in an enumerated column is always one of them (or empty: a message
+    // nobody answered yet has no answerer).
     for (const [path, rows] of routes) {
       for (const row of rows.filter((r) => !String(Object.values(r)[0]).includes('-bad-'))) {
         for (const [column, values] of Object.entries(SOURCE_ENUMS)) {
-          if (column in row) expect(values as readonly unknown[], `${path} ${column}`).toContain(row[column]);
+          if (column in row && !(column === 'answered_by' && row[column] === null)) expect(values as readonly unknown[], `${path} ${column}`).toContain(row[column]);
         }
       }
     }
