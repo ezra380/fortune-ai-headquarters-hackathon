@@ -140,7 +140,7 @@ failing on bb29578's own code against the shared local database).
   names are per mart (four `period_metrics` coexist). Nothing of version 1 was named or changed.
 - Env: unchanged (`FAHQ_DATA_VERSION`, `FAHQ_SOURCE_PORT_V2`). No migration.
 
-## Slice 3 of 4: new sources (2026-10-27, 08:29–09:30 ET)
+## Slice 3 of 4: new sources (2026-10-27, 08:29–09:22 ET)
 
 ### What works (with the tests that prove it)
 
