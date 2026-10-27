@@ -4,6 +4,7 @@ import type {
   AssistantId, BriefStatus, ChangeKind, DivisionBrief, ManagedDivision, ManagerReview, Receipt, Recommendation, RecommendationDetail, ReportStatus, Suggestion,
   WeeklyReport, WorkerId, WorkerReport, WorkReport, WorkStep,
 } from '@fahq/contracts';
+import { checkedWeeklyReport, checkedWorkerReport, packetWorkers } from '@fahq/delivery';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
 // happen once goes through a unique key (dedupe_key, idempotency_key) or a conditional update.
@@ -30,7 +31,7 @@ export type MessageRow = {
 };
 export type OutboxRow = {
   id: string;
-  channel: 'sms' | 'print';
+  channel: 'sms' | 'print' | 'email';
   to_person_id: string;
   from_assistant: AssistantId;
   body: string;
@@ -249,7 +250,7 @@ export function createStore(url: string, serviceKey: string) {
         { message_id: string; approver_person_id: string }[];
       return rows[0] ?? null;
     },
-    async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
+    async addOutbox(o: { channel: 'sms' | 'print' | 'email'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
       must(await db.from('outbox').upsert(
         { channel: o.channel, to_person_id: o.toPersonId, from_assistant: o.from, body: o.body.slice(0, 1600), attachment_ref: o.attachmentRef, dedupe_key: o.dedupeKey },
         { onConflict: 'dedupe_key', ignoreDuplicates: true },
@@ -576,7 +577,39 @@ export function createStore(url: string, serviceKey: string) {
         { onConflict: 'dedupe_key', ignoreDuplicates: true },
       ), 'email outbox');
     },
+
+    // ---- delivery reads (W2) -----------------------------------------------------------------
+    // What the outbox needs to print or email a report. Each report is checked the way the console's PDF link checks it
+    // (packages/delivery/src/packet.ts), so the emailed and printed packet is the packet the link opens.
+
+    /** One weekly report as stored, or null when there is no such row. A row that is not what it says it is (its shape, its division) is an error. */
+    async weeklyReportById(id: string): Promise<{ id: string; report: WeeklyReport } | null> {
+      const row = must(await db.from('weekly_reports').select('id, division, report').eq('id', id).maybeSingle(), 'weekly report') as { id: string; division: string; report: unknown } | null;
+      if (!row) return null;
+      return { id: row.id, report: stored(checkedWeeklyReport(row), 'weekly report') };
+    },
+    /** One worker report as stored, or null when there is no such row. A row whose report is another worker's, or in another shape, is an error. */
+    async workerReportById(id: string): Promise<WorkerReport | null> {
+      const row = must(await db.from('worker_reports').select('worker_id, division, report').eq('id', id).maybeSingle(), 'worker report') as { worker_id: string; division: string; report: unknown } | null;
+      return row ? stored(checkedWorkerReport(row), 'worker report') : null;
+    },
+    /**
+     * The worker reports of one division's packet, from the ids its weekly report lists, in the order of the registry. Ids with no row,
+     * ids of another division, and rows that are not in their shape (or not the worker's they say) are left out: the packet's cover then
+     * says how many could not be loaded. One bad row never stops the packet.
+     */
+    async workerReportsByIds(division: ManagedDivision, ids: readonly string[]): Promise<WorkerReport[]> {
+      if (ids.length === 0) return [];
+      const rows = must(await db.from('worker_reports').select('worker_id, report').eq('division', division).in('id', [...ids]), 'worker reports') as { worker_id: string; report: unknown }[];
+      return packetWorkers(division, rows);
+    },
   };
+}
+
+/** A stored report that passed its check; otherwise a fixed sentence (the stored words never reach a log or an outbox row). */
+function stored<T>(report: T | null, what: string): T {
+  if (!report) throw new Error(`the stored ${what} does not match its contract`);
+  return report;
 }
 
 export type Store = ReturnType<typeof createStore>;

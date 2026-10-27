@@ -1,3 +1,4 @@
+import type { WeeklyReport, WorkerReport } from './reports.ts';
 import type { Division, Metric, Period, ProposalDocument } from './schemas.ts';
 
 // Ports are the seams between lanes. A lane implements a port; lane A's worker consumes it.
@@ -126,9 +127,41 @@ export type PrintResult =
   | { status: 'printed'; jobId: string }
   | { status: 'skipped'; reason: string };
 
-/** Lane C (Codex): turning proposals into paper and texts. */
+/** What an email did: Postmark took it, or it was skipped for a plain reason (no token, no sender) and nothing was sent. */
+export type EmailResult =
+  | { status: 'sent'; providerMessageId: string }
+  | { status: 'skipped'; reason: string };
+
+/** The email that carries a report's PDF: its subject, its words as text and as escaped HTML, and the PDF's file name. */
+export type ReportEmail = { subject: string; html: string; text: string; attachmentName: string };
+
+/** Who a report is from and for, and the division's name on the page (MANAGERS in reports.ts holds the three). */
+export type ReportContext = { manager: string; head: string; divisionTitle: string };
+
+/** Lane C (Codex): turning proposals into paper and texts. Wave 2 (delivery lane): the report PDFs and the email. */
 export interface DeliveryPort {
   renderProposalPdf(doc: ProposalDocument): Promise<Uint8Array>;
+  /** One worker's daily report, one page. */
+  renderWorkerReportPdf(report: WorkerReport, ctx: ReportContext): Promise<Uint8Array>;
+  /** The manager's weekly report first, then one page per worker report. */
+  renderWeeklyPacketPdf(weekly: WeeklyReport, workerReports: readonly WorkerReport[], ctx: ReportContext): Promise<Uint8Array>;
+  /** The email for a weekly report or a worker report: built from the stored report only, never from a text that may carry a code. */
+  weeklyReportEmail(weekly: WeeklyReport, ctx: ReportContext): ReportEmail;
+  workerReportEmail(report: WorkerReport, ctx: ReportContext): ReportEmail;
+  /**
+   * Sends one email for one outbox item through Postmark. Must refuse a recipient that isn't in `allowedRecipients`
+   * before any network call, must not send twice for the same outboxId, and is skipped (never an error) when the
+   * token or the sender address is not configured.
+   */
+  sendEmail(input: {
+    outboxId: string;
+    to: string;
+    subject: string;
+    html: string;
+    text: string;
+    attachments: readonly { name: string; pdf: Uint8Array }[];
+    allowedRecipients: ReadonlySet<string>;
+  }): Promise<EmailResult>;
   /**
    * Sends one SMS for one outbox item. Must refuse a recipient that isn't in `allowedRecipients`
    * and must not send twice for the same outboxId.

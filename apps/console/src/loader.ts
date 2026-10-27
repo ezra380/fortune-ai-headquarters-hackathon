@@ -3,13 +3,18 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { openBrain } from '@fahq/brain';
+import { WORKER_IDS, workerDivision } from '@fahq/contracts';
+import type { ManagedDivision, WeeklyReport, WorkerReport } from '@fahq/contracts';
+import { checkedWeeklyReport, checkedWorkerReport, packetWorkers } from '@fahq/delivery';
+import { weekStart } from './days.ts';
 import type {
   DepartmentId, ManagerPart, RawApproval, RawDepartment, RawManager, RawMessage, RawOutbox, RawReceipt, RawRecommendation, RawReview,
   RawTask, RawUsageRow, RawWorkReport,
 } from './departments.ts';
 import { BRAIN_NOTE, USAGE_WINDOW_HOURS } from './departments.ts';
 import type {
-  BriefPart, DivisionsPart, RawBriefApproval, RawBriefRow, RawDigest, RawDivisionState, RawDivisions, RawReply, RawRequest,
+  BriefDivision, BriefPart, DivisionsPart, RawActionDecision, RawBriefApproval, RawBriefRow, RawDigest, RawDivisionReports, RawDivisionState,
+  RawDivisions, RawReply, RawRequest, RawWeeklyReportRow, RawWorkerReportRow, ReportsPart,
 } from './divisions.ts';
 import { BRIEF_DIVISIONS } from './divisions.ts';
 
@@ -316,26 +321,96 @@ export function createCloudLoader(options: LoaderOptions): (department: Departme
 
 // ---- The Divisions view -------------------------------------------------------------------------------
 
-const DIVISION_LIMITS = { requests: 30, replies: 100, approvals: 30, decisions: 30 };
+const DIVISION_LIMITS = { requests: 30, replies: 100, approvals: 30, decisions: 30, workerReports: 100, weeklyDecisions: 30 };
 // Named columns only. The brief row is read without its task and data-source columns; an approval without its code hash.
 const BRIEF_COLUMNS = 'division,brief_key,brief_date,status,written_by,brief,ceo_line,created_at';
+// The wave-2 reports are read without their task and data-source columns too: the report's own jsonb holds its data source.
+const WORKER_REPORT_COLUMNS = 'id,worker_id,division,report_date,status,written_by,report,created_at';
+const WEEKLY_REPORT_COLUMNS = 'id,division,week_of,status,written_by,report,ceo_line,message_id,created_at';
 
 /**
  * Reads the Divisions view: each division's newest brief with the standing of its actions, the data requests the divisions sent
  * each other with their answers, and the newest CEO digest. READ ONLY, server side. The mailbox is read by the kind of note it
  * holds (the key it was stored under), never in bulk; an answer is read as its outcome and reason only, never the facts it carried.
  */
-export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDivisions> {
+export function createDivisionsLoader(options: { db: Db; now?: () => Date }): (only?: BriefDivision) => Promise<RawDivisions> {
   const { db } = options;
+  const now = options.now ?? (() => new Date());
 
-  return async () => {
+  // `only` is a head's own view: that one division's brief and reports, the questions it asked or was asked, and no CEO digest.
+  return async (only) => {
     const notes: string[] = [];
     const part = reading(notes);
+    const shown = only ? BRIEF_DIVISIONS.filter((d) => d.id === only) : BRIEF_DIVISIONS;
+
+    // The workers' latest reports and the weekly report of one division, and where the weekly report's paths or actions stand.
+    async function readReports(d: (typeof BRIEF_DIVISIONS)[number]): Promise<RawDivisionReports> {
+      const unread: ReportsPart[] = [];
+      const start = weekStart(now());
+      const newestFirst = <T extends { order(column: string, o: { ascending: boolean }): T }>(query: T): T =>
+        query.order('report_date', { ascending: false }).order('created_at', { ascending: false });
+
+      const [workerReports, weekly] = await Promise.all([
+        part(`The ${d.name} worker reports`, null as RawWorkerReportRow[] | null, async () => {
+          const recent = must<RawWorkerReportRow[]>(
+            await newestFirst(db.from('worker_reports').select(WORKER_REPORT_COLUMNS).eq('division', d.id).gte('report_date', start)).limit(DIVISION_LIMITS.workerReports),
+          );
+          if (recent.length >= DIVISION_LIMITS.workerReports) {
+            notes.push(`The ${d.name} worker reports: more than ${DIVISION_LIMITS.workerReports} were written in the last seven days; the newest ${DIVISION_LIMITS.workerReports} are read.`);
+          }
+          // A worker with nothing in the last seven days still shows its newest report, marked as old.
+          const have = new Set(recent.map((r) => r.worker_id));
+          const missing = WORKER_IDS.filter((w) => workerDivision(w) === d.id && !have.has(w));
+          const older = await Promise.all(
+            missing.map(async (w) => must<RawWorkerReportRow[]>(await newestFirst(db.from('worker_reports').select(WORKER_REPORT_COLUMNS).eq('worker_id', w)).limit(1))),
+          );
+          return [...recent, ...older.flat()];
+        }),
+        part(`The ${d.name} weekly report`, undefined as RawWeeklyReportRow | null | undefined, async () => {
+          const list = must<RawWeeklyReportRow[]>(
+            await db.from('weekly_reports').select(WEEKLY_REPORT_COLUMNS).eq('division', d.id).order('week_of', { ascending: false }).order('created_at', { ascending: false }).limit(1),
+          );
+          return Array.isArray(list) ? (list[0] ?? null) : null;
+        }),
+      ]);
+      if (workerReports === null) unread.push('workers');
+      if (weekly === undefined) unread.push('weekly');
+
+      // The code and the decisions hang from the note the weekly report was sent with; no note, nothing to ask.
+      let approval: RawBriefApproval | null = null;
+      let decisions: RawActionDecision[] = [];
+      const noteId = weekly?.message_id;
+      if (noteId) {
+        const [codes, decided] = await Promise.all([
+          part(`The ${d.name} weekly report approvals`, null as RawBriefApproval[] | null, async () =>
+            must<RawBriefApproval[]>(
+              await db.from('approvals').select('status,expires_at,decided_at').eq('message_id', noteId).eq('action', 'approve_action').order('created_at', { ascending: false }).limit(1),
+            ),
+          ),
+          part(`The ${d.name} weekly report decisions`, null as RawActionDecision[] | null, async () =>
+            must<RawActionDecision[]>(
+              await db
+                .from('assistant_messages')
+                .select('created_at,body')
+                .eq('kind', 'decision')
+                .like('dedupe_key', 'action-decision:%')
+                .eq('reply_to', noteId)
+                .limit(DIVISION_LIMITS.weeklyDecisions),
+            ),
+          ),
+        ]);
+        if (codes === null || decided === null) unread.push('approvals');
+        approval = codes?.[0] ?? null;
+        decisions = decided ?? [];
+      }
+      return { workerReports: workerReports ?? [], weekly: weekly ?? null, approval, decisions, unread };
+    }
 
     async function readDivisions(): Promise<RawDivisionState[]> {
+      const reports = await Promise.all(shown.map((d) => readReports(d)));
       // The newest brief of each division (a BRIEF text can add a second one on the same day: the later one wins).
       const found = await Promise.all(
-        BRIEF_DIVISIONS.map((d) =>
+        shown.map((d) =>
           part(`The ${d.name} brief`, undefined as RawBriefRow | null | undefined, async () => {
             const list = must<RawBriefRow[]>(
               await db
@@ -388,10 +463,10 @@ export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDiv
             ),
           ]);
 
-      return BRIEF_DIVISIONS.map((d, i): RawDivisionState => {
+      return shown.map((d, i): RawDivisionState => {
         const brief = found[i];
-        if (brief === undefined) return { division: d.id, brief: null, approval: null, decisions: [], unread: ['brief'] };
-        if (brief === null) return { division: d.id, brief: null, approval: null, decisions: [], unread: [] };
+        if (brief === undefined) return { division: d.id, brief: null, approval: null, decisions: [], unread: ['brief'], reports: reports[i] };
+        if (brief === null) return { division: d.id, brief: null, approval: null, decisions: [], unread: [], reports: reports[i] };
         const docId = docs?.find((x) => x.dedupe_key === `briefdoc:${brief.brief_key}`)?.id;
         // Reading the approvals needs the note's id: when the note or either read failed, the actions' standing is unknown.
         const unread: BriefPart[] = docs === null || approvals === null || decisions === null ? ['actions'] : [];
@@ -402,22 +477,22 @@ export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDiv
           approval: docId ? ((approvals ?? []).find((a) => a.message_id === docId) ?? null) : null,
           decisions: docId ? (decisions ?? []).filter((x) => x.reply_to === docId) : [],
           unread,
+          reports: reports[i],
         };
       });
     }
 
     async function readRequests(): Promise<{ requests: RawRequest[]; replies: RawReply[]; unread: DivisionsPart[] }> {
-      const requests = await part('The data requests', null as RawRequest[] | null, async () =>
-        must<RawRequest[]>(
-          await db
-            .from('assistant_messages')
-            .select('id,from_assistant,to_assistant,created_at,body')
-            .eq('kind', 'request')
-            .like('dedupe_key', 'datareq:%')
-            .order('created_at', { ascending: false })
-            .limit(DIVISION_LIMITS.requests),
-        ),
-      );
+      const requests = await part('The data requests', null as RawRequest[] | null, async () => {
+        const asked = db
+          .from('assistant_messages')
+          .select('id,from_assistant,to_assistant,created_at,body')
+          .eq('kind', 'request')
+          .like('dedupe_key', 'datareq:%');
+        // A head's view reads only the questions its own division asked or was asked (the id is one of three fixed words).
+        const mine = only ? asked.or(`from_assistant.eq.${only},to_assistant.eq.${only}`) : asked;
+        return must<RawRequest[]>(await mine.order('created_at', { ascending: false }).limit(DIVISION_LIMITS.requests));
+      });
       if (requests === null) return { requests: [], replies: [], unread: ['requests'] };
       if (requests.length === 0) return { requests, replies: [], unread: [] };
       const replies = await part('The answers to the data requests', null as RawReply[] | null, async () =>
@@ -452,7 +527,12 @@ export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDiv
       return { digest: found?.[0] ?? null, unread: found === null ? ['digest'] : [] };
     }
 
-    const [divisions, asked, digest] = await Promise.all([readDivisions(), readRequests(), readDigest()]);
+    const [divisions, asked, digest] = await Promise.all([
+      readDivisions(),
+      readRequests(),
+      // The CEO digest is the owner's: a head's view does not read it.
+      only ? Promise.resolve({ digest: null as RawDigest | null, unread: [] as DivisionsPart[] }) : readDigest(),
+    ]);
     return {
       divisions,
       requests: asked.requests,
@@ -461,5 +541,50 @@ export function createDivisionsLoader(options: { db: Db }): () => Promise<RawDiv
       unread: [...asked.unread, ...digest.unread],
       notes,
     };
+  };
+}
+
+// ---- The reports behind a PDF ------------------------------------------------------------------------------
+
+export type LoadedReport =
+  | { kind: 'weekly'; division: ManagedDivision; weekly: WeeklyReport; workers: WorkerReport[] }
+  | { kind: 'worker'; division: ManagedDivision; worker: WorkerReport };
+
+/** A stored report that is not in the shape its contract says (or does not agree with its own row). Never shown, never printed. */
+export class ReportUnreadable extends Error {
+  constructor() {
+    super('the stored report is not in the shape its contract says');
+  }
+}
+
+/**
+ * Reads the stored reports a PDF is made from, by id: a weekly report with the worker reports it was built from (the same
+ * division only, in the registry's order), or one worker's report. The checks are the delivery package's own (packet.ts), the same
+ * ones the worker applies to the packet it emails and prints, so the two are always the same packet: a report that is not in its
+ * shape, or is not the one its row says, is refused (a single report) or left out (a packet worker, so the cover says it could
+ * not be loaded). READ ONLY, server side, named columns.
+ */
+export function createReportLoader(options: { db: Db }): (kind: 'weekly' | 'worker', id: string) => Promise<LoadedReport | null> {
+  const { db } = options;
+
+  return async (kind, id) => {
+    if (kind === 'worker') {
+      const row = must<{ worker_id: string; division: string; report: unknown } | null>(await db.from('worker_reports').select('worker_id,division,report').eq('id', id).maybeSingle());
+      if (!row) return null;
+      const worker = checkedWorkerReport(row);
+      if (!worker) throw new ReportUnreadable();
+      return { kind, division: workerDivision(worker.workerId), worker };
+    }
+
+    const row = must<{ id: string; division: string; report: unknown } | null>(await db.from('weekly_reports').select('id,division,report').eq('id', id).maybeSingle());
+    if (!row) return null;
+    const weekly = checkedWeeklyReport(row);
+    if (!weekly) throw new ReportUnreadable();
+    const stored = weekly.workerReportIds.length === 0
+      ? []
+      : must<{ worker_id: string; report: unknown }[]>(
+          await db.from('worker_reports').select('worker_id,report').eq('division', weekly.division).in('id', weekly.workerReportIds),
+        );
+    return { kind, division: weekly.division, weekly, workers: packetWorkers(weekly.division, stored) };
   };
 }

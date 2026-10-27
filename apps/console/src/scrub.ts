@@ -6,6 +6,9 @@
 // US-style phone numbers in any common spelling: +15551234567, (555) 123-4567, 555.123.4567, 1 555 123 4567.
 const PHONE = /(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)/g;
 
+// An email address (the same pattern the delivery package scrubs the PDF and the email with, so a screen and a page never differ).
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+
 // Anything that looks like a credential. These are replaced, not partly shown.
 const SECRETS: RegExp[] = [
   /eyJ[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*){0,2}/g, // JSON web tokens (Supabase keys are these)
@@ -34,7 +37,7 @@ export const maskPhones = (text: string): string => text.replace(PHONE, (m) => m
 export const redactCodes = (text: string): string => text.replace(/\d{6,}/g, '••••••');
 
 export function cleanText(text: string): string {
-  let out = text;
+  let out = text.replace(EMAIL, '[email]');
   for (const secret of SECRETS) out = out.replace(secret, '[hidden]');
   return redactCodes(maskPhones(out));
 }

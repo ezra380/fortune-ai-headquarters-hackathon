@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Proposal PDF, PrintNode printing and the Twilio SMS sender (DeliveryPort). Owner: lane C (Codex).",
+  "description": "Proposal and report PDFs, PrintNode printing, the Twilio SMS sender and the Postmark report email (DeliveryPort). Owners: lane C (Codex), wave 2 delivery lane.",
   "exports": {
     ".": "./src/index.ts"
   },

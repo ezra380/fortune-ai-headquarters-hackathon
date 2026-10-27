@@ -69,7 +69,13 @@ const deps: WorkerDeps = {
   live: true,
   period: planning.period,
   smsLive: Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_API_KEY_SID && env.TWILIO_API_KEY_SECRET),
-  printers: { owner: env.PRINTNODE_PRINTER_OWNER || undefined, finance: env.PRINTNODE_PRINTER_FINANCE || undefined },
+  printers: {
+    owner: env.PRINTNODE_PRINTER_OWNER || undefined,
+    finance: env.PRINTNODE_PRINTER_FINANCE || undefined,
+    online: env.PRINTNODE_PRINTER_ONLINE || undefined,
+    salon: env.PRINTNODE_PRINTER_SALON || undefined,
+  },
+  reportTo: env.HQ_REPORT_TO?.trim() || undefined,
   printDir: path.join(root, '.local/print'),
 };
 

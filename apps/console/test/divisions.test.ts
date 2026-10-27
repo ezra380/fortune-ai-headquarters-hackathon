@@ -87,7 +87,7 @@ describe('the Divisions view: briefs', () => {
     ]);
     expect(v.generatedAt).toBe(NOW.toISOString());
     expect(Object.keys(v).sort()).toEqual(['digest', 'divisions', 'generatedAt', 'notes', 'unread']);
-    expect(Object.keys(v.divisions[0]!).sort()).toEqual(['asked', 'brief', 'head', 'id', 'name', 'received', 'unread']);
+    expect(Object.keys(v.divisions[0]!).sort()).toEqual(['asked', 'brief', 'head', 'id', 'manager', 'name', 'received', 'reports', 'unread']);
   });
 
   it('shows the latest brief: status, day, headline, findings with what they cite, actions, and the line to the CEO division', () => {
@@ -505,8 +505,9 @@ describe('the Divisions loader', () => {
     expect(approvals[0]!.ops).toContain('eq(action,approve_action)');
     expect(approvals[0]!.ops).toContain('in(message_id,["doc-salon","doc-finance","doc-online"])');
 
-    // Nothing else is touched: not people, inbound texts, the outbox or the spending table.
-    expect([...new Set(r.calls.map((c) => c.table))].sort()).toEqual(['approvals', 'assistant_messages', 'division_briefs']);
+    // Nothing else is touched: not people, inbound texts, the outbox or the spending table. (The two report tables are wave 2's:
+    // reports-loader.test.ts holds what is read from them.)
+    expect([...new Set(r.calls.map((c) => c.table))].sort()).toEqual(['approvals', 'assistant_messages', 'division_briefs', 'weekly_reports', 'worker_reports']);
     for (const c of r.calls) {
       expect(c.select, c.table).not.toMatch(NOT_SAFE);
       expect(Number(id(c, 'limit')?.slice(6, -1)), `${c.table} limit`).toBeLessThanOrEqual(100);
@@ -539,7 +540,7 @@ describe('the Divisions loader', () => {
     const loaded = await createDivisionsLoader({ db: r.db })();
     expect(loaded.divisions.map((d) => [d.division, d.brief, d.unread])).toEqual([['salon', null, []], ['finance', null, []], ['online', null, []]]);
     expect(loaded).toMatchObject({ requests: [], replies: [], digest: null, unread: [], notes: [] });
-    expect([...new Set(r.calls.map((c) => c.table))].sort()).toEqual(['assistant_messages', 'division_briefs']);
+    expect([...new Set(r.calls.map((c) => c.table))].sort()).toEqual(['assistant_messages', 'division_briefs', 'weekly_reports', 'worker_reports']);
     expect(r.calls.some((c) => c.select === 'id,dedupe_key')).toBe(false);
     expect(r.calls.some((c) => c.ops.includes('like(dedupe_key,datareply:%)'))).toBe(false);
   });

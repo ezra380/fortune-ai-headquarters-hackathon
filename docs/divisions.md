@@ -336,6 +336,10 @@ the salon tab, which used to be a placeholder, now reads the salon's assistant l
   the standing of its actions, the questions, their answers, the digest) says so on the page and is never shown as empty.
 - The page draws only with `textContent`; its Content-Security-Policy allows exactly its one script and one style block.
 
+**Wave 2** gives the view a tab for each division with its manager ("George, Finance, reports to Alan"), its workers' daily reports
+and its weekly report, a PDF link for each, and a head's own page (`/?division=finance`): see [delivery.md](delivery.md), "The console".
+
 **Tests**: `apps/console/test/divisions.test.ts` (shaping, the loader against a recording fake, the server, the page drawn in a
 fake browser), `divisions-db.test.ts` (the loader on the real local database through the real query builder, with its own rows
-removed afterwards) and `console.test.ts` (the departments, including the live salon).
+removed afterwards) and `console.test.ts` (the departments, including the live salon). Wave 2's tests are in `reports-*.test.ts`
+(listed in delivery.md).
