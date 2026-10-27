@@ -381,5 +381,9 @@ describe('a retire', () => {
     expect(lessonAddedBy(raw, 'D.')).toBe('owner');
     expect(lessonAddedBy(raw, 'E.')).toBeNull();
     expect(lessonAddedBy('not a list', 'A.')).toBeNull();
+    // Matched the way a retire matches (trimmed), and a copy the owner holds makes it his.
+    expect(lessonAddedBy([{ text: 'B. ', by: 'owner' }], 'B.')).toBe('owner');
+    expect(lessonAddedBy([{ text: 'A.', by: 'manager' }, { text: ' A.', by: 'owner' }], 'A.')).toBe('owner');
+    expect(lessonAddedBy([{ text: 'A.', by: 'manager' }, { text: 'A. ', by: 'manager' }], 'A.')).toBe('manager');
   });
 });

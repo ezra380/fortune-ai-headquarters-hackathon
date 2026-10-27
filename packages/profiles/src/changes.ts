@@ -188,9 +188,11 @@ export function changeOf(rec: {
  */
 export function lessonAddedBy(rawLessons: unknown, text: string): 'manager' | 'owner' | null {
   if (!Array.isArray(rawLessons)) return null;
-  const found = rawLessons.find((l): l is { text: string; by?: unknown } => typeof l === 'object' && l !== null && (l as { text?: unknown }).text === text);
-  if (!found) return null;
-  return found.by === 'manager' ? 'manager' : 'owner';
+  // Matched as a retire matches (trimmed), and every copy counts: the manager's only when each copy says so.
+  const found = rawLessons.filter((l): l is { text: string; by?: unknown } =>
+    typeof l === 'object' && l !== null && typeof (l as { text?: unknown }).text === 'string' && (l as { text: string }).text.trim() === text.trim());
+  if (found.length === 0) return null;
+  return found.every((l) => l.by === 'manager') ? 'manager' : 'owner';
 }
 
 const quoted = (text: string) => `"${clip(text, 120)}"`;
