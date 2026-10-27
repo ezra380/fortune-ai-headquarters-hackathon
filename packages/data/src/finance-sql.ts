@@ -387,6 +387,13 @@ export const round = (n: number, places: number) => Math.round(n * 10 ** places)
 /** Rows to compute from: a version 1 business, or version 2's year (which adds the budget sheet and the operations). */
 export type SourceRows = SyntheticBusiness | SyntheticYear;
 
+/** The inbox with each message's previous one, worked out once per list of messages (row reads ask for it often). */
+const laggedOnce = new WeakMap<readonly Row[], Row[]>();
+function lagged(messages: readonly Row[]): Row[] {
+  if (!laggedOnce.has(messages)) laggedOnce.set(messages, withPrevious(messages));
+  return laggedOnce.get(messages)!;
+}
+
 /** Each source's rows, by the name the metric definitions use (a version 1 business has none of version 2's). */
 export function sourceRows(b: SourceRows): Record<Source, readonly Row[]> {
   const y = 'finance' in b ? b : undefined;
@@ -398,7 +405,7 @@ export function sourceRows(b: SourceRows): Record<Source, readonly Row[]> {
     marketplace_sales: y?.marketplace.sales ?? [], marketplace_ads: y?.marketplace.ads ?? [], marketplace_stock: y?.marketplace.stock ?? [],
     email_messages: y?.marketing.emailMessages ?? [], order_lines: y?.online.orderLines ?? [],
     // The inbox as the period view reads it: each message with the customer's previous one (the view's window).
-    messages: withPrevious(y?.support.messages ?? []), reviews: y?.online.reviews ?? [],
+    messages: lagged(y?.support.messages ?? []), reviews: y?.online.reviews ?? [],
     page_days: y?.web.pageDays ?? [], crawl: y?.web.crawl ?? [], blog_posts: y?.web.blogPosts ?? [],
   };
 }
