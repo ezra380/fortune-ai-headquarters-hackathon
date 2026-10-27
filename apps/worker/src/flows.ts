@@ -186,6 +186,10 @@ async function handleCommand(command: Command, person: PersonRow, task: TaskRow,
     case 'confirm':
     case 'decline':
       return decidePlan(command, person, task, deps, runId, started, reply);
+    case 'review':
+    case 'adopt':
+      await reply('That command is not available in this build yet.'); // replaced by the manager flows in the next commit
+      return done;
   }
 }
 
