@@ -31,34 +31,43 @@ describe('the read-only profiles', () => {
   });
 
   it('gives each assistant exactly its reads and writes', () => {
-    expect(profiles.owner.reads).toEqual(['get_finance_metrics', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary']);
-    expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal']);
+    expect(profiles.owner.reads).toEqual(['get_finance_metrics', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal']);
+    expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
     expect(profiles.online.reads).toEqual(['get_online_metrics', 'recall_my_decisions', 'my_lessons']);
-    expect(profiles.manager.reads).toEqual(['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions']);
+    expect(profiles.salon.reads).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
+    expect(profiles.manager.reads).toEqual(['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal']);
     expect(profiles.owner.writes).toEqual(['propose']);
     expect(profiles.finance.writes).toEqual(['propose', 'report']);
-    expect(profiles.online.writes).toEqual(['report']);
-    expect(profiles.salon.writes).toEqual([]);
+    expect(profiles.online.writes).toEqual(['propose', 'report']);
+    expect(profiles.salon.writes).toEqual(['propose', 'report']);
     expect(profiles.manager.writes).toEqual(['report']);
   });
 
-  it('keeps salon a placeholder that reads nothing, and online away from salon numbers', () => {
-    expect(profiles.salon.status).toBe('placeholder');
-    expect(profiles.salon.reads).toEqual([]);
-    expect(profiles.salon.models).toEqual({});
+  it('lets the owner, finance and the manager explain a proposal, and nobody else', () => {
+    for (const id of ids) {
+      expect(profiles[id].reads.includes('explain_proposal'), id).toBe(['owner', 'finance', 'manager'].includes(id));
+    }
+  });
+
+  it('runs the salon as the stand-in for Cindy: live, salon numbers only, online away from them', () => {
+    expect(profiles.salon).toMatchObject({ status: 'live', title: 'Salon Department (stand-in for Cindy)', serves: 'head_stylist' });
+    expect(profiles.salon.reads).not.toContain('get_finance_metrics');
+    expect(profiles.salon.reads).not.toContain('get_online_metrics');
     expect(profiles.online.reads).not.toContain('get_finance_metrics');
+    expect(profiles.online.reads).not.toContain('get_salon_metrics');
     expect(profiles.manager.reads).not.toContain('get_finance_metrics');
     expect(profiles.manager.serves).toBeNull();
     expect(profiles.finance.serves).toBe('finance_owner');
   });
 
-  it('assigns each assistant its model jobs', () => {
+  it('assigns each assistant its model jobs, the salon and online like finance', () => {
     const jobs = (id: AssistantId) => Object.keys(profiles[id].models).sort();
     expect(jobs('owner')).toEqual(['answer', 'code', 'route']);
     expect(jobs('finance')).toEqual(['answer', 'code', 'plan']);
-    expect(jobs('online')).toEqual(['answer', 'code']);
-    expect(jobs('salon')).toEqual([]);
-    expect(jobs('manager')).toEqual(['code', 'review']);
+    expect(jobs('online')).toEqual(['answer', 'code', 'plan']);
+    expect(jobs('salon')).toEqual(['answer', 'code', 'plan']);
+    expect(jobs('manager')).toEqual(['answer', 'code', 'review']);
+    expect(profiles.salon.models).toEqual(profiles.finance.models);
   });
 
   it('uses the models already proven live as the defaults', () => {
@@ -113,8 +122,8 @@ describe('the skills', () => {
   });
 
   it('keeps the rules that matter in the right skills', () => {
-    expect(profiles.salon.skill).toMatch(/placeholder/i);
-    expect(profiles.salon.skill).toMatch(/Cindy/);
+    expect(profiles.salon.skill).toMatch(/stand-in for Cindy/);
+    expect(profiles.salon.skill).toMatch(/synthetic/);
     expect(profiles.salon.skill).toMatch(/personal data never\s+cross/i);
     expect(profiles.manager.skill).toMatch(/at most 3 changes/);
     expect(profiles.manager.skill).toMatch(/adopts it by one-time\s+code/);
@@ -125,7 +134,7 @@ describe('the skills', () => {
 describe('pickTools', () => {
   it('returns exactly the profile tools, in the profile order', () => {
     const picked = pickTools(allTools(), profiles.finance);
-    expect(picked.map((t) => t.name)).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal']);
+    expect(picked.map((t) => t.name)).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
   });
 
   it('never returns a tool the profile does not list, even when more are available', () => {
@@ -136,13 +145,13 @@ describe('pickTools', () => {
       expect(names).not.toContain('propose_task');
       expect(names).not.toContain('send_sms');
     }
-    expect(pickTools(all, profiles.salon)).toEqual([]);
+    expect(pickTools(all, profiles.salon).map((t) => t.name)).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
   });
 
   it('throws on a name that is missing from the available tools', () => {
     const { get_finance_metrics: _gone, ...rest } = allTools();
     expect(() => pickTools(rest, profiles.finance)).toThrow(/get_finance_metrics is not available for finance/);
-    expect(() => pickTools({}, profiles.salon)).not.toThrow();
+    expect(() => pickTools({}, profiles.salon)).toThrow(/get_salon_metrics is not available for salon/);
   });
 
   it('does not take a name from the object prototype, and refuses a tool registered under another name', () => {

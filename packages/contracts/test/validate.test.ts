@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkPlans, Metric, numbersIn } from '../src/index.ts';
+import { checkPlans, Metric, mixedSentences, numbersIn, Plan } from '../src/index.ts';
 
 const source = {
   system: 'zetaris' as const,
@@ -200,5 +200,63 @@ describe('checkPlans against invented numbers (adversarial review, 2026-10-26)',
 
   it("refuses a metric whose id names a different business than its label", () => {
     expect(() => Metric.parse({ ...metrics[3]!, id: 'm:salon.revenue.wash_set', business: 'online' })).toThrow();
+  });
+});
+
+describe('mixedSentences (the same rule for a reason or a note written about picked plans)', () => {
+  // The review probe: a plan that cites salon revenue 12,400 and online revenue 18,900, so it lists both businesses.
+  const probe: Metric[] = [
+    { ...metrics[3]!, id: 'm:salon.revenue.total', label: 'Salon revenue', value: 12400 },
+    { ...metrics[0]!, id: 'm:online.revenue.total', label: 'Online revenue', value: 18900 },
+    ...metrics,
+  ];
+  const bothPlan = Plan.parse(plan(1, {
+    evidence: [{ metricId: 'm:salon.revenue.total', value: 12400 }, { metricId: 'm:online.revenue.total', value: 18900 }],
+    projections: [{ label: 'Online revenue with the test', baseMetricId: 'm:online.revenue.total', factor: 1.1, result: 20790, assumption: 'A small lift' }],
+    businesses: ['salon', 'online'],
+  }));
+  const onlinePlan = Plan.parse(plan(2));
+  const salonPlan = Plan.parse(plan(3, {
+    evidence: [{ metricId: 'm:salon.revenue.wash_set', value: 6200 }], projections: [], businesses: ['salon'],
+  }));
+
+  it('flags a sentence that quotes a salon number and an online number from a plan that lists both businesses', () => {
+    const text = 'Salon revenue is $12,400 while online revenue is $18,900, so both shops get a test.';
+    expect(mixedSentences(text, [bothPlan], probe)).toEqual([['$12,400', '$18,900']]);
+    // With other picks beside it (the salon's own plan holds 6,200, nothing that collides with these two).
+    expect(mixedSentences(text, [bothPlan, salonPlan], probe)).toEqual([['$12,400', '$18,900']]);
+  });
+
+  it('lets each side be quoted in its own sentence, and a business with itself', () => {
+    expect(mixedSentences('Salon revenue is $12,400. Online revenue is $18,900.', [bothPlan], probe)).toEqual([]);
+    expect(mixedSentences('Online revenue is $18,900 and would reach $20,790.', [bothPlan], probe)).toEqual([]);
+  });
+
+  it('knows the ratio and percent forms: 2.4x and 240% are the online return, $6,200 is the salon', () => {
+    expect(mixedSentences('Ads return 2.4x while the salon earned $6,200.', [onlinePlan, salonPlan], probe)).toEqual([['2.4x', '$6,200']]);
+    expect(mixedSentences('Ads return 240% while the salon earned $6,200.', [onlinePlan, salonPlan], probe)).toEqual([['240%', '$6,200']]);
+  });
+
+  it('is not hidden by a number two picks share, and does not judge numbers the plans do not hold', () => {
+    // 6,200 is the salon plan's and also the other salon plan's; 12,400 is salon revenue in the both-plan.
+    expect(mixedSentences('Ads return 2.4x while the salon earned $6,200.', [onlinePlan, salonPlan, bothPlan], probe)).toEqual([['2.4x', '$6,200']]);
+    expect(mixedSentences('Ads return 2.4x while the salon earned $77,000.', [onlinePlan, salonPlan], probe)).toEqual([]);
+  });
+
+  it('counts a lever as the business of its plan when the plan touches one business, and as neither when it touches both', () => {
+    const lever = { label: 'Daily budget', value: 55, unit: 'usd' as const };
+    const onlineWithLever = Plan.parse(plan(2, { levers: [lever] }));
+    const bothWithLever = Plan.parse({ ...bothPlan, levers: [lever] });
+    expect(mixedSentences('Spend $55 a day while the salon earned $6,200.', [onlineWithLever, salonPlan], probe)).toEqual([['$55', '$6,200']]);
+    expect(mixedSentences('Spend $55 a day while the salon earned $12,400.', [bothWithLever], probe)).toEqual([]);
+  });
+
+  it('leaves a combined metric out: a labeled blend is neither business', () => {
+    const blended: Metric[] = [...probe, { ...metrics[0]!, id: 'm:combined.revenue.total', label: 'Both shops', value: 31300, business: 'combined' }];
+    const withBlend = Plan.parse(plan(1, {
+      evidence: [{ metricId: 'm:salon.revenue.total', value: 12400 }, { metricId: 'm:combined.revenue.total', value: 31300 }],
+      projections: [], businesses: ['salon', 'combined'],
+    }));
+    expect(mixedSentences('Both shops made $31,300, of which the salon made $12,400.', [withBlend], blended)).toEqual([]);
   });
 });

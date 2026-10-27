@@ -1,7 +1,8 @@
 import { ManagerReview, type AssistantId, type CodeModeResult } from '@fahq/contracts';
+import { untracedResultNumbers } from '@fahq/codemode';
 import { parseJsonObject, positiveInt } from '@fahq/models';
 import type { Command } from './commands.ts';
-import { approverOf, done, fail, fitSms, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
+import { approverOf, done, errorText, fail, fitSms, newCode, receipt, text, toolsFor, type Outcome, type WorkerDeps } from './common.ts';
 import { codeModeDetail, numberTrace } from './reports.ts';
 import type { PersonRow, RecommendationRow, TaskRow } from './store.ts';
 
@@ -16,7 +17,6 @@ import type { PersonRow, RecommendationRow, TaskRow } from './store.ts';
 const HOUR_MS = 3_600_000;
 const MAX_DIGEST_CHARS = 24_000;
 const clip = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1).trimEnd()}…`);
-const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 
 export const REVIEW_RULES = `You are the HQ Manager for the AI assistants of a family business with TWO SEPARATE businesses: a salon and an online wig store. You are given a digest of the assistants' recent work and the lessons the owner has already adopted.
 Write a short review and at most three recommendations. Rules (a program checks them; a review that breaks a rule is rejected):
@@ -146,8 +146,12 @@ async function lookupReceipt(deps: WorkerDeps, ctx: { runId: string; task: TaskR
     runId: ctx.runId, taskId: ctx.task.id, step: ctx.step, assistant: ctx.asker, started: ctx.started,
     outcome: outcome.ok ? 'ok' : 'failed', model: r?.model,
     inputTokens: r?.inputTokens, outputTokens: r?.outputTokens,
+    // A script may add things up, so a number no tool returned is reported here and never a reason to refuse.
     detail: r
-      ? codeModeDetail({ attempts: r.attempts, toolCalls: r.toolCalls, resultChars: r.resultChars, error: outcome.ok ? null : outcome.reason })
+      ? codeModeDetail({
+          attempts: r.attempts, toolCalls: r.toolCalls, resultChars: r.resultChars, error: outcome.ok ? null : outcome.reason,
+          ...(outcome.ok ? { untraced: untracedResultNumbers(r.result, r.toolOutputs).length } : {}),
+        })
       : outcome.ok ? 'no result' : outcome.reason,
   });
 }
@@ -322,11 +326,15 @@ export function renderFacts(facts: unknown, max = 600): string {
   return clip(`Here's what I found: ${pairs.join('; ') || 'nothing'}`, max);
 }
 
-/** Code Mode lookup, then one worded answer whose numbers are checked against the lookup's result. */
+/**
+ * Code Mode lookup with `asker`'s own skill, tools and models, then one worded answer whose numbers are
+ * checked against the lookup's result. The reply comes from the number the person texted; when a department
+ * other than the person's own answers, `label` names it ("[Online] ...").
+ */
 export async function askQuestion(
-  person: PersonRow, asker: AssistantId, question: string, task: TaskRow, deps: WorkerDeps, runId: string,
+  person: PersonRow, asker: AssistantId, question: string, task: TaskRow, deps: WorkerDeps, runId: string, label?: string,
 ): Promise<Outcome> {
-  const tell = (body: string) => text(deps, person, asker, body, `reply:${task.id}`);
+  const tell = (body: string) => text(deps, person, person.assistant_id, label ? `[${label}] ${body}` : body, `reply:${task.id}`);
   const lookupStarted = deps.now();
   const looked = await lookup(deps, asker, `${asker}.lookup`, question.slice(0, 1600));
   await lookupReceipt(deps, { runId, task, step: `${asker}.lookup`, asker, started: lookupStarted }, looked);

@@ -59,7 +59,7 @@ function checkPlan(
   cited: Set<string>,
 ): Allowed[] {
   const where = `plan ${plan.rank}`;
-  const pool: Allowed[] = [];
+  const pool = poolOf(plan, byId);
   const units = new Set<BusinessUnit>();
   const citedValues: { value: number; business: BusinessUnit }[] = [];
 
@@ -68,10 +68,6 @@ function checkPlan(
     units.add(m.business);
     const prefix = m.id.split(':')[1]?.split('.')[0];
     if (prefix !== m.business) errors.push(`${where}: metric ${m.id} is labeled ${m.business}, not ${prefix}`);
-  };
-  const allow = (value: number, unit: Metric['unit'], business: BusinessUnit | null) => {
-    if (unit === 'ratio') pool.push({ value, kind: 'ratio', business }, { value: value * 100, kind: 'percent', business });
-    else pool.push({ value, kind: unit === 'percent' ? 'percent' : unit === 'usd' ? 'usd' : 'count', business });
   };
 
   for (const e of plan.evidence) {
@@ -84,7 +80,6 @@ function checkPlan(
     if (!close(e.value, m.value, 0.001)) {
       errors.push(`${where}: evidence ${m.id} says ${e.value} but the source says ${m.value}`);
     }
-    allow(m.value, m.unit, m.business);
     citedValues.push({ value: m.value, business: m.business });
   }
 
@@ -102,11 +97,7 @@ function checkPlan(
     if (m.business !== 'combined' && COMBINING_WORDS.test(`${p.label} ${p.assumption}`)) {
       errors.push(`${where}: projection "${p.label}" reads as a salon + online figure but its base is ${m.business} only`);
     }
-    allow(m.value, m.unit, m.business);
-    allow(p.result, m.unit, m.business);
     citedValues.push({ value: m.value, business: m.business });
-    for (const pct of [p.factor * 100, (p.factor - 1) * 100, (1 - p.factor) * 100]) pool.push({ value: pct, kind: 'percent', business: m.business });
-    pool.push({ value: p.factor, kind: 'ratio', business: m.business });
   }
 
   // Levers are the plan's own proposed settings: allowed in the text, shown as choices, never as facts.
@@ -123,8 +114,6 @@ function checkPlan(
         }
       }
     }
-    const kind: Kind = l.unit === 'percent' ? 'percent' : l.unit === 'usd' ? 'usd' : l.unit === 'ratio' ? 'ratio' : 'count';
-    pool.push({ value: l.value, kind, business: null });
   }
 
   const declared = new Set(plan.businesses);
@@ -150,23 +139,76 @@ function checkPlan(
 function checkText(where: string, text: string, pool: readonly Allowed[], errors: string[]): void {
   const { found, unreadable } = scan(text);
   for (const u of unreadable) errors.push(`${where}: "${u}" is a number the checker cannot read; write it in digits`);
-  // Sentence by sentence: which businesses could each number belong to?
   for (const sentence of splitSentences(found)) {
-    const owners: Set<BusinessUnit>[] = [];
     for (const n of sentence) {
-      const matches = pool.filter((a) => accepts(n, a));
-      if (matches.length === 0) {
-        errors.push(`${where}: "${n.raw}" in the text is not one of its cited or projected numbers`);
-        continue;
-      }
-      if (matches.some((a) => a.business === null || a.business === 'combined')) continue; // a lever or a combined metric
-      owners.push(new Set(matches.map((a) => a.business as BusinessUnit)));
+      if (!pool.some((a) => accepts(n, a))) errors.push(`${where}: "${n.raw}" in the text is not one of its cited or projected numbers`);
     }
-    const definite = owners.filter((o) => o.size === 1).map((o) => [...o][0]);
-    if (definite.includes('salon') && definite.includes('online')) {
+    if (mixesBusinesses(sentence, pool)) {
       errors.push(`${where}: one sentence mixes salon and online numbers (${sentence.map((n) => n.raw).join(', ')})`);
     }
   }
+}
+
+/**
+ * Does one sentence hold a number only salon values could be next to a number only online values could be?
+ * A number that matches nothing is somebody else's error; one that matches a lever or a combined metric is
+ * neither business's, so it is left out.
+ */
+function mixesBusinesses(sentence: readonly FoundNumber[], pool: readonly Allowed[]): boolean {
+  const owners: Set<BusinessUnit>[] = [];
+  for (const n of sentence) {
+    const matches = pool.filter((a) => accepts(n, a));
+    if (matches.length === 0) continue;
+    if (matches.some((a) => a.business === null || a.business === 'combined')) continue; // a lever or a combined metric
+    owners.push(new Set(matches.map((a) => a.business as BusinessUnit)));
+  }
+  const definite = owners.filter((o) => o.size === 1).map((o) => [...o][0]);
+  return definite.includes('salon') && definite.includes('online');
+}
+
+/**
+ * The sentences of `text` (a reason, a note) that put a salon number next to an online number, judged against
+ * what the given plans cite: each number belongs to the business of the metric it traces to, through the
+ * plan's evidence and projections (their ratio and percent forms included). That is the same rule a plan's own
+ * text passes, so a plan that cites both businesses is held to it too. A lever (a setting the plan proposes)
+ * belongs to its plan's business when the plan touches only one, and to neither when it touches both.
+ * Returns the numbers written in each offending sentence. A number the plans do not hold is not judged here.
+ */
+export function mixedSentences(text: string, plans: readonly Plan[], metrics: readonly Metric[]): string[][] {
+  const byId = new Map(metrics.map((m) => [m.id, m]));
+  const pool = plans.flatMap((plan) => poolOf(plan, byId).map((a): Allowed =>
+    (a.business === null && plan.businesses.length === 1 ? { ...a, business: plan.businesses[0]! } : a)));
+  return splitSentences(scan(text).found).filter((sentence) => mixesBusinesses(sentence, pool)).map((sentence) => sentence.map((n) => n.raw));
+}
+
+/**
+ * Every value a plan may quote in its text, each tied to a business: its cited metrics, its projections
+ * (base, result, and the factor as a ratio and as percentages) and its levers (tied to none). A metric the
+ * list does not hold is left out; the plan's own check reports it.
+ */
+function poolOf(plan: Plan, byId: ReadonlyMap<string, Metric>): Allowed[] {
+  const pool: Allowed[] = [];
+  const allow = (value: number, unit: Metric['unit'], business: BusinessUnit | null) => {
+    if (unit === 'ratio') pool.push({ value, kind: 'ratio', business }, { value: value * 100, kind: 'percent', business });
+    else pool.push({ value, kind: unit === 'percent' ? 'percent' : unit === 'usd' ? 'usd' : 'count', business });
+  };
+  for (const e of plan.evidence) {
+    const m = byId.get(e.metricId);
+    if (m) allow(m.value, m.unit, m.business);
+  }
+  for (const p of plan.projections) {
+    const m = byId.get(p.baseMetricId);
+    if (!m) continue;
+    allow(m.value, m.unit, m.business);
+    allow(p.result, m.unit, m.business);
+    for (const pct of [p.factor * 100, (p.factor - 1) * 100, (1 - p.factor) * 100]) pool.push({ value: pct, kind: 'percent', business: m.business });
+    pool.push({ value: p.factor, kind: 'ratio', business: m.business });
+  }
+  for (const l of plan.levers) {
+    const kind: Kind = l.unit === 'percent' ? 'percent' : l.unit === 'usd' ? 'usd' : l.unit === 'ratio' ? 'ratio' : 'count';
+    pool.push({ value: l.value, kind, business: null });
+  }
+  return pool;
 }
 
 function accepts(n: FoundNumber, a: Allowed): boolean {

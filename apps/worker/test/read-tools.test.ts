@@ -1,16 +1,43 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantId } from '@fahq/contracts';
 import { createReadTools, pick, type ReadToolContext } from '../src/read-tools.ts';
-import type { WorkReportRow } from '../src/store.ts';
-import { dataMock } from './fixtures.ts';
+import type { Explained } from '../src/explain.ts';
+import type { ApprovalSummary, MessageRow, WorkReportRow } from '../src/store.ts';
+import { dataMock, mockMetrics } from './fixtures.ts';
 
 // FAKES: an in-memory store, brain and data port, to pin down what each read tool returns and refuses.
 
 const NOW = new Date('2026-10-26T12:00:00.000Z');
 const NAMES = [
-  'get_finance_metrics', 'get_online_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons', 'list_lessons',
-  'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal',
+  'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons', 'list_lessons',
+  'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
 ];
+
+const FINAL_ID = 'abcdef12-3456-4789-8abc-def012345678';
+const finalRow: MessageRow = {
+  id: FINAL_ID, from_assistant: 'owner', to_assistant: 'owner', kind: 'proposal', status: 'open', reply_to: null, created_at: '2026-10-26T11:30:00.000Z',
+  body: {
+    plans: { plans: [
+      { rank: 1, title: 'Push Google ads on Mazali', evidence: [{ metricId: 'm:online.revenue.mazali' }, { metricId: 'm:online.ads.google.roas' }], projections: [{ baseMetricId: 'm:online.ads.google.spend' }] },
+      { rank: 2, title: 'Evening wash and set slots', evidence: [{ metricId: 'm:salon.revenue.wash_set' }], projections: [{ baseMetricId: 'm:salon.revenue.wash_set' }] },
+      { rank: 3, title: 'Keep the budget steady', evidence: [{ metricId: 'm:online.ads.google.spend' }], projections: [] },
+    ], memoryConflicts: [] },
+    metrics: mockMetrics.filter((m) => m.id !== 'm:salon.appointments.count'),
+    origins: [
+      { rank: 1, department: 'online', originalRank: 1, proposalId: 'p-online' },
+      { rank: 2, department: 'salon', originalRank: 1, proposalId: 'p-salon' },
+      { rank: 3, department: 'finance', originalRank: 3, proposalId: 'p-finance' },
+    ],
+    why: [{ rank: 1, text: 'Ads return 2.4x.' }, { rank: 2, text: 'Evenings are untouched.' }],
+    pickedBy: 'model', view: 'fortune_demo_finance_mart', queryHash: 'c'.repeat(64), requestText: 'Three plans to grow profit', failedDepartments: [],
+  },
+};
+const trail = {
+  proposal: { id: FINAL_ID, titles: ['Push Google ads on Mazali'], dataSource: 'zetaris:ccc' },
+  request: { text: 'Three plans to grow profit', from: 'owner', askedBy: 'Demo Owner', at: '2026-10-26T11:00:00Z' },
+  cites: ['m:online.ads.google.roas', 'm:online.ads.google.spend', 'm:online.revenue.mazali', 'm:salon.revenue.wash_set'],
+  decisions: [{ by: 'Demo Owner', action: 'forwarded' as const, planRank: 2, at: '2026-10-26T11:40:00Z' }],
+};
 
 function reportRow(over: Partial<WorkReportRow> = {}): WorkReportRow {
   return {
@@ -22,7 +49,16 @@ function reportRow(over: Partial<WorkReportRow> = {}): WorkReportRow {
   };
 }
 
-function setup(over: { reports?: WorkReportRow[]; data?: ReadToolContext['data'] } = {}) {
+type SetupOptions = {
+  reports?: WorkReportRow[];
+  data?: ReadToolContext['data'];
+  final?: MessageRow | null;
+  byPrefix?: (prefix: string) => { proposal: MessageRow | null; ambiguous: boolean };
+  approvals?: ApprovalSummary[];
+  trail?: typeof trail | null;
+};
+
+function setup(over: SetupOptions = {}) {
   const calls = {
     reports: [] as { since: Date; assistant?: AssistantId; limit?: number }[],
     lessons: [] as { assistant?: AssistantId; limit?: number }[],
@@ -39,6 +75,9 @@ function setup(over: { reports?: WorkReportRow[]; data?: ReadToolContext['data']
       },
       openItems: async () => [{ assistant: 'owner', openTasks: 2, pendingApprovals: 1 }, { assistant: 'manager', openTasks: 0, pendingApprovals: 0 }],
       latestProposal: async () => null,
+      latestFinalProposal: async () => ('final' in over ? over.final! : finalRow),
+      proposalByPrefix: async (prefix: string) => (over.byPrefix ? over.byPrefix(prefix) : { proposal: finalRow.id.startsWith(prefix) ? finalRow : null, ambiguous: false }),
+      approvalsOf: async () => over.approvals ?? [],
     },
     brain: {
       memory: (assistant: AssistantId) => {
@@ -51,7 +90,10 @@ function setup(over: { reports?: WorkReportRow[]; data?: ReadToolContext['data']
           lessons: () => [{ id: 'm1', content: `Lesson for ${assistant}`, layer: 'long_term', tags: ['lesson'], confidence: 0.9, source: 's' }],
         };
       },
-      record: { timeline: (limit: number) => { calls.timeline.push(limit); return [{ id: 'e1', type: 'relate', at: '2026-10-26T11:00:00Z' }]; } },
+      record: {
+        timeline: (limit: number) => { calls.timeline.push(limit); return [{ id: 'e1', type: 'relate', at: '2026-10-26T11:00:00Z' }]; },
+        explainProposal: () => (over.trail === undefined ? trail : over.trail ?? { proposal: null, request: null, cites: [], decisions: [] }),
+      },
     } as unknown as ReadToolContext['brain'],
     data: 'data' in over ? over.data! : dataMock,
     now: () => NOW,
@@ -94,6 +136,15 @@ describe('read tools', () => {
     const online = (await tools.get_online_metrics!.run({ period: '2026-09' })) as { metrics: { business: string }[] };
     expect(online.metrics.length).toBeGreaterThan(0);
     expect(online.metrics.every((m) => m.business === 'online')).toBe(true);
+  });
+
+  it('gives the salon its own metrics only: no online and no combined metric', async () => {
+    const tools = createReadTools(setup().ctx, 'salon');
+    const salon = (await tools.get_salon_metrics!.run({ period: '2026-09' })) as { view: string; metrics: { id: string; business: string }[] };
+    expect(salon.view).toBe('fortune_demo_finance_mart');
+    expect(salon.metrics.map((m) => m.id)).toEqual(['m:salon.revenue.wash_set', 'm:salon.appointments.count']);
+    expect(salon.metrics.every((m) => m.business === 'salon')).toBe(true);
+    await expect(tools.get_salon_metrics!.run({ period: '2026-08' })).rejects.toThrow(/argument "period"/);
   });
 
   it('says plainly when business data is not connected', async () => {
@@ -177,6 +228,70 @@ describe('read tools', () => {
     });
     expect(await tools.latest_proposal!.run({})).toEqual({ proposal: null });
     expect(await tools.get_timeline!.run({ limit: 5 })).toEqual({ events: [{ id: 'e1', type: 'relate', at: '2026-10-26T11:00:00Z' }] });
+  });
+});
+
+describe('explain_proposal', () => {
+  const explain = async (args: unknown, over: SetupOptions = {}) =>
+    (await createReadTools(setup(over).ctx, 'owner').explain_proposal!.run(args)) as Explained;
+
+  it('explains the newest set of plans: where each came from, why, what it cited with values, and who decided', async () => {
+    const out = await explain({}, { approvals: [
+      { action: 'forward_plan', status: 'signed', planRank: null, expiresAt: '2026-10-26T11:45:00.000Z', decidedAt: '2026-10-26T11:40:00.000Z' },
+      { action: 'decide_plan', status: 'pending', planRank: 2, expiresAt: '2026-10-26T11:55:00.000Z', decidedAt: null },
+      { action: 'decide_plan', status: 'pending', planRank: 1, expiresAt: '2026-10-26T12:30:00.000Z', decidedAt: null },
+    ] });
+    expect(out.proposal).toEqual({
+      id: 'abcdef12', createdAt: '2026-10-26T11:30:00.000Z', from: 'owner', requestText: 'Three plans to grow profit',
+      view: 'fortune_demo_finance_mart', queryHash: 'c'.repeat(64), pickedBy: 'model', failedDepartments: [],
+    });
+    expect(out.plans).toEqual([
+      { rank: 1, title: 'Push Google ads on Mazali', department: 'online', originalRank: 1, why: 'Ads return 2.4x.', cites: ['m:online.revenue.mazali', 'm:online.ads.google.roas', 'm:online.ads.google.spend'] },
+      { rank: 2, title: 'Evening wash and set slots', department: 'salon', originalRank: 1, why: 'Evenings are untouched.', cites: ['m:salon.revenue.wash_set'] },
+      { rank: 3, title: 'Keep the budget steady', department: 'finance', originalRank: 3, why: null, cites: ['m:online.ads.google.spend'] },
+    ]);
+    expect(out.cited).toContainEqual({ id: 'm:online.ads.google.roas', label: 'Google ad return', value: 2.4, unit: 'ratio', business: 'online' });
+    expect(out.cited.map((m) => m.id)).not.toContain('m:salon.appointments.count');
+    // The expired pending approval says so; the open one stays pending; no code or hash is in the answer.
+    expect(out.approvals.map((a) => [a.action, a.status, a.planRank])).toEqual([['forward_plan', 'signed', null], ['decide_plan', 'expired', 2], ['decide_plan', 'pending', 1]]);
+    expect(out.decisions).toEqual(trail.decisions);
+    expect(out.record).toEqual({ askedBy: 'Demo Owner', request: { text: 'Three plans to grow profit', from: 'owner', at: '2026-10-26T11:00:00Z' }, cites: trail.cites });
+    expect(out.notes).toEqual([]);
+    expect(JSON.stringify(out)).not.toMatch(/code_hash|\b\d{6}\b/);
+  });
+
+  it('finds a proposal by its first 8 characters or its whole id, and says when there is none or more than one', async () => {
+    expect((await explain({ proposal: 'abcdef12' })).proposal?.id).toBe('abcdef12');
+    expect((await explain({ proposal: FINAL_ID.toUpperCase() })).proposal?.id).toBe('abcdef12');
+    expect((await explain({ proposal: '00000000' })).notes).toEqual(['No proposal starts with "00000000".']);
+    expect((await explain({}, { final: null })).notes).toEqual(['No proposal has been made yet.']);
+    const ambiguous = await explain({ proposal: 'abcdef12' }, { byPrefix: () => ({ proposal: null, ambiguous: true }) });
+    expect(ambiguous).toMatchObject({ proposal: null, notes: ['More than one proposal starts with "abcdef12"; give more characters.'] });
+  });
+
+  it('reports a gap in the shared record as a gap, and never fills it', async () => {
+    const out = await explain({}, { trail: null });
+    expect(out.record).toBeNull();
+    expect(out.decisions).toEqual([]);
+    expect(out.notes).toEqual(['The shared record has no entry for this proposal.']);
+    const thin = await explain({}, { trail: { ...trail, cites: ['m:online.revenue.mazali'] } });
+    expect(thin.notes).toEqual(['The shared record lists fewer cited metrics than the proposal holds (an older record can lose links).']);
+  });
+
+  it("explains a department's own proposal, and an older finance-only one, by the department that wrote them", async () => {
+    const department: MessageRow = { ...finalRow, from_assistant: 'salon', to_assistant: 'owner', body: { ...finalRow.body, origins: undefined, why: undefined, pickedBy: undefined, department: 'salon' } };
+    const out = await explain({ proposal: 'abcdef12' }, { byPrefix: () => ({ proposal: department, ambiguous: false }) });
+    expect(out.plans.map((p) => [p.department, p.originalRank, p.why])).toEqual([['salon', 1, null], ['salon', 2, null], ['salon', 3, null]]);
+    expect(out.proposal?.pickedBy).toBeNull();
+    const older: MessageRow = { ...finalRow, from_assistant: 'finance', body: { ...department.body, department: undefined } };
+    expect((await explain({}, { final: older })).plans.map((p) => p.department)).toEqual(['finance', 'finance', 'finance']);
+  });
+
+  it('refuses a reference that is not a proposal id, with a plain sentence', async () => {
+    const tools = createReadTools(setup().ctx, 'owner');
+    await expect(tools.explain_proposal!.run({ proposal: "x'; drop table" })).rejects.toThrow(/^explain_proposal: argument "proposal"/);
+    await expect(tools.explain_proposal!.run({ proposal: 'abc' })).rejects.toThrow(/argument "proposal"/);
+    await expect(tools.explain_proposal!.run({ proposals: 'abcdef12' })).rejects.toThrow(/does not take/);
   });
 });
 

@@ -50,7 +50,7 @@ export async function flushOutbox(deps: WorkerDeps): Promise<number> {
           proposalId,
           title: 'Three profit plans',
           requestedBy: requester.name,
-          preparedBy: 'Finance assistant',
+          preparedBy: proposal.from_assistant === 'owner' ? 'Owner HQ' : 'Finance assistant',
           createdAt: proposal.created_at,
           plans: proposal.body.plans as ProfitPlans,
           citedMetrics: citedMetricsOf(proposal),

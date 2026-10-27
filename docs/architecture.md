@@ -74,16 +74,20 @@ credentials, are ever used here.
 2. **The webhook is fast and dumb.** Valid Twilio signature or 403. Unknown sender gets a refusal and no
    task. A duplicate `MessageSid` makes one task. It never calls a model.
 3. **Each task runs once.** Claimed with a lease and `SKIP LOCKED`, at most 3 attempts, then `failed` with
-   a reason. Twilio's own keywords (STOP, CANCEL, START, HELP and the rest) are left to Twilio and never
-   become a task; an unused approval code simply expires.
+   a reason. The lease is short (5 minutes, so a task a dead worker left is tried again inside an approval
+   code's 15 minutes) and the worker renews it every minute while it handles the task (`extend_lease`, which
+   only the holder can call). Every claim loop is its own worker id (`<worker>#<n>`), so a loop that lost its
+   lease cannot finish or renew a task another loop took. Twilio's own keywords (STOP, CANCEL, START, HELP and
+   the rest) are left to Twilio and never become a task; an unused approval code simply expires.
 4. **Proposals, never orders.** Only a person's code turns a proposal into a decision. A code is 4+
    digits, hashed, single-use, bound to that person and that proposal, and expires after 15 minutes. A
    plain "yes" never confirms.
 5. **No action on the world.** The outbox sends only to registered people. Nothing charges, publishes,
    messages a customer or changes an ad.
 6. **No invented numbers.** Evidence must match the metric it cites; projections must equal
-   `metric × factor`; no claim mixes salon and online. On failure the task fails with the reason. No
-   silent fallback model.
+   `metric × factor`; no claim mixes salon and online (a plan's own words, and the reasons and note Owner HQ
+   writes about picked plans, pass the same sentence rule: each number belongs to the business of the metric
+   it traces to). On failure the task fails with the reason. No silent fallback model.
 7. **Memory holds only what a person decided.**
 8. **Model-written code runs only in the sandbox.** No network, no files, no timers. Time and memory
    limits. Only the brain tools passed in are reachable.

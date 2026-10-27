@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 // Real-Postgres tests for the queue, approvals and caps (local Supabase: npm run db:start).
 // Each test uses fresh ids so tests never depend on each other or on wall-clock time.
@@ -101,6 +101,73 @@ describe('task claims', () => {
     const holder = await pool.query('select public.finish_task($1, $2, $3) as ok', [id, 'owner-worker', 'done']);
     expect(intruder.rows[0].ok).toBe(false);
     expect(holder.rows[0].ok).toBe(true);
+  });
+});
+
+describe('task lease renewal', () => {
+  // claim_task hands out the oldest runnable task, so each test cancels its own when it is done: a task left
+  // running with an old lease would be claimed in place of the next test's.
+  const ids: string[] = [];
+  afterEach(async () => {
+    for (const id of ids.splice(0)) await pool.query('select public.cancel_task($1)', [id]);
+  });
+  const newTask = async (createdAt: string) => {
+    const { rows } = await pool.query(
+      `insert into public.tasks (assistant_id, kind, idempotency_key, payload, created_at, run_after)
+       values ('owner', 'scheduled', $1, '{}'::jsonb, $2, $2) returning id`,
+      ['test:' + randomUUID(), createdAt],
+    );
+    ids.push(rows[0].id as string);
+    return rows[0].id as string;
+  };
+  const claimAt = async (id: string, worker: string, t: string, lease = 60) =>
+    (await pool.query('select * from public.claim_task($1, $2, $3)', [worker, lease, t])).rows.find((r: { id: string }) => r.id === id);
+  const extend = async (id: string, worker: string, t: string, lease = 60) =>
+    (await pool.query('select public.extend_lease($1, $2, $3, $4) as ok', [id, worker, lease, t])).rows[0].ok as boolean;
+  const leaseUntil = async (id: string) => new Date((await pool.query('select lease_until from public.tasks where id = $1', [id])).rows[0].lease_until).toISOString();
+
+  it('lets the holder push its lease on, so a task still being worked on is not claimed', async ({ skip }) => {
+    if (!reachable) skip();
+    const id = await newTask('2002-01-01T00:00:00Z');
+    expect((await claimAt(id, 'w1', '2002-01-01T00:00:00Z'))?.attempts).toBe(1);
+    expect(await extend(id, 'w1', '2002-01-01T00:00:50Z')).toBe(true);
+    expect(await leaseUntil(id)).toBe('2002-01-01T00:01:50.000Z'); // 50 s + a fresh 60 s
+    expect(await claimAt(id, 'w2', '2002-01-01T00:01:20Z')).toBeUndefined(); // the first lease would have ended at 00:01:00
+    expect((await claimAt(id, 'w2', '2002-01-01T00:01:51Z'))?.attempts).toBe(2); // and it does end when renewals stop
+  });
+
+  it('never shortens a lease', async ({ skip }) => {
+    if (!reachable) skip();
+    const id = await newTask('2002-02-01T00:00:00Z');
+    await claimAt(id, 'w1', '2002-02-01T00:00:00Z', 600);
+    expect(await extend(id, 'w1', '2002-02-01T00:00:10Z', 60)).toBe(true);
+    expect(await leaseUntil(id)).toBe('2002-02-01T00:10:00.000Z');
+  });
+
+  it('refuses anyone but the holder, and a holder that lost the task to a retry', async ({ skip }) => {
+    if (!reachable) skip();
+    const id = await newTask('2002-03-01T00:00:00Z');
+    await claimAt(id, 'w1', '2002-03-01T00:00:00Z');
+    expect(await extend(id, 'someone-else', '2002-03-01T00:00:10Z')).toBe(false);
+    expect((await claimAt(id, 'w2', '2002-03-01T00:01:30Z'))?.attempts).toBe(2); // w1's lease ran out, w2 took it
+    expect(await extend(id, 'w1', '2002-03-01T00:01:40Z')).toBe(false);
+    expect(await extend(id, 'w2', '2002-03-01T00:01:40Z')).toBe(true);
+    expect((await pool.query('select public.finish_task($1, $2, $3) as ok', [id, 'w2', 'done'])).rows[0].ok).toBe(true);
+    expect(await extend(id, 'w2', '2002-03-01T00:01:50Z')).toBe(false); // a finished task has no lease to renew
+  });
+
+  it('lets the public (anon) role call nothing here either', async ({ skip }) => {
+    if (!reachable) skip();
+    const id = await newTask('2002-04-01T00:00:00Z');
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local role anon');
+      await expect(client.query('select public.extend_lease($1, $2, 60)', [id, 'anon'])).rejects.toThrow(/permission denied/);
+    } finally {
+      await client.query('rollback');
+      client.release();
+    }
   });
 });
 
@@ -233,6 +300,8 @@ describe('spending cap', () => {
   it('never lets concurrent reservations pass the daily cap', async ({ skip }) => {
     if (!reachable) skip();
     const day = `20${String(30 + Math.floor(Math.random() * 60))}-01-01`;
+    // The test leaves its row behind, so an earlier run may already have spent this random day (about one run in ten, and growing).
+    await pool.query('delete from public.model_spend where day = $1', [day]);
     const results = await Promise.all(
       Array.from({ length: 6 }, () => pool.query('select public.reserve_model_spend($1, 0.4, 1.0) as ok', [day])),
     );

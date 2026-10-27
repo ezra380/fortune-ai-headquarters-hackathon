@@ -11,6 +11,8 @@ export type WorkerDeps = {
   store: Store;
   brain: Brain;
   models: { nvidia: ModelPort; planModel: string; routerModel: string };
+  /** The safety model every free text is screened by before anything starts; null = the screen is off. */
+  guard: { model: string } | null;
   data: DataPort | null;
   delivery: DeliveryPort | null;
   /** Cloudflare Code Mode in the worker; null = not wired, and the steps that need it fail plainly. */
@@ -22,7 +24,10 @@ export type WorkerDeps = {
     reads(id: AssistantId): readonly string[];
   };
   now: () => Date;
+  /** Names the claim loop that holds a task (runConcurrently adds `#<n>` for each loop). */
   worker: string;
+  /** How often, in milliseconds, the lease of a task being handled is renewed. Default: once a minute. */
+  leaseRenewMs?: number;
   /** true when talking to real providers; recorded on every receipt. */
   live: boolean;
   period: '2026-09' | '2026-10-mtd';
@@ -36,6 +41,8 @@ export type WorkerDeps = {
 export type Outcome = { status: 'done' | 'failed'; error?: string };
 
 export const newCode = () => String(randomInt(100000, 1000000));
+/** A thrown error's own sentence, or the fallback when it has none. */
+export const errorText = (error: unknown, fallback: string) => (error instanceof Error && error.message ? error.message : fallback);
 export const done: Outcome = { status: 'done' };
 export const fail = (error: string): Outcome => ({ status: 'failed', error });
 

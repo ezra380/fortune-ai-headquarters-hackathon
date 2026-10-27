@@ -4,14 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { CodeModeResult, CodeModeRunner, ModelPort, Receipt } from '@fahq/contracts';
+import type { ModelPort, Receipt } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { handleTask, type WorkerDeps } from '../src/flows.ts';
 import { ANSWER_RULES, REVIEW_RULES } from '../src/manager.ts';
 import { buildWorkReport } from '../src/reports.ts';
 import { runUntilIdle } from '../src/runner.ts';
 import { createStore, type TaskRow } from '../src/store.ts';
-import { dataMock, validPlans } from './fixtures.ts';
+import { dataMock, fakeCodeMode, okResult, routerReply, scriptedModel, validPlans } from './fixtures.ts';
 import { dbUrl, haveMeterless, localApi, meterlessDir } from './localdb.ts';
 
 // The HQ Manager end to end on the real local database and the real Meterless engines. Only the models,
@@ -26,44 +26,9 @@ afterAll(async () => pool.end());
 const sid = () => 'SM' + randomBytes(16).toString('hex');
 const OWNER_NUMBER = '+15550100001';
 
-// ---- Fakes ---------------------------------------------------------------------------------------
+// ---- Fakes (fixtures.ts) --------------------------------------------------------------------------
 
-type ChatInput = Parameters<ModelPort['chat']>[0];
-
-/** A model that answers each purpose from a script (the last reply repeats; an Error is thrown). */
-function scriptedModel() {
-  const replies = new Map<string, (string | Error)[]>();
-  const calls: ChatInput[] = [];
-  const port: ModelPort = {
-    async chat(input) {
-      calls.push(input);
-      const list = replies.get(input.purpose);
-      const next = list && list.length > 1 ? list.shift() : list?.[0];
-      if (next === undefined) throw new Error(`no scripted reply for ${input.purpose}`);
-      if (next instanceof Error) throw next;
-      return { text: next, model: `MOCK/${input.model}`, inputTokens: 100, outputTokens: 200, costUsd: 0 };
-    },
-  };
-  return {
-    port, calls,
-    script: (purpose: string, ...texts: (string | Error)[]) => { replies.set(purpose, texts); },
-    of: (purpose: string) => calls.filter((c) => c.purpose === purpose),
-  };
-}
-
-const okResult = (result: unknown, over: Partial<CodeModeResult> = {}): CodeModeResult => ({
-  ok: true, result, error: null, script: 'return 1;', attempts: 1, toolCalls: 3, resultChars: JSON.stringify(result).length,
-  inputTokens: 700, outputTokens: 150, model: 'MOCK/code', toolOutputs: [{ tool: 'usage_summary', output: result }], ...over,
-});
-
-function fakeCodeMode() {
-  const calls: Parameters<CodeModeRunner>[0][] = [];
-  let respond: (input: Parameters<CodeModeRunner>[0]) => CodeModeResult = () => { throw new Error('no scripted Code Mode result'); };
-  const runner: CodeModeRunner = async (input) => { calls.push(input); return respond(input); };
-  return { runner, calls, respond: (fn: typeof respond) => { respond = fn; } };
-}
-
-const router = (target: string, intent = 'request') => JSON.stringify({ intent, risks: [], targetAssistant: target, confidence: 0.9, reason: 'scripted' });
+const router = (target: string, intent = 'question') => routerReply(target, intent);
 
 const digest = {
   byAssistant: [
@@ -121,6 +86,7 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
       store: createStore(api!.url, api!.key),
       brain: await openBrain({ meterlessDir, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'fahq-manager-')), actor: 'manager-test' }),
       models: { nvidia: undefined as unknown as ModelPort, planModel: 'MOCK/plans', routerModel: 'MOCK/router' },
+      guard: null,
       data: dataMock,
       delivery: null,
       codeMode: null,
@@ -412,21 +378,27 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
     expect((await stepsOf(task.id))[0]).toMatchObject({ step: 'manager.request', outcome: 'refused' });
   });
 
-  it('starts a review when the front door sends the owner\'s text to the manager', async () => {
-    model.script('front-door', router('manager'));
-    model.script('manager.review', makeReview().json);
+  it('answers a question about the assistants through the manager\'s own Q&A, prefixed [Manager]; a review is asked for with REVIEW', async () => {
+    const facts = { byAssistant: [{ assistant: 'finance', tasks: 5, failed: 1 }] };
+    codeMode.respond(() => okResult(facts));
+    model.script('front-door', router('manager', 'question'));
+    model.script('manager.answer', 'Finance did 5 tasks and 1 failed.');
     const messageSid = await textIn(ownerPhone, 'How are my assistants doing lately?');
-    expect(lastTo(ownerPhone)).toContain('HQ Manager review (last 24 h)');
+    expect(lastTo(ownerPhone)).toBe('[Manager] Finance did 5 tasks and 1 failed.');
+    expect(codeMode.calls[0]).toMatchObject({ purpose: 'manager.lookup', model: 'MOCK/manager/code', skill: 'SKILL(manager)' });
+    expect(codeMode.calls[0]!.tools.map((t) => t.name)).toEqual(reads.manager);
+    expect(model.of('manager.answer')[0]).toMatchObject({ model: 'MOCK/manager/answer' });
+    expect(model.of('manager.review')).toHaveLength(0);
     const task = await taskOfText(messageSid);
-    expect((await pool.query('select assistant_id from public.tasks where idempotency_key = $1', [`review:${task.id}`])).rows[0].assistant_id).toBe('manager');
-    expect((await stepsOf(task.id)).map((s) => [s.step, s.outcome])).toEqual([['front-door', 'ok'], ['manager.request', 'ok']]);
+    expect((await pool.query('select count(*)::int as n from public.tasks where idempotency_key = $1', [`review:${task.id}`])).rows[0].n).toBe(0);
+    expect((await stepsOf(task.id)).map((s) => [s.step, s.outcome])).toEqual([['front-door.screen', 'ok'], ['front-door', 'ok'], ['manager.lookup', 'ok'], ['manager.answer', 'ok']]);
   });
 
   it('turns away a code under the wrong command word, both ways, without spending it', async () => {
     const r = makeReview();
     const { code: adopt } = await askForReview(r.json);
     expect(adopt).toMatch(/^\d{6}$/);
-    model.script('front-door', router('finance'));
+    model.script('front-door', router('finance', 'plans'));
     model.script('finance.plans', JSON.stringify(validPlans));
     await textIn(ownerPhone, 'Ask the finance assistant for three plans to double profit.');
     const send = /SEND <1-3> (\d{6})/.exec(lastTo(ownerPhone))?.[1] ?? '';
@@ -477,9 +449,10 @@ describe.skipIf(!api)('the HQ Manager (real database and Meterless; models and C
       expect(answer[0]!.system).toBe(`SKILL(owner)\n\n${ANSWER_RULES}`);
       expect(JSON.parse(answer[0]!.user)).toEqual({ question: 'How did finance do today?', facts });
       const steps = await stepsOf((await taskOfText(messageSid)).id);
-      expect(steps.map((s) => [s.step, s.outcome])).toEqual([['front-door', 'ok'], ['owner.lookup', 'ok'], ['owner.answer', 'ok']]);
-      expect(steps[1]).toMatchObject({ input_tokens: 700, output_tokens: 150, detail: `code mode: attempts 1, toolCalls 3, resultChars ${chars}` });
-      expect(steps[2]).toMatchObject({ input_tokens: 100, output_tokens: 200 });
+      expect(steps.map((s) => [s.step, s.outcome])).toEqual([['front-door.screen', 'ok'], ['front-door', 'ok'], ['owner.lookup', 'ok'], ['owner.answer', 'ok']]);
+      expect(steps[0]).toMatchObject({ step: 'front-door.screen', model: null, detail: 'screen off' });
+      expect(steps[2]).toMatchObject({ input_tokens: 700, output_tokens: 150, detail: `code mode: attempts 1, toolCalls 3, resultChars ${chars}, untraced 0` });
+      expect(steps[3]).toMatchObject({ input_tokens: 100, output_tokens: 200 });
       expect((await reportOf((await taskOfText(messageSid)).id)).usage.codeMode).toEqual({ scripts: 1, toolCalls: 3, resultChars: chars });
     });
 

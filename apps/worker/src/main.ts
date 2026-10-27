@@ -6,10 +6,10 @@ import path from 'node:path';
 import type { DataPort, DeliveryPort } from '@fahq/contracts';
 import { openBrain } from '@fahq/brain';
 import { createCodeModeRunner } from '@fahq/codemode';
-import { modelsFromEnv } from '@fahq/models';
+import { modelsFromEnv, positiveInt } from '@fahq/models';
 import { loadProfiles } from '@fahq/profiles';
 import type { WorkerDeps } from './flows.ts';
-import { runOnce, runUntilIdle } from './runner.ts';
+import { runConcurrently } from './runner.ts';
 import { createStore } from './store.ts';
 
 const root = path.resolve(import.meta.dirname, '../../..');
@@ -36,6 +36,9 @@ if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
 
 const models = modelsFromEnv(env);
 const profiles = loadProfiles(env);
+// How many claim loops run in this one process. claim_task skips rows another loop holds, outbox claims are
+// atomic, the World Model queues its writes and H-MEM writes are synchronous, so loops never share a task.
+const concurrency = positiveInt(env, 'WORKER_CONCURRENCY', 2);
 const deps: WorkerDeps = {
   store: createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY),
   brain: await openBrain({
@@ -44,6 +47,8 @@ const deps: WorkerDeps = {
     actor: `worker@${os.hostname()}`,
   }),
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
+  // The safety screen in front of every free text; GUARD=off turns it off.
+  guard: models.guard ? { model: models.guardModel } : null,
   data: await optional<DataPort>('@fahq/data', 'createZetarisDataPort', 'business data (packages/data)'),
   delivery: await optional<DeliveryPort>('@fahq/delivery', 'createDeliveryPort', 'delivery (packages/delivery)'),
   // Each assistant's read-only profile: its skill text, the model for each job, its read tools.
@@ -66,19 +71,13 @@ const deps: WorkerDeps = {
   printDir: path.join(root, '.local/print'),
 };
 
+let stopping = false;
 if (process.argv.includes('--once')) {
-  const cycles = await runUntilIdle(deps);
+  const cycles = await runConcurrently(deps, concurrency, () => stopping, { untilIdle: true, maxCycles: 500 });
   console.error(`worker: drained the queue in ${cycles} cycles`);
 } else {
-  let stopping = false;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { stopping = true; });
-  console.error(`worker: running as ${deps.worker}`);
-  while (!stopping) {
-    const busy = await runOnce(deps).catch((error: unknown) => {
-      console.error(`worker.loop_error: ${error instanceof Error ? error.message : 'unknown'}`);
-      return false;
-    });
-    if (!busy) await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
+  console.error(`worker: running as ${deps.worker} with ${concurrency} claim loops`);
+  await runConcurrently(deps, concurrency, () => stopping, { untilIdle: false });
   console.error('worker: stopped');
 }

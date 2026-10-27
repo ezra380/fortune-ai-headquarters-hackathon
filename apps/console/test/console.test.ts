@@ -218,7 +218,7 @@ describe('read-only and local only', () => {
     const list = JSON.parse((await request(c.port, { path: '/api/departments' })).text) as { departments: { id: string; name: string }[] };
     expect(list.departments.map((d) => d.id)).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);
     expect(list.departments.map((d) => d.name)).toEqual([
-      'Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (Cindy)',
+      'Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)',
     ]);
     for (const p of ['/nope', '/api', '/api/department', '/api/department/', '/api/department/finance/extra', '/api/department/FINANCE', '/api/department/%2e%2e', '/health/']) {
       expect((await request(c.port, { path: p })).status, p).toBe(404);
@@ -309,7 +309,7 @@ describe('what a department may show', () => {
     const r = await request(c.port, { path: '/api/department/salon' });
     expect(r.status).toBe(200);
     const d = JSON.parse(r.text);
-    expect(d).toEqual({ id: 'salon', name: 'Salon Department (Cindy)', placeholder: true, message: SALON_MESSAGE });
+    expect(d).toEqual({ id: 'salon', name: 'Salon Department (stand-in for Cindy)', placeholder: true, message: SALON_MESSAGE });
     expect(d.message).toContain('Cindy runs in her own app.');
     expect(d.message).toContain('her family and personal data stay in her app');
     expect(c.deps.load).not.toHaveBeenCalled();
@@ -343,7 +343,7 @@ describe('the page', () => {
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toBe('text/html; charset=utf-8');
     for (const d of DEPARTMENTS) expect(r.text).toContain(d.name);
-    for (const name of ['Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (Cindy)']) expect(r.text).toContain(name);
+    for (const name of ['Owner HQ', 'Finance Department', 'Online Customer Service Department', 'HQ Manager', 'Salon Department (stand-in for Cindy)']) expect(r.text).toContain(name);
     // The tab order is the department order: Owner, Finance, Online, HQ Manager, Salon.
     const tabs = [...r.text.matchAll(/data-id="([a-z]+)"/g)].map((m) => m[1]);
     expect(tabs).toEqual(['owner', 'finance', 'online', 'manager', 'salon']);

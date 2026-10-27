@@ -13,8 +13,8 @@ export type ModelSetting = { model: string; thinking: boolean; maxTokens: number
 
 /** Every function an assistant can ever be given. None of them changes anything. */
 export const READ_TOOL_NAMES = [
-  'get_finance_metrics', 'get_online_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons',
-  'list_lessons', 'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal',
+  'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons',
+  'list_lessons', 'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
 ] as const;
 export type ReadToolName = (typeof READ_TOOL_NAMES)[number];
 
@@ -24,6 +24,7 @@ export type AssistantProfile = {
   title: string;
   /** The person role it serves; null for the manager. */
   serves: string | null;
+  /** 'live' = answers and plans; 'saves-requests' only keeps requests; 'placeholder' has nothing running. */
   status: 'live' | 'saves-requests' | 'placeholder';
   /** The body of skills/<id>/SKILL.md, frontmatter removed. */
   skill: string;
@@ -40,27 +41,30 @@ type Shape = Omit<AssistantProfile, 'skill' | 'models'> & { jobs: readonly Model
 const SHAPES: Record<AssistantId, Shape> = {
   owner: {
     id: 'owner', title: 'Owner HQ', serves: 'owner', status: 'live',
-    reads: ['get_finance_metrics', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary'],
+    reads: ['get_finance_metrics', 'recall_decisions', 'list_lessons', 'get_timeline', 'open_items', 'latest_proposal', 'usage_summary', 'explain_proposal'],
     writes: ['propose'], jobs: ['route', 'code', 'answer'], memory: 'owner',
   },
   finance: {
     id: 'finance', title: 'Finance Department', serves: 'finance_owner', status: 'live',
-    reads: ['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal'],
+    reads: ['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal'],
     writes: ['propose', 'report'], jobs: ['plan', 'code', 'answer'], memory: 'finance',
   },
   online: {
-    id: 'online', title: 'Online Customer Service', serves: 'online_staff', status: 'saves-requests',
+    id: 'online', title: 'Online Customer Service', serves: 'online_staff', status: 'live',
     reads: ['get_online_metrics', 'recall_my_decisions', 'my_lessons'],
-    writes: ['report'], jobs: ['code', 'answer'], memory: 'online',
+    writes: ['propose', 'report'], jobs: ['plan', 'code', 'answer'], memory: 'online',
   },
+  // In production this is Cindy's own backend (her family and personal data never cross); here it shows the
+  // pattern on synthetic salon data.
   salon: {
-    id: 'salon', title: 'Salon (Cindy)', serves: 'head_stylist', status: 'placeholder',
-    reads: [], writes: [], jobs: [], memory: 'salon',
+    id: 'salon', title: 'Salon Department (stand-in for Cindy)', serves: 'head_stylist', status: 'live',
+    reads: ['get_salon_metrics', 'recall_my_decisions', 'my_lessons'],
+    writes: ['propose', 'report'], jobs: ['plan', 'code', 'answer'], memory: 'salon',
   },
   manager: {
     id: 'manager', title: 'HQ Manager', serves: null, status: 'live',
-    reads: ['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions'],
-    writes: ['report'], jobs: ['code', 'review'], memory: 'manager',
+    reads: ['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal'],
+    writes: ['report'], jobs: ['code', 'answer', 'review'], memory: 'manager',
   },
 };
 

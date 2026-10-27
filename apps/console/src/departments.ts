@@ -14,7 +14,7 @@ export const DEPARTMENTS: readonly DepartmentInfo[] = [
   { id: 'finance', name: 'Finance Department', placeholder: false },
   { id: 'online', name: 'Online Customer Service Department', placeholder: false },
   { id: 'manager', name: 'HQ Manager', placeholder: false },
-  { id: 'salon', name: 'Salon Department (Cindy)', placeholder: true },
+  { id: 'salon', name: 'Salon Department (stand-in for Cindy)', placeholder: false },
 ];
 
 export const SALON_MESSAGE =
