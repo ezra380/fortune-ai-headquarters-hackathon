@@ -129,7 +129,7 @@ export type ApprovalSummary = { action: ApprovalAction; status: 'pending' | 'sig
  */
 export const LEASE_SECONDS = 300;
 
-const ASSISTANTS: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
+const ASSISTANTS: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager', 'legal'];
 
 type Result<T> = { data: T | null; error: { message: string; code?: string } | null };
 

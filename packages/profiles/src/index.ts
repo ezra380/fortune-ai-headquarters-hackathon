@@ -32,7 +32,7 @@ export type AssistantProfile = {
   id: AssistantId;
   /** The department's name, e.g. 'Finance Department'. */
   title: string;
-  /** The person role it serves; null for the manager. */
+  /** The person role it serves; null for the manager and the Legal Team. */
   serves: string | null;
   /** 'live' = answers and plans; 'saves-requests' only keeps requests; 'placeholder' has nothing running. */
   status: 'live' | 'saves-requests' | 'placeholder';
@@ -84,6 +84,14 @@ const SHAPES: Record<AssistantId, Shape> = {
     id: 'manager', title: 'HQ Manager', serves: null, status: 'live',
     reads: ['list_work_reports', 'list_session_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal', 'get_data_quality'],
     writes: ['report'], jobs: ['code', 'answer', 'review'], memory: 'manager',
+  },
+  // Terms, contracts and policies. Like the manager it has no phone number and no person: staff reach it through a door,
+  // the owner asks it by text through Owner HQ. It reads only what holds no business data (its own memory and lessons),
+  // and answers a question (a lookup, then the words); it plans and reviews nothing.
+  legal: {
+    id: 'legal', title: 'Legal Team', serves: null, status: 'live',
+    reads: ['recall_my_decisions', 'my_lessons'],
+    writes: ['report'], jobs: ['code', 'answer'], memory: 'legal',
   },
 };
 

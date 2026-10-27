@@ -1,4 +1,4 @@
-// Puts the five assistant profiles (skills/<id>/SKILL.md, the read tools, the models for each job) into
+// Puts the assistant profiles (skills/<id>/SKILL.md, the read tools, the models for each job) into
 // public.assistant_profiles, one version row made by "seed" for each profile it writes. Run it as often as you like.
 //   npx tsx scripts/seed-profiles.ts             stores the profiles that have no row yet; every other row is left as it is
 //   npx tsx scripts/seed-profiles.ts --force     replaces title, skill, reads and models with the files' as a new version

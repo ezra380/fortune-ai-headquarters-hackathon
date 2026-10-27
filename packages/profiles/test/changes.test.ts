@@ -252,6 +252,15 @@ describe('a change of read tools', () => {
       .toBe('the manager assistant may never read "get_finance_metrics"');
   });
 
+  it('keeps the Legal Team to the tools that return no business data: a money, salon, online or shared tool is refused, a bare tool is added', () => {
+    for (const name of ['get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'get_budget_room', 'list_work_reports', 'recall_decisions']) {
+      expect(reason(applyProfileChange(content('legal'), { kind: 'reads', add: [name], remove: [] }, options())), name)
+        .toBe(`the legal assistant may never read "${name}"`);
+    }
+    const done = must(applyProfileChange(content('legal'), { kind: 'reads', add: ['get_timeline'], remove: [] }, options()));
+    expect(done.next.reads).toEqual([...files.legal.reads, 'get_timeline']);
+  });
+
   // Second-key review of merge wave 1: the wall named three tools and predated the division reads, so a salon profile
   // could be given the online store's customer rows, and the manager the money by another tool. It now follows each tool's
   // declared scope (READ_SCOPE), so a new tool cannot skip it.
@@ -263,7 +272,8 @@ describe('a change of read tools', () => {
     expect(reason(applyProfileChange(content('manager'), { kind: 'reads', add: ['get_company_overview'], remove: [] }, options())))
       .toBe('the manager assistant may never read "get_company_overview"');
     const walled = (id: AssistantId, name: ReadToolName) =>
-      (id === 'salon' || id === 'online') ? READ_SCOPE[name] !== id && READ_SCOPE[name] !== 'none' : id === 'manager' && MONEY_READS.includes(name);
+      (id === 'salon' || id === 'online') ? READ_SCOPE[name] !== id && READ_SCOPE[name] !== 'none'
+        : id === 'legal' ? READ_SCOPE[name] !== 'none' : id === 'manager' && MONEY_READS.includes(name);
     for (const id of AssistantId.options) {
       for (const name of READ_TOOL_NAMES) {
         const refusal = checkProfileRow({ assistant_id: id, reads: [...new Set([...files[id].reads, name])], skill: files[id].skill }, READ_TOOL_NAMES);

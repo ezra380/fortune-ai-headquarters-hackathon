@@ -42,7 +42,7 @@ describe('the profile source', () => {
     })]);
     const loaded = await source.refresh();
     expect(loaded.fromDatabase).toEqual(['finance']);
-    expect(loaded.fromFiles).toEqual(['owner', 'salon', 'online', 'manager']);
+    expect(loaded.fromFiles).toEqual(['owner', 'salon', 'online', 'manager', 'legal']);
     expect(loaded.problems).toEqual([]);
 
     const finance = source.profile('finance');
@@ -93,9 +93,12 @@ describe('the profile source', () => {
     expect(state.problems).toHaveLength(1); // the same problem is not repeated on every read
   });
 
-  it('never lets the salon or the online store read across the wall, or the manager read the finance metrics', () => {
+  it('never lets the salon or the online store read across the wall, the manager read the finance metrics, or the Legal Team read any business data', () => {
     const walls: [AssistantId, string][] = [
       ['salon', 'get_online_metrics'], ['salon', 'get_finance_metrics'], ['online', 'get_salon_metrics'], ['online', 'get_finance_metrics'], ['manager', 'get_finance_metrics'],
+      // The Legal Team reads no money, salon, online or shared data: only tools that return none (its stored profile is refused otherwise).
+      ['legal', 'get_finance_metrics'], ['legal', 'get_online_metrics'], ['legal', 'get_salon_metrics'], ['legal', 'get_company_overview'],
+      ['legal', 'list_work_reports'], ['legal', 'recall_decisions'], ['legal', 'list_lessons'], ['legal', 'get_repair_tickets'], ['legal', 'get_waiting_conversations'],
     ];
     for (const [id, name] of walls) {
       const parsed = parseProfileRows([rowFor(id, { reads: [...files[id].reads, name] })], READ_TOOL_NAMES);
@@ -103,6 +106,8 @@ describe('the profile source', () => {
       expect(parsed.problems[0], `${id} ${name}`).toContain(`may never read "${name}"`);
     }
     expect(parseProfileRows([rowFor('owner', { reads: [...files.owner.reads] })], READ_TOOL_NAMES).rows.size).toBe(1);
+    // A stored Legal Team profile that reads only what has no business data is used, and one tool of that kind more is fine.
+    expect(parseProfileRows([rowFor('legal'), rowFor('legal', { reads: [...files.legal.reads, 'get_timeline'] })], READ_TOOL_NAMES)).toMatchObject({ problems: [] });
   });
 
   it('accepts the rows exactly as pg and supabase-js hand them over (a Date or a string for the time)', () => {

@@ -87,6 +87,18 @@ describe('every migration, in order, on an empty database', () => {
     }
   });
 
+  it('makes the Legal Team a real assistant with no phone number, so its door token, its profile and its reports have a row to point at', async ({ skip }) => {
+    if (!name || failed) skip();
+    const values = await scratch!.query(`select unnest(enum_range(null::public.assistant_id))::text as v`);
+    expect(values.rows.map((r) => r.v)).toContain('legal');
+    const row = await scratch!.query(`select display_name, sms_from from public.assistants where id = 'legal'`);
+    expect(row.rows).toEqual([{ display_name: 'Legal Team', sms_from: null }]);
+    // The new value is usable where the others are: a door token, a profile and a session report can be made for it.
+    const token = await scratch!.query(`insert into public.door_tokens (assistant_id, token_hash, label) values ('legal', repeat('a', 64), 'migration test') returning id`);
+    await scratch!.query(`insert into public.session_reports (token_id, assistant_id, tool, summary) values ($1, 'legal', 'claude-code', 'Read a vendor agreement.')`, [token.rows[0].id]);
+    expect((await scratch!.query(`select count(*)::int as n from public.session_reports where assistant_id = 'legal'`)).rows[0].n).toBe(1);
+  });
+
   it('lets anon run exactly the two doors, and takes every approval action any lane added', async ({ skip }) => {
     if (!name || failed) skip();
     const callable = await scratch!.query(`select proname from pg_proc where pronamespace = 'public'::regnamespace and has_function_privilege('anon', oid, 'execute') order by proname`);

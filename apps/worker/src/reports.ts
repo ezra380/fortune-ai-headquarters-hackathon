@@ -11,7 +11,7 @@ import { WorkReport, isRowId, rowIdsIn, type AssistantId, type Receipt, type Sug
 const SLOW_STEP_MS = 60_000;
 /** A department's plan writer: finance.plans, salon.plans, online.plans. */
 const PLAN_STEP = /^(finance|salon|online)\.plans$/;
-const ORDER: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
+const ORDER: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager', 'legal'];
 
 function clip(text: string, max: number): string {
   const t = text.replace(/\s+/g, ' ').trim();

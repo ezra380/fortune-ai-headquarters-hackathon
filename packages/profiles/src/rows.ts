@@ -64,11 +64,13 @@ export const MONEY_READS: readonly ReadToolName[] = ['get_finance_metrics', 'get
 
 /**
  * What an assistant may never read, from the scopes: the salon and the online store stay separate businesses (neither
- * reads the other's data or both), and the manager reads no money. A name with no scope is walled.
+ * reads the other's data or both), the manager reads no money, and the Legal Team reads no business data at all (only
+ * tools whose scope is none). A name with no scope is walled.
  */
 function walled(assistant: AssistantId, name: string): boolean {
   const scope = Object.hasOwn(READ_SCOPE, name) ? READ_SCOPE[name as ReadToolName] : undefined;
   if (assistant === 'salon' || assistant === 'online') return scope !== assistant && scope !== 'none';
+  if (assistant === 'legal') return scope !== 'none';
   return assistant === 'manager' && (MONEY_READS as readonly string[]).includes(name);
 }
 

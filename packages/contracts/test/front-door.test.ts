@@ -22,7 +22,7 @@ describe('FrontDoorDecision', () => {
     }
   });
 
-  it.each(['owner', 'finance', 'salon', 'online', 'manager'])('accepts the target %s', (targetAssistant) => {
+  it.each(['owner', 'finance', 'salon', 'online', 'manager', 'legal'])('accepts the target %s', (targetAssistant) => {
     expect(FrontDoorDecision.safeParse(decision({ targetAssistant })).success).toBe(true);
   });
 

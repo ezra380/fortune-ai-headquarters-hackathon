@@ -1,7 +1,7 @@
 // Makes a door token for one assistant: the secret an outside AI tool presents to read that assistant's profile and
 // file its end-of-work report. Only the token's SHA-256 goes into the database. The token itself is written to
 // .local/door-tokens/<assistant>.token (readable by you only) and the script prints that path and nothing else.
-//   npx tsx scripts/issue-door-token.ts <owner|finance|salon|online|manager> [label] [--replace] [--db <url>]
+//   npx tsx scripts/issue-door-token.ts <owner|finance|salon|online|manager|legal> [label] [--replace] [--db <url>]
 //   --replace   overwrite an existing token file (the old token stays valid until its row is revoked:
 //               update public.door_tokens set revoked_at = now() where id = '<id>')
 //   --db <url>  the Postgres to write to. Default: SUPABASE_DB_URL, else the local stack (127.0.0.1:54322).

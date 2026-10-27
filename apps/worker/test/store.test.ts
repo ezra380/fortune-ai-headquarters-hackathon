@@ -131,7 +131,7 @@ describe.skipIf(!api)('store: reports, reviews, recommendations (real local data
     const before = await store.openItems(new Date());
     const task = await newTask('online', 'queued');
     const after = await store.openItems(new Date());
-    expect(after.map((r) => r.assistant)).toEqual(['owner', 'finance', 'salon', 'online', 'manager']);
+    expect(after.map((r) => r.assistant)).toEqual(['owner', 'finance', 'salon', 'online', 'manager', 'legal']);
     expect(after.find((r) => r.assistant === 'online')!.openTasks).toBe(before.find((r) => r.assistant === 'online')!.openTasks + 1);
     expect(JSON.stringify(after)).not.toMatch(/code|hash|\d{6}/i);
     await pool.query(`update public.tasks set status = 'cancelled' where id = $1`, [task]);

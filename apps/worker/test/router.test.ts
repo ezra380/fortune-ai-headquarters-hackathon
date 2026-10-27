@@ -27,6 +27,11 @@ describe('the front door prompt', () => {
     expect(ROUTER_SYSTEM).toContain("manager: how the assistants are working: their reports, usage and lessons");
   });
 
+  it('sends terms, contracts and policies to the Legal Team, and lets the router name it', () => {
+    expect(ROUTER_SYSTEM).toContain("legal: terms and conditions, contracts and vendor agreements, and the company's own policies (returns, privacy, consent): what to watch for and what to ask for");
+    expect(ROUTER_SYSTEM).toContain('"targetAssistant":"owner"|"finance"|"salon"|"online"|"manager"|"legal"');
+  });
+
   it('tells plans from questions, with the explain-why example as a question', () => {
     expect(ROUTER_SYSTEM).toContain('plans: asks for plans, ideas or proposals to act on');
     expect(ROUTER_SYSTEM).toContain('question: asks for facts or an explanation ("why did you propose plan 2?" is a question)');

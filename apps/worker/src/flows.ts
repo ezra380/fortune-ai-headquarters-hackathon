@@ -88,8 +88,9 @@ async function ownerText(
   person: PersonRow, body: string, decision: FrontDoorDecision, task: TaskRow, deps: WorkerDeps, runId: string, started: Date,
 ): Promise<Outcome> {
   const target = decision.targetAssistant;
-  if (decision.intent === 'plans') return startRound(person, body, target, task, deps, runId, started);
-  const label = target === 'owner' ? undefined : target === 'manager' ? 'Manager' : DEPARTMENT_LABEL[target];
+  // The Legal Team plans nothing: a request routed to it is a question for it, never a round for the departments.
+  if (decision.intent === 'plans' && target !== 'legal') return startRound(person, body, target, task, deps, runId, started);
+  const label = target === 'owner' ? undefined : target === 'manager' ? 'Manager' : target === 'legal' ? 'Legal Team' : DEPARTMENT_LABEL[target];
   return askQuestion(person, target, body, task, deps, runId, label);
 }
 

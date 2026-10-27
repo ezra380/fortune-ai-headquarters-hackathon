@@ -464,9 +464,9 @@ describe('profile writes (a throwaway database built from the real migration fil
         create schema extensions;
         create extension pgcrypto with schema extensions;
         alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
+        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager', 'legal');
         create table public.assistants (id public.assistant_id primary key);
-        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
+        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager'), ('legal');`);
       await runMigrations(scratch);
     } catch (error) {
       console.warn(`SKIPPED the profile write tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
@@ -618,9 +618,9 @@ describe('seeding profiles (a second throwaway database)', () => {
         create schema extensions;
         create extension pgcrypto with schema extensions;
         alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
+        create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager', 'legal');
         create table public.assistants (id public.assistant_id primary key);
-        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
+        insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager'), ('legal');`);
       await runMigrations(scratch);
     } catch (error) {
       console.warn(`SKIPPED the seed tests: could not build a scratch database (${error instanceof Error ? error.message : 'unknown'})`);
