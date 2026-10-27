@@ -41,11 +41,14 @@ const text = (r: unknown) => ((r as { content: { text: string }[] }).content[0]?
 describe('profile doors (plain tools)', () => {
   it('offers each profile only the tools it may read', async () => {
     const expected: Record<AssistantId, string[]> = {
-      owner: ['get_finance_metrics', 'get_timeline', 'recall_decisions'],
-      finance: ['get_finance_metrics', 'recall_my_decisions'],
-      online: ['get_online_metrics', 'recall_my_decisions'],
-      salon: ['recall_my_decisions'], // its salon numbers are served inside the worker only
-      manager: ['get_timeline', 'recall_decisions'],
+      owner: [
+        'get_budget_room', 'get_company_overview', 'get_finance_metrics', 'get_metric_series', 'get_repair_tickets', 'get_supplier_invoices', 'get_timeline',
+        'get_waiting_conversations', 'recall_decisions',
+      ],
+      finance: ['get_budget_room', 'get_finance_metrics', 'get_metric_series', 'get_supplier_invoices', 'recall_my_decisions'],
+      online: ['get_low_stock_interest', 'get_metric_series', 'get_online_metrics', 'get_waiting_conversations', 'recall_my_decisions'],
+      salon: ['get_metric_series', 'get_repair_tickets', 'get_salon_metrics', 'recall_my_decisions'],
+      manager: ['get_data_quality', 'get_timeline', 'recall_decisions'],
     };
     for (const id of AssistantId.options) {
       const client = await connect(createBrainMcpServer(makeDeps().deps, id));
@@ -71,8 +74,50 @@ describe('profile doors (plain tools)', () => {
 
   it('defaults to the owner door', async () => {
     const client = await connect(createBrainMcpServer(makeDeps().deps));
-    expect(await toolNames(client)).toEqual(['get_finance_metrics', 'get_timeline', 'recall_decisions']);
+    expect(await toolNames(client)).toEqual(await toolNames(await connect(createBrainMcpServer(makeDeps().deps, 'owner'))));
+    expect(await toolNames(client)).toContain('get_company_overview');
     await client.close();
+  });
+
+  it('gives the salon door salon numbers only', async () => {
+    const client = await connect(createBrainMcpServer(makeDeps().deps, 'salon'));
+    const r = JSON.parse(text(await client.callTool({ name: 'get_salon_metrics', arguments: { period: '2026-09' } }))) as { metrics: { id: string; business: string }[] };
+    expect(r.metrics.map((m) => m.id)).toEqual(['m:salon.revenue.wash_set']);
+    await client.close();
+  });
+
+  it('serves the division data from a version 2 port: side by side, rows with their totals, a series only of its own ids', async () => {
+    const hq = [metric('m:salon.revenue.total', 'salon', 9000), metric('m:online.revenue.total', 'online', 15000), metric('m:salon.dq.rejected_repairs', 'salon', 1)];
+    const asked: unknown[] = [];
+    const data: DataPort = {
+      ...makeDeps().deps.data!, periods: PERIOD_KEYS,
+      catalog: [{ id: 'm:salon.revenue.total', label: 'x', unit: 'usd', business: 'salon', divisions: ['salon', 'finance', 'hq'] }],
+      getDivisionMetrics: async ({ division }) => ({ division, metrics: hq, attention: [], queryHash: source.queryHash, view: `fortune_demo_v2_${division}_mart` }),
+      readRows: async ({ asOf: _a, ...read }) => { asked.push(read); return { table: read.table, rows: Array.from({ length: 30 }, (_, i) => ({ n: i })), totals: { count: 30 }, dataDate: '2026-10-26', queryHash: source.queryHash, view: 'v' }; },
+      getMetricSeries: async (q) => { asked.push(q.division); return { metricId: q.metricId, label: 'x', unit: 'usd', business: 'salon', points: [], stats: { min: 0, max: 0, mean12: null }, queryHash: source.queryHash, view: 'v' }; },
+    };
+    const owner = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'owner'));
+    const overview = JSON.parse(text(await owner.callTool({ name: 'get_company_overview', arguments: { period: '2026-10-mtd' } }))) as Record<string, { id: string }[]> & { normal: boolean };
+    expect(overview.salon!.map((m) => m.id)).toEqual(['m:salon.revenue.total', 'm:salon.dq.rejected_repairs']);
+    expect(overview.online!.map((m) => m.id)).toEqual(['m:online.revenue.total']);
+    expect(overview.normal).toBe(true);
+    const tickets = JSON.parse(text(await owner.callTool({ name: 'get_repair_tickets', arguments: { status: 'late', limit: 5 } }))) as { rows: unknown[]; totals: { count: number } };
+    expect(tickets.rows).toHaveLength(5);
+    expect(tickets.totals.count).toBe(30);
+    await owner.callTool({ name: 'get_metric_series', arguments: { metricId: 'm:salon.revenue.total' } });
+    expect(asked).toEqual([{ table: 'repairs', status: 'late' }, 'finance']);
+    await owner.close();
+    const online = await connect(createBrainMcpServer({ ...makeDeps().deps, data }, 'online'));
+    const refused = await online.callTool({ name: 'get_metric_series', arguments: { metricId: 'm:salon.revenue.total' } });
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain('not one of the metrics your division reads');
+    await online.close();
+    // A version 1 port has no division reads: a plain refusal, never a guess.
+    const v1 = await connect(createBrainMcpServer(makeDeps().deps, 'finance'));
+    const budget = await v1.callTool({ name: 'get_budget_room', arguments: { period: '2026-09' } });
+    expect(budget.isError).toBe(true);
+    expect(text(budget)).toContain('no finance division read (it needs data version 2)');
+    await v1.close();
   });
 
   it('serves the profile skill as the `skill` prompt on every door', async () => {
