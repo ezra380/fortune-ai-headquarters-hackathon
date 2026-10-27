@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { AssistantId, Receipt } from '@fahq/contracts';
+import type { AssistantId, ManagerReview, Receipt, Recommendation, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
 // happen once goes through a unique key (dedupe_key, idempotency_key) or a conditional update.
@@ -34,6 +34,53 @@ export type OutboxRow = {
   status: string;
   attempts: number;
 };
+
+export type WorkReportRow = {
+  id: string;
+  task_id: string;
+  run_id: string;
+  assistant_id: AssistantId;
+  task_kind: string;
+  outcome: 'done' | 'failed' | 'retrying';
+  summary: string;
+  steps: WorkStep[];
+  usage: WorkReport['usage'];
+  suggestions: Suggestion[];
+  input_tokens: number;
+  output_tokens: number;
+  model_calls: number;
+  started_at: string;
+  ended_at: string;
+};
+export type ReviewRow = {
+  id: string;
+  review_key: string;
+  task_id: string | null;
+  covers_from: string;
+  covers_to: string;
+  report_count: number;
+  review: ManagerReview;
+  digest: Record<string, unknown>;
+  model: string | null;
+  message_id: string | null;
+  created_at: string;
+};
+export type RecommendationRow = {
+  id: string;
+  review_id: string;
+  rank: number;
+  assistant_id: AssistantId;
+  change: string;
+  why: string;
+  status: 'proposed' | 'adopted' | 'expired';
+};
+export type AdoptedRow = { recommendation_id: string; rank: number; assistant_id: AssistantId; change: string; newly_adopted: boolean };
+export type AdoptedLesson = { id: string; review_id: string; assistant_id: AssistantId; change: string; decided_at: string };
+export type OpenItems = { assistant: AssistantId; openTasks: number; pendingApprovals: number };
+export type LatestProposal = { id: string; createdAt: string; titles: string[]; citedMetricIds: string[]; decided: boolean };
+export type ApprovalAction = 'forward_plan' | 'decide_plan' | 'adopt_change';
+
+const ASSISTANTS: readonly AssistantId[] = ['owner', 'finance', 'salon', 'online', 'manager'];
 
 type Result<T> = { data: T | null; error: { message: string; code?: string } | null };
 
@@ -108,12 +155,12 @@ export function createStore(url: string, serviceKey: string) {
      * person already has stays valid.
      */
     async issueApproval(a: {
-      messageId: string; personId: string; action: 'forward_plan' | 'decide_plan'; code: string;
-      from: AssistantId; smsBody: string; smsDedupeKey: string; now: Date;
+      messageId: string; personId: string; action: ApprovalAction; code: string;
+      from: AssistantId; smsBody: string; smsDedupeKey: string; now: Date; ttlMinutes?: number;
     }): Promise<{ created: boolean }> {
       const rows = must(await db.rpc('issue_approval', {
         p_message_id: a.messageId, p_person_id: a.personId, p_action: a.action, p_code: a.code,
-        p_from_assistant: a.from, p_sms_body: a.smsBody, p_sms_dedupe_key: a.smsDedupeKey, p_ttl_minutes: 15, p_now: a.now.toISOString(),
+        p_from_assistant: a.from, p_sms_body: a.smsBody, p_sms_dedupe_key: a.smsDedupeKey, p_ttl_minutes: a.ttlMinutes ?? 15, p_now: a.now.toISOString(),
       }), 'issue approval') as { approval_id: string | null; created: boolean }[];
       return { created: rows[0]?.created === true };
     },
@@ -122,13 +169,13 @@ export function createStore(url: string, serviceKey: string) {
      * outcome back (replay = true), so a retried task resumes instead of losing the approval.
      */
     async useApprovalCode(a: {
-      phone: string; code: string; verdict: 'signed' | 'declined'; action: 'forward_plan' | 'decide_plan';
+      phone: string; code: string; verdict: 'signed' | 'declined'; action: ApprovalAction;
       taskId: string; detail: Record<string, unknown>; now: Date;
     }) {
       const rows = must(await db.rpc('use_approval_code', {
         p_phone: a.phone, p_code: a.code, p_verdict: a.verdict, p_action: a.action, p_task_id: a.taskId, p_detail: a.detail, p_now: a.now.toISOString(),
       }), 'use approval code') as
-        { approval_id: string | null; message_id: string | null; action: 'forward_plan' | 'decide_plan' | null; outcome: string; replay: boolean; approver_person_id: string | null }[];
+        { approval_id: string | null; message_id: string | null; action: ApprovalAction | null; outcome: string; replay: boolean; approver_person_id: string | null }[];
       return rows[0] ?? { approval_id: null, message_id: null, action: null, outcome: 'refused', replay: false, approver_person_id: null };
     },
     async addOutbox(o: { channel: 'sms' | 'print'; toPersonId: string; from: AssistantId; body: string; attachmentRef: string | null; dedupeKey: string }) {
@@ -168,7 +215,95 @@ export function createStore(url: string, serviceKey: string) {
         run_id: r.runId, task_id: r.taskId, step: r.step, assistant_id: r.assistantId, live: r.live,
         model: r.model, data_source: r.dataSource, started_at: r.startedAt, ended_at: r.endedAt,
         cost_usd: r.costUsd, outcome: r.outcome, detail: r.detail,
+        input_tokens: r.inputTokens ?? null, output_tokens: r.outputTokens ?? null,
       }), 'receipt');
+    },
+
+    // ---- The HQ Manager: reports, reviews, recommendations, lessons ------------------------------
+
+    /** One report per task (unique on task_id): a retried task overwrites its report, the latest attempt wins. */
+    async saveWorkReport(report: WorkReport) {
+      must(await db.from('work_reports').upsert({
+        task_id: report.taskId, run_id: report.runId, assistant_id: report.assistant, task_kind: report.taskKind,
+        outcome: report.outcome, summary: report.summary, steps: report.steps, usage: report.usage, suggestions: report.suggestions,
+        input_tokens: report.usage.inputTokens, output_tokens: report.usage.outputTokens, model_calls: report.usage.modelCalls,
+        started_at: report.startedAt, ended_at: report.endedAt, updated_at: report.endedAt,
+      }, { onConflict: 'task_id' }), 'save work report');
+    },
+    async workReports(q: { since: Date; assistant?: AssistantId; limit?: number }): Promise<WorkReportRow[]> {
+      let query = db.from('work_reports').select('*').gte('ended_at', q.since.toISOString());
+      if (q.assistant) query = query.eq('assistant_id', q.assistant);
+      return must(await query.order('ended_at', { ascending: false }).limit(Math.min(Math.max(q.limit ?? 200, 1), 200)), 'work reports') as WorkReportRow[];
+    },
+    /** Inserts the review once per key (a retried task finds its own review again) and reads it back. */
+    async saveManagerReview(r: {
+      key: string; taskId: string | null; coversFrom: Date; coversTo: Date; reportCount: number;
+      review: ManagerReview; digest: unknown; model: string;
+    }): Promise<ReviewRow> {
+      // The table keeps the digest as a JSON object; a script that returned a list or a number is wrapped.
+      const digest = r.digest !== null && typeof r.digest === 'object' && !Array.isArray(r.digest) ? r.digest : { result: r.digest ?? null };
+      must(await db.from('manager_reviews').upsert({
+        review_key: r.key, task_id: r.taskId, covers_from: r.coversFrom.toISOString(), covers_to: r.coversTo.toISOString(),
+        report_count: r.reportCount, review: r.review, digest, model: r.model.slice(0, 120),
+      }, { onConflict: 'review_key', ignoreDuplicates: true }), 'save review');
+      return must(await db.from('manager_reviews').select('*').eq('review_key', r.key).single(), 'read review') as ReviewRow;
+    },
+    async setReviewMessage(reviewId: string, messageId: string) {
+      must(await db.from('manager_reviews').update({ message_id: messageId }).eq('id', reviewId), 'review message');
+    },
+    async saveRecommendations(reviewId: string, recs: readonly Recommendation[]): Promise<RecommendationRow[]> {
+      if (recs.length > 0) {
+        must(await db.from('recommendations').upsert(
+          recs.map((x) => ({ review_id: reviewId, rank: x.rank, assistant_id: x.assistant, change: x.change, why: x.why })),
+          { onConflict: 'review_id,rank', ignoreDuplicates: true },
+        ), 'save recommendations');
+      }
+      return must(await db.from('recommendations').select('*').eq('review_id', reviewId).order('rank'), 'read recommendations') as RecommendationRow[];
+    },
+    /** Adopts the listed ranks that are still proposed; ranks already adopted come back with newly_adopted false. */
+    async adoptRecommendations(reviewId: string, ranks: readonly number[], personId: string, now: Date): Promise<AdoptedRow[]> {
+      return must(await db.rpc('adopt_recommendations', {
+        p_review_id: reviewId, p_ranks: [...ranks], p_person_id: personId, p_now: now.toISOString(),
+      }), 'adopt recommendations') as AdoptedRow[];
+    },
+    /** Adopted recommendations, newest first. */
+    async adoptedLessons(assistant?: AssistantId, limit = 20): Promise<AdoptedLesson[]> {
+      let query = db.from('recommendations').select('id, review_id, assistant_id, change, decided_at').eq('status', 'adopted');
+      if (assistant) query = query.eq('assistant_id', assistant);
+      return must(await query.order('decided_at', { ascending: false }).limit(Math.min(Math.max(limit, 1), 200)), 'adopted lessons') as AdoptedLesson[];
+    },
+    /** Open work per assistant. Counts only: never a code, a hash or a message body. */
+    async openItems(now: Date): Promise<OpenItems[]> {
+      const people = must(await db.from('people').select('id, assistant_id'), 'people') as { id: string; assistant_id: AssistantId }[];
+      const out: OpenItems[] = [];
+      for (const assistant of ASSISTANTS) {
+        const tasks = await db.from('tasks').select('id', { count: 'exact', head: true }).eq('assistant_id', assistant).in('status', ['queued', 'running', 'waiting']);
+        if (tasks.error) throw new Error(`count tasks failed (${tasks.error.code ?? 'db'})`);
+        const ids = people.filter((p) => p.assistant_id === assistant).map((p) => p.id);
+        let pending = 0;
+        if (ids.length > 0) {
+          const approvals = await db.from('approvals').select('id', { count: 'exact', head: true }).in('approver_person_id', ids).eq('status', 'pending').gt('expires_at', now.toISOString());
+          if (approvals.error) throw new Error(`count approvals failed (${approvals.error.code ?? 'db'})`);
+          pending = approvals.count ?? 0;
+        }
+        out.push({ assistant, openTasks: tasks.count ?? 0, pendingApprovals: pending });
+      }
+      return out;
+    },
+    /** The newest proposal in the mailbox: its short id, plan titles, cited metric ids, and whether anyone decided on it. */
+    async latestProposal(): Promise<LatestProposal | null> {
+      const row = must(await db.from('assistant_messages').select('id, created_at, body').eq('kind', 'proposal').order('created_at', { ascending: false }).limit(1).maybeSingle(), 'latest proposal') as
+        { id: string; created_at: string; body: { plans?: { plans?: { title?: string }[] }; metrics?: { id?: string }[] } } | null;
+      if (!row) return null;
+      const decisions = await db.from('assistant_messages').select('id', { count: 'exact', head: true }).eq('kind', 'decision').eq('body->>proposalId', row.id);
+      if (decisions.error) throw new Error(`count decisions failed (${decisions.error.code ?? 'db'})`);
+      return {
+        id: row.id.slice(0, 8),
+        createdAt: new Date(row.created_at).toISOString(),
+        titles: (row.body.plans?.plans ?? []).map((p) => String(p.title ?? '')).filter(Boolean),
+        citedMetricIds: (row.body.metrics ?? []).map((m) => String(m.id ?? '')).filter(Boolean),
+        decided: (decisions.count ?? 0) > 0,
+      };
     },
   };
 }
