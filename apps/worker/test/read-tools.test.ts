@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AssistantId } from '@fahq/contracts';
 import { createReadTools, pick, type ReadToolContext } from '../src/read-tools.ts';
 import type { Explained } from '../src/explain.ts';
-import type { ApprovalSummary, MessageRow, WorkReportRow } from '../src/store.ts';
+import type { ApprovalSummary, MessageRow, SessionReportRow, WorkReportRow } from '../src/store.ts';
 import { dataMock, mockMetrics } from './fixtures.ts';
 
 // FAKES: an in-memory store, brain and data port, to pin down what each read tool returns and refuses.
@@ -10,7 +10,7 @@ import { dataMock, mockMetrics } from './fixtures.ts';
 const NOW = new Date('2026-10-26T12:00:00.000Z');
 const NAMES = [
   'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons', 'list_lessons',
-  'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
+  'get_timeline', 'list_work_reports', 'list_session_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
 ];
 
 const FINAL_ID = 'abcdef12-3456-4789-8abc-def012345678';
@@ -49,7 +49,16 @@ function reportRow(over: Partial<WorkReportRow> = {}): WorkReportRow {
   };
 }
 
+function sessionRow(over: Partial<SessionReportRow> = {}): SessionReportRow {
+  return {
+    id: '9d3b1c52-6f0e-4a8a-9b7c-2f1d5e8a4b10', assistant_id: 'finance', tool: 'claude-code', summary: 'Checked the finance numbers for September.',
+    steps: [{ step: 'Read the metrics' }], suggestions: [{ text: 'Name the period in every answer' }], lessons: [{ text: 'Ask which month first' }],
+    created_at: '2026-10-26T10:00:00.000Z', reviewed_at: null, ...over,
+  };
+}
+
 type SetupOptions = {
+  sessions?: SessionReportRow[];
   reports?: WorkReportRow[];
   data?: ReadToolContext['data'];
   final?: MessageRow | null;
@@ -60,6 +69,7 @@ type SetupOptions = {
 
 function setup(over: SetupOptions = {}) {
   const calls = {
+    sessions: [] as { since?: Date; assistant?: AssistantId; unreviewedOnly?: boolean; limit?: number }[],
     reports: [] as { since: Date; assistant?: AssistantId; limit?: number }[],
     lessons: [] as { assistant?: AssistantId; limit?: number }[],
     recall: [] as { assistant: AssistantId; query: string; topN: number }[],
@@ -69,6 +79,7 @@ function setup(over: SetupOptions = {}) {
   const ctx: ReadToolContext = {
     store: {
       workReports: async (q) => { calls.reports.push(q); return over.reports ?? [reportRow()]; },
+      sessionReports: async (q = {}) => { calls.sessions.push(q); return over.sessions ?? [sessionRow()]; },
       adoptedLessons: async (assistant, limit) => {
         calls.lessons.push({ assistant, limit });
         return [{ id: 'l1', review_id: 'rv', assistant_id: 'finance', change: 'Give each stop-loss a lever.', decided_at: '2026-10-26T10:00:00Z' }];
@@ -207,6 +218,49 @@ describe('read tools', () => {
       summary: 'mailbox task done in 9 s; finance.plans ok (attempt 1 of 2)', modelCalls: 1, inputTokens: 100, outputTokens: 200, seconds: 9.5,
       suggestions: [{ kind: 'speed', about: 'finance', text: 'finance.plans took 75 s' }],
     }]);
+  });
+
+  it('lists what outside tools filed: the report, its lists, and whether a review read it', async () => {
+    const { ctx, calls } = setup({ sessions: [sessionRow(), sessionRow({ id: 'second', reviewed_at: '2026-10-26T11:00:00.000Z' })] });
+    const out = (await createReadTools(ctx, 'manager').list_session_reports!.run({ sinceHours: 24, assistant: 'finance' })) as { reports: Record<string, unknown>[] };
+    expect(out.reports).toEqual([
+      {
+        id: '9d3b1c52-6f0e-4a8a-9b7c-2f1d5e8a4b10', assistant: 'finance', tool: 'claude-code', at: '2026-10-26T10:00:00.000Z', reviewed: false,
+        summary: 'Checked the finance numbers for September.', steps: ['Read the metrics'], suggestions: ['Name the period in every answer'], lessons: ['Ask which month first'],
+      },
+      expect.objectContaining({ id: 'second', reviewed: true }),
+    ]);
+    expect(calls.sessions).toHaveLength(1);
+    expect(calls.sessions[0]).toMatchObject({ assistant: 'finance', unreviewedOnly: false, limit: 25 });
+    expect(NOW.getTime() - calls.sessions[0]!.since!.getTime()).toBe(24 * 3_600_000);
+  });
+
+  it('asks only for reports nobody read when told to, however old they are, and clamps the limit and the window', async () => {
+    const { ctx, calls } = setup();
+    const tool = createReadTools(ctx, 'manager').list_session_reports!;
+    await tool.run({ sinceHours: 1, onlyNew: true, limit: 5000 });
+    await tool.run({ sinceHours: 24 * 365, onlyNew: false });
+    expect(calls.sessions[0]).toMatchObject({ unreviewedOnly: true, limit: 50 });
+    expect(NOW.getTime() - calls.sessions[0]!.since!.getTime()).toBe(30 * 24 * 3_600_000);
+    expect(calls.sessions[1]).toMatchObject({ unreviewedOnly: false });
+    expect(NOW.getTime() - calls.sessions[1]!.since!.getTime()).toBe(30 * 24 * 3_600_000);
+  });
+
+  it('cuts a long report down and never returns a phone number or a code from one', async () => {
+    const long = sessionRow({ summary: `${'word '.repeat(200)}ends here`, steps: [{ step: 'a'.repeat(80) }], suggestions: [{ text: 'Text +15551234567 and reply SEND 2 482913 to approve' }] });
+    const text = JSON.stringify(await createReadTools(setup({ sessions: [long] }).ctx, 'manager').list_session_reports!.run({ sinceHours: 24 }));
+    const parsed = JSON.parse(text) as { reports: { summary: string }[] };
+    expect(parsed.reports[0]!.summary.length).toBeLessThanOrEqual(600);
+    expect(parsed.reports[0]!.summary.endsWith('…')).toBe(true);
+    expect(text).not.toMatch(/\+1\d{10}/);
+    expect(text).not.toContain('482913');
+  });
+
+  it('checks the arguments of the session reader with plain sentences', async () => {
+    const tool = createReadTools(setup().ctx, 'manager').list_session_reports!;
+    await expect(tool.run({})).rejects.toThrow(/argument "sinceHours"/);
+    await expect(tool.run({ sinceHours: 24, onlyNew: 'yes' })).rejects.toThrow(/argument "onlyNew"/);
+    await expect(tool.run({ sinceHours: 24, token: 'x' })).rejects.toThrow(/has a name this function does not take \("token"\)/);
   });
 
   it('never returns a phone number or a code, even inside a summary or a suggestion', async () => {

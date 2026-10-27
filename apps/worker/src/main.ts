@@ -39,13 +39,14 @@ const store = createStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 // How many claim loops run in this one process. claim_task skips rows another loop holds, outbox claims are
 // atomic, the World Model queues its writes and H-MEM writes are synchronous, so loops never share a task.
 const concurrency = positiveInt(env, 'WORKER_CONCURRENCY', 2);
+const brain = await openBrain({
+  meterlessDir: path.resolve(root, env.METERLESS_DIR ?? '.local/meterless'),
+  dataDir: path.join(root, '.local/brain'),
+  actor: `worker@${os.hostname()}`,
+});
 const deps: WorkerDeps = {
   store,
-  brain: await openBrain({
-    meterlessDir: path.resolve(root, env.METERLESS_DIR ?? '.local/meterless'),
-    dataDir: path.join(root, '.local/brain'),
-    actor: `worker@${os.hostname()}`,
-  }),
+  brain,
   models: { nvidia: models.nvidia, planModel: models.planModel, routerModel: models.routerModel },
   // The safety screen in front of every free text; GUARD=off turns it off.
   guard: models.guard ? { model: models.guardModel } : null,
@@ -55,7 +56,8 @@ const deps: WorkerDeps = {
   // Reasoning on before each script: in live runs it read the right metrics more often, at about 35 s a
   // question instead of 10 (docs/research/codemode-savings-summary-2026-10-27.md). CODE_THINKING=off turns it off.
   codeMode: createCodeModeRunner({ model: models.nvidia, thinking: env.CODE_THINKING !== 'off' }),
-  profiles: await workerProfiles(env, store, () => new Date()),
+  // The lessons in these profiles are copied into this machine's H-MEM, which the plan writers read.
+  profiles: await workerProfiles(env, store, () => new Date(), console.error, brain),
   now: () => new Date(),
   worker: `worker@${os.hostname()}:${process.pid}`,
   live: true,

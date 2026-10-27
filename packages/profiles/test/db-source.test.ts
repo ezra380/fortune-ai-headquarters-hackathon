@@ -176,6 +176,43 @@ describe('the profile source', () => {
   });
 });
 
+describe('a listener on every read', () => {
+  function withListener(rows: unknown[], onLoaded: (p: Readonly<Record<AssistantId, { lessons: readonly unknown[]; source: string }>>) => void) {
+    const state = { problems: [] as string[], t: Date.parse('2026-10-27T12:00:00Z') };
+    const source = createProfileSource({
+      env: {}, load: async () => rows, now: () => new Date(state.t), onProblem: (m) => state.problems.push(m), onLoaded,
+    });
+    return { source, state };
+  }
+
+  it('hears the profiles after each read, with the lessons of the stored rows', async () => {
+    const seen: { finance: unknown[]; source: string }[] = [];
+    const { source, state } = withListener([rowFor('finance', { lessons: [lesson] })], (p) => seen.push({ finance: [...p.finance.lessons], source: p.finance.source }));
+    await source.refresh();
+    expect(seen).toEqual([{ finance: [lesson], source: 'database' }]);
+    state.t += 61_000;
+    await source.refresh();
+    expect(seen).toHaveLength(2); // a read inside the minute is served from the cache and the listener hears nothing
+    await source.refresh();
+    expect(seen).toHaveLength(2);
+  });
+
+  it('is reported and never stops the read when it throws', async () => {
+    const { source, state } = withListener([rowFor('finance')], () => { throw new Error('the cache is full'); });
+    const loaded = await source.refresh();
+    expect(loaded.fromDatabase).toEqual(['finance']);
+    expect(source.profile('finance').source).toBe('database');
+    expect(state.problems).toEqual(['a profile listener failed (the cache is full)']);
+  });
+
+  it('hears nothing when the rows cannot be read', async () => {
+    let heard = 0;
+    const source = createProfileSource({ env: {}, load: async () => { throw new Error('down'); }, now: () => new Date(), onProblem: () => undefined, onLoaded: () => { heard += 1; } });
+    await expect(source.refresh()).rejects.toThrow('the stored profiles could not be read (down)');
+    expect(heard).toBe(0);
+  });
+});
+
 describe('skillWithLessons', () => {
   it('is the skill itself when there are no lessons', () => {
     expect(skillWithLessons(files.finance)).toBe(files.finance.skill);

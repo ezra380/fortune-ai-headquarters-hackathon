@@ -20,8 +20,10 @@ export type WorkerDeps = {
   /** Each assistant's skill text, the model for each of its jobs, and the read tools it may use. */
   profiles: {
     skill(id: AssistantId): string;
-    model(id: AssistantId, job: 'code' | 'answer' | 'review'): string;
+    model(id: AssistantId, job: 'route' | 'code' | 'answer' | 'plan' | 'review'): string;
     reads(id: AssistantId): readonly string[];
+    /** Reads the stored profiles again now (a change was just written), so the next prompt carries it. Absent on the files. */
+    refresh?(): Promise<void>;
   };
   now: () => Date;
   /** Names the claim loop that holds a task (runConcurrently adds `#<n>` for each loop). */

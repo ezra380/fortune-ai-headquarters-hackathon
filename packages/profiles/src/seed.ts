@@ -1,4 +1,5 @@
 import { AssistantId } from '@fahq/contracts';
+import { managerNotes, withManagerNotes } from './changes.ts';
 import type { AssistantProfile } from './index.ts';
 
 // Puts the five file profiles into public.assistant_profiles, through public.save_assistant_profile (which
@@ -7,7 +8,8 @@ import type { AssistantProfile } from './index.ts';
 //  - an assistant that already has a row is left exactly as it is, even if the files have changed since
 //    (the HQ Manager or the owner may have changed it on purpose) -- the result says whether it differs;
 //  - `force` replaces the title, skill, reads and models of every assistant with the files', as a new version.
-//    Adopted lessons are kept: a reseed never throws away what a person decided.
+//    Adopted lessons and the HQ Manager's notes at the end of the skill are kept: a reseed never throws away
+//    what a person or the manager decided (and every earlier version stays in the history).
 
 /** The part of a pg Client or Pool the seed needs. */
 export type Queryable = { query(text: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> };
@@ -60,7 +62,9 @@ export async function seedFromFiles(
       // null = another run created it a moment ago; leave that one as it is.
       if (version !== null) action = 'created';
     } else if (options.force) {
-      const version = await save(db, profile, current.version, current.lessons, 'reseeded from the files (--force)', { kind: 'reseed', from: current.version }, now);
+      // What the HQ Manager or the owner added (lessons, and the notes at the end of the skill) is kept.
+      const kept = managerNotes(current.skill);
+      const version = await save(db, { ...profile, skill: withManagerNotes(profile.skill, kept) }, current.version, current.lessons, 'reseeded from the files (--force)', { kind: 'reseed', from: current.version }, now);
       if (version !== null) action = 'reseeded';
     }
     current = await stored(db, id);

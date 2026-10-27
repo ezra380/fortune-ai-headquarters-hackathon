@@ -37,7 +37,7 @@ describe('the read-only profiles', () => {
     expect(profiles.finance.reads).toEqual(['get_finance_metrics', 'recall_my_decisions', 'my_lessons', 'latest_proposal', 'explain_proposal']);
     expect(profiles.online.reads).toEqual(['get_online_metrics', 'recall_my_decisions', 'my_lessons']);
     expect(profiles.salon.reads).toEqual(['get_salon_metrics', 'recall_my_decisions', 'my_lessons']);
-    expect(profiles.manager.reads).toEqual(['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal']);
+    expect(profiles.manager.reads).toEqual(['list_work_reports', 'list_session_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal']);
     expect(profiles.owner.writes).toEqual(['propose']);
     expect(profiles.finance.writes).toEqual(['propose', 'report']);
     expect(profiles.online.writes).toEqual(['propose', 'report']);

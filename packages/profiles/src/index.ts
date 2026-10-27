@@ -19,6 +19,7 @@ export type ModelSetting = { model: string; thinking: boolean; maxTokens: number
 export const READ_TOOL_NAMES = [
   'get_finance_metrics', 'get_online_metrics', 'get_salon_metrics', 'recall_my_decisions', 'recall_decisions', 'my_lessons',
   'list_lessons', 'get_timeline', 'list_work_reports', 'usage_summary', 'open_items', 'latest_proposal', 'explain_proposal',
+  'list_session_reports',
 ] as const;
 export type ReadToolName = (typeof READ_TOOL_NAMES)[number];
 
@@ -73,7 +74,7 @@ const SHAPES: Record<AssistantId, Shape> = {
   },
   manager: {
     id: 'manager', title: 'HQ Manager', serves: null, status: 'live',
-    reads: ['list_work_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal'],
+    reads: ['list_work_reports', 'list_session_reports', 'usage_summary', 'list_lessons', 'get_timeline', 'open_items', 'recall_decisions', 'explain_proposal'],
     writes: ['report'], jobs: ['code', 'answer', 'review'], memory: 'manager',
   },
 };
@@ -172,6 +173,8 @@ export function seedProfiles(db: Queryable, env: NodeJS.ProcessEnv, options: { f
 export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
 export type { ParsedProfileRows } from './rows.ts';
 export { DEFAULT_PROFILE_TTL_MS, skillWithLessons } from './source.ts';
+export { KIND_LABEL, MANAGER_NOTES_HEADING, MAX_LESSONS, MAX_MANAGER_NOTES, applyProfileChange, changeOf, checkChangeText, describeChange, managerNotes, withManagerNotes } from './changes.ts';
+export type { AppliedChange, ChangeOptions, ProfileChange, ProfileContent } from './changes.ts';
 export type { ProfileSnapshot, ProfileSource, ProfileSourceOptions } from './source.ts';
 export { canonicalJson } from './seed.ts';
 export type { Queryable, SeedAction, SeedResult } from './seed.ts';

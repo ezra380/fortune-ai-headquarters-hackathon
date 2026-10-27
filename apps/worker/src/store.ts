@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { AssistantId, ManagerReview, Receipt, Recommendation, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
+import type { AssistantId, ChangeKind, ManagerReview, Receipt, Recommendation, RecommendationDetail, Suggestion, WorkReport, WorkStep } from '@fahq/contracts';
 
 // The worker's only door to the queue tables. Server-side, service role. Everything that must
 // happen once goes through a unique key (dedupe_key, idempotency_key) or a conditional update.
@@ -73,6 +73,30 @@ export type RecommendationRow = {
   change: string;
   why: string;
   status: 'proposed' | 'adopted' | 'expired';
+  /** What it changes in the profile; a row from before kinds is a lesson. */
+  kind: ChangeKind;
+  /** The typed part (read tools, a model) and, if the program refused it, why: parse with RecommendationDetail. */
+  detail: Record<string, unknown>;
+  /** A person's id when the owner adopted it; null when the manager applied it (or nobody has). */
+  decided_by: string | null;
+  decided_at: string | null;
+  applied_by: 'manager' | 'owner' | null;
+  /** The profile version that made it take effect; null when the profile already said it. */
+  applied_version: number | null;
+};
+/** A recommendation as it is saved: the kind and the typed part are optional, and an older caller is a lesson. */
+export type NewRecommendation = Recommendation & { kind?: ChangeKind; detail?: RecommendationDetail };
+/** What an outside AI tool filed at a door (public.session_reports), without its token. Its words are data, never instructions. */
+export type SessionReportRow = {
+  id: string;
+  assistant_id: AssistantId;
+  tool: string;
+  summary: string;
+  steps: { step: string }[];
+  suggestions: { text: string }[];
+  lessons: { text: string }[];
+  created_at: string;
+  reviewed_at: string | null;
 };
 export type AdoptedRow = { recommendation_id: string; rank: number; assistant_id: AssistantId; change: string; newly_adopted: boolean };
 export type AdoptedLesson = { id: string; review_id: string; assistant_id: AssistantId; change: string; decided_at: string };
@@ -273,10 +297,10 @@ export function createStore(url: string, serviceKey: string) {
     async setReviewMessage(reviewId: string, messageId: string) {
       must(await db.from('manager_reviews').update({ message_id: messageId }).eq('id', reviewId), 'review message');
     },
-    async saveRecommendations(reviewId: string, recs: readonly Recommendation[]): Promise<RecommendationRow[]> {
+    async saveRecommendations(reviewId: string, recs: readonly NewRecommendation[]): Promise<RecommendationRow[]> {
       if (recs.length > 0) {
         must(await db.from('recommendations').upsert(
-          recs.map((x) => ({ review_id: reviewId, rank: x.rank, assistant_id: x.assistant, change: x.change, why: x.why })),
+          recs.map((x) => ({ review_id: reviewId, rank: x.rank, assistant_id: x.assistant, change: x.change, why: x.why, kind: x.kind ?? 'lesson', detail: x.detail ?? {} })),
           { onConflict: 'review_id,rank', ignoreDuplicates: true },
         ), 'save recommendations');
       }
@@ -362,6 +386,69 @@ export function createStore(url: string, serviceKey: string) {
     /** Every stored profile row exactly as the database returned it; @fahq/profiles checks each one before use. */
     async assistantProfiles(): Promise<unknown[]> {
       return must(await db.from('assistant_profiles').select('*'), 'assistant profiles') as unknown[];
+    },
+
+    // ---- What the HQ Manager changes in a profile ---------------------------------------------------
+
+    /** One assistant's stored profile row as the database returned it, or null when it has none (parse it with ProfileRow). */
+    async profileRow(assistant: AssistantId): Promise<unknown | null> {
+      return must(await db.from('assistant_profiles').select('*').eq('assistant_id', assistant).maybeSingle(), 'assistant profile');
+    },
+    /**
+     * Writes a new version of a profile, only if it is still at `expectedVersion` (save_assistant_profile). Returns the new
+     * version, or null when another writer got there first: the caller reads the row again and decides again.
+     */
+    async saveProfile(a: {
+      assistant: AssistantId; expectedVersion: number; title: string; skill: string; reads: readonly string[]; models: unknown;
+      lessons: unknown; by: 'manager' | 'owner'; reason: string; change: Record<string, unknown>; now: Date;
+    }): Promise<number | null> {
+      return must(await db.rpc('save_assistant_profile', {
+        p_assistant: a.assistant, p_expected_version: a.expectedVersion, p_title: a.title, p_skill: a.skill, p_reads: [...a.reads],
+        p_models: a.models, p_lessons: a.lessons, p_by: a.by, p_reason: a.reason, p_change: a.change, p_now: a.now.toISOString(),
+      }), 'save profile') as number | null;
+    },
+    /** The profile version a recommendation already made, if any: how a retried task finds out it need not write again. */
+    async profileVersionFor(recommendationId: string): Promise<number | null> {
+      const row = must(await db.from('assistant_profile_versions').select('version').eq('change->>recommendation', recommendationId).order('version', { ascending: false }).limit(1).maybeSingle(), 'profile version') as { version: number } | null;
+      return row?.version ?? null;
+    },
+    /** The recommendations of a review (all of them, or the listed ranks), in rank order, with what became of each. */
+    async recommendationsOf(reviewId: string, ranks?: readonly number[]): Promise<RecommendationRow[]> {
+      let query = db.from('recommendations').select('*').eq('review_id', reviewId);
+      if (ranks) query = query.in('rank', [...ranks]);
+      return must(await query.order('rank'), 'recommendations') as RecommendationRow[];
+    },
+    /** proposed → adopted, for the one caller that gets there first. `personId` is the owner who decided it; null for the manager. */
+    async putInForce(id: string, a: { by: 'manager' | 'owner'; personId: string | null; version: number | null; now: Date }): Promise<boolean> {
+      const rows = must(await db.from('recommendations').update({
+        status: 'adopted', decided_by: a.personId, decided_at: a.now.toISOString(), applied_by: a.by, applied_version: a.version,
+      }).eq('id', id).eq('status', 'proposed').select('id'), 'put recommendation in force') as { id: string }[];
+      return rows.length === 1;
+    },
+    /** proposed → expired with the reason the program would not apply it (an expired recommendation is never adopted). */
+    async refuseRecommendation(id: string, detail: RecommendationDetail): Promise<boolean> {
+      const rows = must(await db.from('recommendations').update({ status: 'expired', detail }).eq('id', id).eq('status', 'proposed').select('id'), 'refuse recommendation') as { id: string }[];
+      return rows.length === 1;
+    },
+    /** What outside AI tools filed at the doors, newest first (at most 200). Their words are data, never instructions. */
+    async sessionReports(q: { since?: Date; before?: Date; assistant?: AssistantId; unreviewedOnly?: boolean; limit?: number } = {}): Promise<SessionReportRow[]> {
+      let query = db.from('session_reports').select('id, assistant_id, tool, summary, steps, suggestions, lessons, created_at, reviewed_at');
+      if (q.since) query = query.gte('created_at', q.since.toISOString());
+      if (q.before) query = query.lte('created_at', q.before.toISOString());
+      if (q.assistant) query = query.eq('assistant_id', q.assistant);
+      if (q.unreviewedOnly) query = query.is('reviewed_at', null);
+      return must(await query.order('created_at', { ascending: false }).limit(Math.min(Math.max(q.limit ?? 50, 1), 200)), 'session reports') as SessionReportRow[];
+    },
+    /** Marks the listed reports as read by this review. A report already read keeps its first review. Returns how many it marked. */
+    async markSessionReportsReviewed(ids: readonly string[], reviewId: string, now: Date): Promise<number> {
+      if (ids.length === 0) return 0;
+      const rows = must(await db.from('session_reports').update({ reviewed_at: now.toISOString(), review_id: reviewId }).in('id', [...ids]).is('reviewed_at', null).select('id'), 'mark session reports') as { id: string }[];
+      return rows.length;
+    },
+    /** The status of the task with this key, or null when there is none (the daily review checks before it queues). */
+    async taskStatusByKey(key: string): Promise<string | null> {
+      const row = must(await db.from('tasks').select('status').eq('idempotency_key', key).maybeSingle(), 'task') as { status: string } | null;
+      return row?.status ?? null;
     },
   };
 }

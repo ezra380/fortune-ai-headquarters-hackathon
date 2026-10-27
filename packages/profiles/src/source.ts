@@ -23,6 +23,8 @@ export type ProfileSourceOptions = {
   ttlMs?: number;
   /** Told once about each problem (a refused row, an unreadable table). Default: stderr. */
   onProblem?: (message: string) => void;
+  /** Called with the profiles after every successful read, e.g. to keep a cache in step. A throw is reported, never fatal. */
+  onLoaded?: (profiles: Readonly<Record<AssistantId, AssistantProfile>>) => void;
 };
 
 export type ProfileSnapshot = { fromDatabase: AssistantId[]; fromFiles: AssistantId[]; problems: string[] };
@@ -95,6 +97,11 @@ export function buildProfileSource(options: ProfileSourceOptions): ProfileSource
     loadedAt = checkedAt = options.now();
     lastError = null;
     announce(problems);
+    try {
+      options.onLoaded?.(next);
+    } catch (error) {
+      report(`a profile listener failed (${error instanceof Error && error.message ? error.message : 'unknown error'})`);
+    }
     return snapshot;
   }
 
