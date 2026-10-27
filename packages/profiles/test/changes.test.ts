@@ -152,6 +152,20 @@ describe('a lesson', () => {
     expect(must(applyProfileChange(content('finance'), lesson, options({ by: 'manager' }))).next.lessons.map((l) => l.by)).toEqual(['manager']);
   });
 
+  it('becomes the owner\'s when he adopts words the profile already holds as the manager\'s, and stays the manager\'s when the manager does', () => {
+    const lesson = { kind: 'lesson', text: 'Ask which month before answering.' } as const;
+    const managers = must(applyProfileChange(content('finance'), lesson, options({ by: 'manager' }))).next.lessons;
+    expect(managers.map((l) => l.by)).toEqual(['manager']);
+    const again = must(applyProfileChange(content('finance', { lessons: managers }), lesson, options({ by: 'manager', source: 'rec-2' })));
+    expect(again.changed).toBe(false);
+    const adopted = must(applyProfileChange(content('finance', { lessons: managers }), lesson, options({ by: 'owner', source: 'rec-2' })));
+    expect(adopted.changed).toBe(true); // a new version, so the lesson is shown as his word
+    expect(adopted.next.lessons).toEqual([{ ...managers[0], by: 'owner' }]);
+    expect(managers[0]!.by).toBe('manager'); // the profile that was passed in is not changed
+    const once = must(applyProfileChange(content('finance', { lessons: adopted.next.lessons }), lesson, options({ by: 'owner', source: 'rec-3' })));
+    expect(once.changed).toBe(false);
+  });
+
   it('is added once: the same words, or the same recommendation again, change nothing', () => {
     const first = must(applyProfileChange(content('finance'), { kind: 'lesson', text: 'Ask which month before answering.' }, options()));
     const row = content('finance', { lessons: first.next.lessons });

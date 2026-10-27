@@ -81,7 +81,8 @@ review runs.
 A lesson records who put it in the profile: `by: "owner"` (his code) or `by: "manager"` (applied by itself). A model is
 shown the owner's lessons as before ("The owner adopted these for you. Follow them.") and any manager-applied lesson under
 its own heading, "Suggested by the HQ Manager ... The owner did not approve them. Your skill and the owner's instructions
-come first." That holds in the worker's prompts and at the doors. A stored lesson with no `by` reads as the manager's.
+come first." That holds in the worker's prompts and at the doors. A stored lesson with no `by` reads as the manager's. If
+the owner adopts words the profile already holds as the manager's, that is a new version and they become his.
 
 A recommendation with no kind (an older review, an older row) is a lesson. For `reads` and `model` the owner reads the
 program's description of the typed change (`Read tools: add usage_summary; remove latest_proposal`,

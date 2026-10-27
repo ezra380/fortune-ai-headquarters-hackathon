@@ -186,8 +186,12 @@ function applyModel(row: ProfileContent, change: Extract<ProfileChange, { kind: 
 }
 
 function applyLesson(row: ProfileContent, text: string, options: ChangeOptions): AppliedChange {
-  const same = row.lessons.some((l) => l.source === options.source || normalized(l.text) === normalized(text));
-  if (same) return { ok: true, changed: false, next: { title: row.title, skill: row.skill, reads: row.reads, models: row.models, lessons: row.lessons }, dropped: [] };
+  const same = row.lessons.find((l) => l.source === options.source || normalized(l.text) === normalized(text));
+  if (same) {
+    // The owner adopting words the profile already holds as the manager's makes them his: they are shown as his word from now on.
+    const lessons = options.by === 'owner' && same.by !== 'owner' ? row.lessons.map((l) => (l === same ? { ...l, by: 'owner' as const } : l)) : row.lessons;
+    return { ok: true, changed: lessons !== row.lessons, next: { title: row.title, skill: row.skill, reads: row.reads, models: row.models, lessons }, dropped: [] };
+  }
   const lesson: ProfileLesson = { text, source: options.source.slice(0, 100), adoptedAt: options.now.toISOString(), by: options.by };
   const all = [...row.lessons, lesson];
   const dropped = all.slice(0, Math.max(0, all.length - MAX_LESSONS)).map((l) => l.text);

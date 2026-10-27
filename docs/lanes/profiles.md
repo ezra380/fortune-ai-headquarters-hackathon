@@ -328,7 +328,8 @@ fails without it. Where a finding says "add a test", the test is named.
    `skillWithLessons` shows the owner's lessons as before and the manager's under "Suggested by the HQ Manager ... The owner did not
    approve them. Your skill and the owner's instructions come first.", in the worker and at a door (`doorSkill`). The comment that said
    all lessons are adopted by a code is corrected. Tests: `db-source.test.ts` (the wording for both kinds, mixed, newest ten across
-   both, no `by`), `door.test.ts`, `doors.test.ts` (the MCP prompt), `changes.test.ts` ("records who applied it"),
+   both, no `by`), `door.test.ts`, `doors.test.ts` (the MCP prompt), `changes.test.ts` ("records who applied it", and "becomes the
+   owner's when he adopts words the profile already holds as the manager's": a new version, so they are shown as his),
    `manager-decides.test.ts` ("reach the next Code Mode answer ... under the right heading when the owner adopted / the HQ Manager
    applied by itself them").
 3. **Major: the H-MEM lesson cache only grew.** The cache is now two-way. `AssistantMemory.rememberLesson` takes `fromProfile` (tagged
@@ -397,6 +398,19 @@ fails without it. Where a finding says "add a test", the test is named.
     reports old and unreadable, the three phone formats). **Still not proven:** one successful `saveProfile` through PostgREST on the
     shared stack (a profile version can never be taken back there); the write itself is proven on throwaway databases and the store's
     call shape on the real one, as before.
+
+### Proof
+
+- `npm run typecheck` clean; `npm test` **48 files, 884 tests green** (was 45 files, 785): run when no other lane had a test run going.
+  Three earlier full runs, made while another lane (`fahq-div-data`, `chain.test.ts`) was testing on the same local stack, failed in
+  `manager.test.ts`, `manager-decides.test.ts`, `departments.test.ts` and `db.test.ts` "task lease renewal" (each of which cancels every
+  queued task in the shared database in its `beforeEach`, so a second runner takes the first one's tasks); the same files pass alone
+  and in a quiet full run. This is the interference slice 1's notes already named; it is worth a lock if lanes keep testing at once.
+- Every fix was checked the other way: 16 mutations (the table back to "manager applies", the lesson headings ignoring `by`, the
+  cache never taking back, the old phone pattern in the rules and in the migration, door items taking any key, the reseed dropping the
+  owner's choices, counting unreadable and old reports as work, not closing old reports, marking every returned report, no per-door
+  scope, a forced read returning the old one, http to any host, no health words, the old failure text, a lesson recorded as the
+  manager's on ADOPT) each made at least one test fail and were put back.
 
 ### What the merge must know
 
