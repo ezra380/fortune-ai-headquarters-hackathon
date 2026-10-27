@@ -280,6 +280,10 @@ revoke all on all sequences in schema public from anon, authenticated;
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 
+-- The worker and the scripts use the service role: say what it may do here rather than rely on the stack's defaults.
+grant select, insert, update, delete on public.assistant_profiles, public.door_tokens, public.session_reports to service_role;
+grant select, insert on public.assistant_profile_versions to service_role;
+grant usage on sequence public.assistant_profile_versions_id_seq to service_role;
 -- A version is never changed or removed, not even by the service role (the trigger holds for everyone else).
 revoke update, delete, truncate on public.assistant_profile_versions from service_role;
 

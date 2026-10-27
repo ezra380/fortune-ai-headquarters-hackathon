@@ -423,10 +423,12 @@ describe('profile writes (a throwaway database built from the real migration fil
       const target = new URL(url);
       target.pathname = `/${scratchName}`;
       scratch = new pg.Pool({ connectionString: target.toString(), max: 4 });
-      // Only what the migration expects to find already there; the migration file itself runs unchanged.
+      // Only what the migration expects to find already there (including Supabase's default grants to the Data API
+      // roles, which the migration takes back); the migration file itself runs unchanged.
       await scratch.query(`
         create schema extensions;
         create extension pgcrypto with schema extensions;
+        alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
         create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
         create table public.assistants (id public.assistant_id primary key);
         insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
@@ -507,6 +509,34 @@ describe('profile writes (a throwaway database built from the real migration fil
     expect((await versionsOf('manager')).map((v) => v.version)).toEqual([1, 2, 3]);
   });
 
+  it('can be called by the service role (the worker) and by nobody else', async ({ skip }) => {
+    if (!scratchName) skip();
+    const call = (role: string) => `set local role ${role}; select public.save_assistant_profile('finance', null, 'T', repeat('x', 50), '{}', '{}', '[]', 'owner', 'r')`;
+    const client = await scratch.connect();
+    try {
+      for (const role of ['anon', 'authenticated']) {
+        await client.query('begin');
+        await expect(client.query(call(role)), role).rejects.toThrow(/permission denied for function save_assistant_profile/);
+        await client.query('rollback');
+      }
+      await client.query('begin');
+      const results = await client.query(call('service_role'));
+      expect((results as unknown as { rows: Record<string, unknown>[] }[])[1]!.rows[0]!.save_assistant_profile).toBe(1);
+      await client.query('rollback');
+    } finally {
+      await client.query('rollback').catch(() => undefined);
+      client.release();
+    }
+  });
+
+  it('masks every string and key in a JSON value, in order, and leaves numbers, booleans and nulls alone', async ({ skip }) => {
+    if (!scratchName) skip();
+    const input = { 'call +15551234567': [3, 'b 123456', null, true, { '917-555-0123': 1.5, keep: 'ok 12345' }], list: ['a', 'b', 'c'] };
+    const { rows } = await scratch.query('select public.redact_json($1::jsonb) as v', [JSON.stringify(input)]);
+    expect(rows[0].v).toEqual({ 'call [phone]': [3, 'b [code]', null, true, { '[phone]': 1.5, keep: 'ok 12345' }], list: ['a', 'b', 'c'] });
+    expect((await scratch.query(`select public.redact_json('"plain"') as v, public.redact_json('[]') as e, public.redact_json('{}') as o`)).rows[0]).toEqual({ v: 'plain', e: [], o: {} });
+  });
+
   it('keeps the history append-only on a database that has committed versions', async ({ skip }) => {
     if (!scratchName) skip();
     await expect(scratch.query(`update public.assistant_profile_versions set reason = 'edited'`)).rejects.toThrow('append-only');
@@ -533,6 +563,7 @@ describe('seeding profiles (a second throwaway database)', () => {
       await scratch.query(`
         create schema extensions;
         create extension pgcrypto with schema extensions;
+        alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
         create type public.assistant_id as enum ('owner', 'finance', 'salon', 'online', 'manager');
         create table public.assistants (id public.assistant_id primary key);
         insert into public.assistants values ('owner'), ('finance'), ('salon'), ('online'), ('manager');`);
