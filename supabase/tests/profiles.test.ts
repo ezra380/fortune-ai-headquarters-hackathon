@@ -6,7 +6,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AssistantId } from '@fahq/contracts';
-import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, loadProfiles, newDoorToken, parseProfileRows, seedProfiles, tokenHash } from '@fahq/profiles';
+import { READ_TOOL_NAMES, canonicalJson, createProfileSource, issueDoorToken, loadProfiles, managerNotes, newDoorToken, parseProfileRows, restoreProfileVersion, seedProfiles, tokenHash, withManagerNotes } from '@fahq/profiles';
 
 // Profiles in the database, the two doors an outside tool may call, and what the public (anon) role can reach.
 // Real Postgres and the real Data API (local Supabase: npm run db:start); nothing is mocked.
@@ -708,5 +708,124 @@ describe('seeding profiles (a second throwaway database)', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }, 120_000);
+
+  it('--force also keeps the notes the HQ Manager added at the end of a skill (they are the manager\'s decision, not the files\')', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const row = (await scratch.query(`select version, skill, reads, models, lessons from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
+    await scratch.query(
+      `select public.save_assistant_profile('finance', $1, 'Finance Department', $2, $3::text[], $4::jsonb, $5::jsonb, 'manager', 'a skill note', '{"kind":"skill_note"}')`,
+      [row.version, withManagerNotes(row.skill, ['Name the month.', 'Say the return with the spend.']), row.reads, JSON.stringify(row.models), JSON.stringify(row.lessons)],
+    );
+    const before = await versionCount();
+    const results = await seedProfiles(scratch, {}, { force: true });
+    expect(await versionCount()).toBe(before + 5);
+    const finance = (await scratch.query(`select skill from public.assistant_profiles where assistant_id = 'finance'`)).rows[0];
+    expect(finance.skill).toBe(withManagerNotes(files.finance.skill, ['Name the month.', 'Say the return with the spend.']));
+    expect(managerNotes(finance.skill)).toEqual(['Name the month.', 'Say the return with the spend.']);
+    expect(results.find((r) => r.assistant === 'finance')).toMatchObject({ action: 'reseeded', differsFromFiles: true }); // it says the row has more than the files
+    expect(results.filter((r) => r.assistant !== 'finance').every((r) => !r.differsFromFiles)).toBe(true);
+    // The version before the reseed is still in the history, notes and all: the manager's notes can be read back from there too.
+    const history = (await scratch.query(`select snapshot from public.assistant_profile_versions where assistant_id = 'finance' order by version`)).rows;
+    expect(history.some((h) => managerNotes(h.snapshot.skill).length === 2)).toBe(true);
+    // And a reseed from the files of a profile with no notes writes none.
+    expect(managerNotes((await scratch.query(`select skill from public.assistant_profiles where assistant_id = 'online'`)).rows[0].skill)).toEqual([]);
+  });
+
+  // ---- Putting an earlier version back ---------------------------------------------------------------------
+
+  const onlineRow = async () => (await scratch.query(`select version, title, skill, reads, models, lessons from public.assistant_profiles where assistant_id = 'online'`)).rows[0];
+  const saveOnline = (expected: number, over: { skill?: string; reads?: string[]; lessons?: unknown[]; by?: string; reason?: string }) =>
+    scratch.query(
+      `select public.save_assistant_profile('online', $1::integer, 'Online Customer Service', $2, $3::text[], $4::jsonb, $5::jsonb, $6, $7, '{"kind":"test"}') as v`,
+      [expected, over.skill ?? files.online.skill, over.reads ?? [...files.online.reads], JSON.stringify(files.online.models), JSON.stringify(over.lessons ?? []), over.by ?? 'manager', over.reason ?? 'a test change'],
+    ).then((r) => r.rows[0].v as number | null);
+
+  it('puts an earlier version back as a new version: the change is undone, and nothing in the history is touched', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const before = await onlineRow();
+    const lesson = { text: 'Say which month.', source: 'rec-9', adoptedAt: '2026-10-27T09:00:00Z' };
+    const changed = await saveOnline(before.version, { skill: withManagerNotes(before.skill, ['Name the month.']), reads: [...before.reads, 'usage_summary'], lessons: [lesson], by: 'manager' });
+    expect(changed).toBe(before.version + 1);
+    const history = async () => (await scratch.query(`select version, made_by, reason, change, snapshot from public.assistant_profile_versions where assistant_id = 'online' order by version`)).rows;
+    const kept = await history();
+
+    const done = await restoreProfileVersion(scratch, 'online', before.version, { now: new Date('2026-10-27T15:00:00Z') });
+    expect(done).toEqual({ assistant: 'online', restored: before.version, replaced: before.version + 1, version: before.version + 2 });
+    const now = await onlineRow();
+    expect(now).toMatchObject({ version: before.version + 2, title: before.title, skill: before.skill, reads: before.reads, lessons: before.lessons });
+    expect(canonicalJson(now.models)).toBe(canonicalJson(before.models));
+    const after = await history();
+    expect(after).toHaveLength(kept.length + 1);
+    expect(after.slice(0, kept.length)).toEqual(kept); // every earlier version is exactly as it was, the manager's change included
+    expect(after.at(-1)).toMatchObject({ version: before.version + 2, made_by: 'owner', reason: `put back version ${before.version}`, change: { kind: 'restore', restored: before.version, from: before.version + 1 } });
+    expect(managerNotes(after[kept.length - 1].snapshot.skill)).toEqual(['Name the month.']);
+    // ...so the undo can be undone: the manager's version can be put back in the same way.
+    const redo = await restoreProfileVersion(scratch, 'online', before.version + 1);
+    expect(redo.version).toBe(before.version + 3);
+    expect(managerNotes((await onlineRow()).skill)).toEqual(['Name the month.']);
+  });
+
+  it('refuses, in plain words and writing nothing, a version that is not there, one that is not a version number, and a profile that is not stored', async ({ skip }) => {
+    if (!scratchName) skip();
+    await seedProfiles(scratch, {});
+    const before = await versionCount();
+    await expect(restoreProfileVersion(scratch, 'online', 9999)).rejects.toThrow('the online profile has no version 9999');
+    for (const bad of [0, -1, 1.5, Number.NaN]) await expect(restoreProfileVersion(scratch, 'online', bad)).rejects.toThrow('the version to put back must be a whole number from 1');
+    await expect(restoreProfileVersion(scratch, 'nobody' as never, 1)).rejects.toThrow('"nobody" is not an assistant');
+    await scratch.query(`delete from public.assistant_profiles where assistant_id = 'salon'`);
+    await expect(restoreProfileVersion(scratch, 'salon', 1)).rejects.toThrow('the salon profile is not stored, so there is nothing to put back');
+    await seedProfiles(scratch, {}); // salon again
+    expect(await versionCount()).toBe(before + 1);
+  });
+
+  it('refuses a version the rules would not accept today (a read tool that no longer exists), and one changed while it was being put back', async ({ skip }) => {
+    if (!scratchName) skip();
+    const row = await onlineRow();
+    const gone = await saveOnline(row.version, { reads: ['get_online_metrics', 'a_tool_that_was_removed'], reason: 'an old profile' });
+    const fine = await saveOnline(gone!, {});
+    await expect(restoreProfileVersion(scratch, 'online', gone!)).rejects.toThrow(`version ${gone} of the online profile would not be accepted today: it reads "a_tool_that_was_removed", which is not a read tool`);
+    expect((await onlineRow()).version).toBe(fine);
+
+    // Another writer saves between the moment the current version is read and the moment the old one is written back.
+    const racing = {
+      query: async (text: string, params?: unknown[]) => {
+        const result = await scratch.query(text, params);
+        if (text.startsWith('select version from public.assistant_profiles')) await saveOnline(result.rows[0]!.version as number, { reason: 'someone else, at the same moment' });
+        return result;
+      },
+    };
+    const versions = await versionCount();
+    await expect(restoreProfileVersion(racing, 'online', row.version)).rejects.toThrow(`the online profile changed while version ${row.version} was being put back; run it again`);
+    expect(await versionCount()).toBe(versions + 1); // only the other writer's version
+  });
+
+  it('runs as revert-profile.ts: --list shows who made each version and why, and a number puts that version back', async ({ skip }) => {
+    if (!scratchName) skip();
+    const target = new URL(url);
+    target.pathname = `/${scratchName}`;
+    const repo = path.resolve(import.meta.dirname, '../..');
+    const run = (args: string[]) => spawnSync('npx', ['tsx', 'scripts/revert-profile.ts', ...args, '--db', target.toString()], { cwd: repo, encoding: 'utf8', timeout: 60_000 });
+    const listed = run(['finance', '--list']);
+    expect(listed.status, listed.stderr).toBe(0);
+    const lines = listed.stdout.trimEnd().split('\n');
+    expect(lines[0]).toMatch(/^ {2}1 {2}seed {5}\d{4}-\d\d-\d\dT.*seeded from the files/);
+    const noted = lines.find((l) => /manager {2}.* a skill note$/.test(l));
+    expect(noted).toBeDefined();
+    expect(listed.stderr).not.toContain(target.password);
+
+    const noteVersion = Number(noted!.trim().split(/\s+/)[0]);
+    const back = run(['finance', String(noteVersion)]);
+    expect(back.status, back.stderr).toBe(0);
+    expect(back.stdout).toMatch(new RegExp(`^finance version ${noteVersion} is back as version \\d+ \\(it replaced version \\d+\\)\\n$`));
+    expect(managerNotes((await scratch.query(`select skill from public.assistant_profiles where assistant_id = 'finance'`)).rows[0].skill)).toEqual(['Name the month.', 'Say the return with the spend.']);
+
+    const missing = run(['finance', '9999']);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('the finance profile has no version 9999. Nothing was written.');
+    expect(run(['nobody', '1']).status).toBe(2);
+    expect(run(['finance']).status).toBe(2);
   }, 120_000);
 });

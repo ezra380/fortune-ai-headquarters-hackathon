@@ -5,6 +5,7 @@ import { AssistantId, type ReadTool } from '@fahq/contracts';
 import type { ProfileLesson } from './rows.ts';
 import { buildProfileSource, type ProfileSource, type ProfileSourceOptions } from './source.ts';
 import { doorProfile } from './door.ts';
+import { restoreVersion, type RestoreResult } from './restore.ts';
 import { seedFromFiles, type Queryable, type SeedResult } from './seed.ts';
 
 // The assistants as data. Every assistant is read-only: its reads are a fixed list of tool names, and
@@ -170,6 +171,12 @@ export function seedProfiles(db: Queryable, env: NodeJS.ProcessEnv, options: { f
   return seedFromFiles(db, loadProfiles(env), options);
 }
 
+/** Puts an earlier version of a profile back as a new version (the history keeps every version). See restore.ts. */
+export function restoreProfileVersion(db: Queryable, assistant: AssistantId, version: number, options: { now?: Date } = {}): Promise<RestoreResult> {
+  return restoreVersion(db, assistant, version, { ...options, readNames: READ_TOOL_NAMES });
+}
+
+export type { RestoreResult } from './restore.ts';
 export { ProfileLesson as ProfileLessonSchema, ProfileRow, checkProfileRow, parseProfileRows } from './rows.ts';
 export type { ParsedProfileRows } from './rows.ts';
 export { DEFAULT_PROFILE_TTL_MS, skillWithLessons } from './source.ts';
